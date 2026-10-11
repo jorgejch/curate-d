@@ -7,6 +7,7 @@ configured and listed but not exercised: that needs a real token.
 
 import contextlib
 import hashlib
+import json
 import os
 from collections.abc import AsyncIterator
 from uuid import uuid4
@@ -22,6 +23,8 @@ from curate_d.placement.verification import Verdict, assess
 pytestmark = pytest.mark.integration
 
 _URL = os.environ.get("CURATE_D_TEST_RCLONE_URL", "http://127.0.0.1:5572")
+# Where the compose daemon keeps its config; the file must be encrypted at rest.
+_CONFIG_FILE = "/config/rclone/rclone.conf"
 
 
 @pytest.fixture
@@ -40,6 +43,32 @@ async def workspace(rclone: RcloneClient) -> AsyncIterator[str]:
     finally:
         with contextlib.suppress(RcloneError):
             await rclone.call("operations/purge", {"fs": "/", "remote": root})
+
+
+async def test_remote_tokens_are_stored_encrypted(rclone: RcloneClient) -> None:
+    """A configured remote's token never reaches the daemon's config file in plain text."""
+    name = f"curate-encrypted-{uuid4().hex[:8]}"
+    token = f"plaintext-probe-{uuid4().hex}"
+    try:
+        await rclone.ensure_remote(
+            name,
+            "pcloud",
+            {
+                "token": json.dumps({"access_token": token, "token_type": "bearer"}),
+                "hostname": "eapi.pcloud.com",
+            },
+        )
+        body = await rclone.call(
+            "core/command",
+            {"command": "cat", "arg": [_CONFIG_FILE], "returnType": "COMBINED_OUTPUT"},
+        )
+        stored = str(body["result"])
+        assert stored.startswith("# Encrypted rclone configuration File")
+        assert token not in stored
+        assert name not in stored
+    finally:
+        with contextlib.suppress(RcloneError):
+            await rclone.call("config/delete", {"name": name})
 
 
 async def test_the_daemon_answers_and_lists_a_configured_pcloud_remote(
