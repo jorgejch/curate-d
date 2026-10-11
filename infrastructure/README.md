@@ -150,6 +150,25 @@ uv run pytest tests/integration/test_staging_backend_checks.py -m integration --
   --staging-backend=rustfs
 ```
 
+## rclone remote config is encrypted
+
+The rclone sidecar keeps one remote per connected provider account, with the account's
+access token in its config file. The token is also stored encrypted in the ledger, so the
+config file is a second copy and is encrypted too, with `RCLONE_CONFIG_PASS`.
+
+Setting that variable alone does not do it: rclone encrypts a config only once the file
+was created through `rclone config encryption set`, which reads the password from stdin.
+The sidecar therefore starts through a small wrapper that runs that command when the file
+is missing or still plain text, refuses to start without a password, and then executes
+the daemon (see the `rclone` service in `compose.yaml`; a Kubernetes sidecar needs the
+same wrapper and the password from a Secret that only the sidecar mounts, so the worker
+container never sees it). Remotes are reconfigured from the ledger on first use, so a
+new password only needs a restart of the sidecar and an empty or plain config volume.
+`tests/integration/test_rclone.py` asserts the file on disk holds no plain token.
+
+The control API itself is unauthenticated and returns remotes decrypted (`config/dump`):
+keep it reachable only from the I/O worker.
+
 ## Deployment manifests
 
 The manifests live in a separate deployment repository, and so do the checks on them. This
