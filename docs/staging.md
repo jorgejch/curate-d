@@ -314,7 +314,6 @@ cleanly whether or not it denies anything.
 | Trap | What actually happens |
 | --- | --- |
 | `.env` and pytest | pytest does not load `.env`; `source` it before an OVH run. |
-| `verify-reader-denial.sh` under zsh | `${!v}` indirect expansion is a bashism. Run it with `bash`, never `zsh` or `source`. |
 | `ovhcloud cloud user s3-policy get` | Returns 404 "This service does not exist": it requests a `/v1/` path while the working endpoint is unversioned. Read policies through the raw OVH API. |
 | `s3:prefix` condition key | Unsupported by OVH. Provisioning tools may type `policy` as opaque JSON, so an unsupported `Condition` applies cleanly and is ignored at evaluation. This is why row 18 cannot be narrowed. |
 | Policy propagation | A policy change took about 3 minutes to take effect after the apply (row 20, 2026-09-26); a check run sooner reads the old policy. |
