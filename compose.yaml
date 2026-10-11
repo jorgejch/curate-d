@@ -186,8 +186,15 @@ services:
         : "$${RCLONE_CONFIG_PASS:?set RCLONE_CONFIG_PASS}"
         config=/config/rclone/rclone.conf
         if ! head -c 40 "$$config" 2>/dev/null | grep -q '^# Encrypted rclone'; then
-          printf '%s\n%s\n' "$$RCLONE_CONFIG_PASS" "$$RCLONE_CONFIG_PASS" |
-            rclone --config "$$config" config encryption set > /dev/null
+          # The command prompts on stderr even when stdin supplies the password, so its
+          # output is kept and shown only if the check below fails.
+          out=$$(printf '%s\n%s\n' "$$RCLONE_CONFIG_PASS" "$$RCLONE_CONFIG_PASS" |
+            rclone --config "$$config" config encryption set 2>&1) || true
+        fi
+        if ! head -c 40 "$$config" 2>/dev/null | grep -q '^# Encrypted rclone'; then
+          echo "refusing to start: the rclone config is not encrypted" >&2
+          echo "$$out" >&2
+          exit 1
         fi
         exec rclone "$$@"
       - rclone
