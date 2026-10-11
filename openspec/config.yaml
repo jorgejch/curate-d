@@ -1,0 +1,146 @@
+schema: spec-driven
+
+# Project context (optional)
+# This is shown to AI when creating artifacts.
+# Add your tech stack, conventions, style guides, domain knowledge, etc.
+# Example:
+#   context: |
+#     Tech stack: TypeScript, React, Node.js
+#     We use conventional commits
+#     Domain: e-commerce platform
+context: |
+  ## Project
+
+  **Curate.d** ingests files and media from multiple cloud storage and photo providers,
+  classifies them by content and context, and files them into a consistent naming and
+  folder structure on a target cloud, running autonomously without per-file human approval.
+
+  Because it runs unattended on data whose originals may eventually be released, prefer
+  explicit failure and quarantine over inference whenever a value is uncertain: a stalled
+  file is recoverable, a confidently misfiled one is not.
+
+  ## Tech Stack
+
+  Versions verified current as of 2026-09-06. Target the stated minor; patch level is free.
+
+  ### Application
+  - **Python 3.12** - single backend application, deployed as separate I/O-bound and CPU-bound worker profiles
+  - **DBOS 3.2** - durable execution as a library, not a service. Every in-workflow ledger write MUST go through an `AsyncSQLAlchemyDatasource` transaction targeting the ledger database: the datasource commits its tracking record alongside the row, which is what makes the write exactly-once on replay. A raw database call from a workflow is not tracked and will re-execute.
+    DBOS's own tables (workflow checkpoints, queue config, version registration) live in the ledger database, in the `dbos` schema; separating them is not supported. That co-location is not the source of the exactly-once guarantee, but it is what makes one dump the whole state, and it keeps a ledger write and a workflow enqueue able to commit in one transaction (unused today; the executor management layer of #5 may need it).
+    Prefer per-worker concurrency limits over global ones: pending workflows from previous application versions count toward a global limit.
+
+  ### Data
+  - **PostgreSQL 18.6** - ledger, work queue, DBOS system store, and audit log in one instance
+  - **PostGIS 3.6** - DEFERRED. Meant for space-and-time clustering of geotagged media into trip groupings; clustering runs in pure Python today (`classification/clustering.py`), and the extension is created but unused.
+  - **pg_trgm** (ships with PostgreSQL) - DEFERRED. Meant for fuzzy filename matching to associate sidecar files with their media; sidecar association is not built, and the extension is created but unused.
+  - **pgvector 0.8** - DEFERRED. Only needed for embedding-based semantic search; perceptual hashing covers deduplication without it.
+
+  ### Staging
+  - **S3 content staging** between the I/O and CPU worker profiles, through `aioboto3` 15.5: RustFS 1.0 locally and in CI, private OVH Standard S3 buckets in the Kubernetes dev and prod environments. Contract: `openspec/specs/content-staging/spec.md`.
+
+  ### Transfer
+  - **rclone 1.75** - run as an `rcd` daemon sidecar, driven over its remote-control API. Issue one `operations/copyfile` per placement; never `sync/copy` over a tree, which collapses per-file verification and audit.
+
+  ### Inference
+  - All local inference is CPU-only.
+  - **OpenRouter** (model TBD) - top classification tier, called with structured output against a fixed schema
+  - **ONNX Runtime 1.29** - DEFERRED with semantic search. When enabled, pin inference thread counts to 1 and express parallelism at the queue level.
+
+  ### Infrastructure
+  - **Kubernetes**
+  - **FluxCD** (GitOps) - reconciliation.
+
+  ### Deferred to follow-on changes
+  - **TypeScript / React** - web interface. The control plane ships as an HTTP API first.
+
+  ## Standards
+  - **Versioning**: Semantic Versioning (SemVer: `vMAJOR.MINOR.PATCH`)
+  - **Git Commits**: Conventional Commits (`feat:`, `fix:`, `chore:`, `refactor:`, `docs:`)
+
+  ## Coding & Documentation Conventions
+  
+  ### 1. Comment "Why", Not "What"
+  - Do not restate what the code clearly does. Explain the rationale, non-obvious constraints, business rules, or external bug workarounds.
+  - Good:
+    // Sync ceiling capped at 4MB to stay within Cloudflare Workers stream limit.
+    const CHUNK_SIZE = 4 * 1024 * 1024;
+  - Bad:
+    // Set chunk size to 4MB
+    const CHUNK_SIZE = 4 * 1024 * 1024;
+  
+  ### 2. Examples Over Prose
+  - Prefer a 2-line minimal code/usage example with a one-sentence caption over explanatory paragraphs.
+  - Keep docstrings and specs concise, concrete, and scan-friendly.
+  
+  ### 3. Self-Documenting Structure First
+  - Express intent through precise naming and strict typing before reaching for comments.
+  - If a function needs a paragraph to explain what it does, refactor it into smaller, well-named units.
+  
+  ### 4. Atomic Scope & Zero "Drive-By" Refactoring
+  - Touch only the files and functions specified in the current change proposal (`tasks.md`).
+  - Do not reformat, reorder imports, or "clean up" adjacent code unrelated to the task.
+  
+  ### 5. Explicit, Context-Rich Error Handling
+  - Never swallow errors or return bare generic exceptions.
+  - Always wrap errors with context: what operation failed, on what resource/path, and why.
+  - Good: `return fmt.Errorf("hashing file %q failed: %w", filePath, err)`
+  - Bad: `return fmt.Errorf("error: %w", err)`
+  
+  ### 6. Idempotency & Reversibility Invariant
+  - Every file transfer, rename, or state transition must be safe to retry without duplicating work or corrupting state.
+  - Implement a `Copy -> Checksum Verify -> Register` flow before modifying any source.
+  
+  ### 7. Contract-First Typing
+  - Define data structures, DTOs, and interfaces before implementing business logic.
+  - Disallow loose/untyped types (`any`, generic `dict`/`map[string]interface{}` without schema).
+
+  ### 8. Isolated Unit Tests Are the Minimum
+  - Every unit of behavior MUST have an isolated unit test: no database, no network, no filesystem, no rclone, no model calls. Collaborators are substituted at the boundary.
+  - Target 80% line coverage **from isolated unit tests alone**. Integration tests are additional assurance and do not count toward that number - they are slower, flakier, and cannot be relied on to characterize edge cases.
+  - Coverage is a floor, not a goal. Hitting 80% by exercising happy paths misses the point: the failure branches are what this system is for. Prefer a test that pins down one failure mode over three that re-cover the same success path.
+  - Design for testability rather than reaching for heavier fakes. If a function can only be tested with a live database, that is a signal to separate the decision from the I/O that carries it out.
+
+  ### 9. A Test Is Not Written Until It Has Been Run Green
+  - The unit of work is not "code plus a test file". It is this loop, run to completion before moving on:
+    ```
+    test = create_test()
+    result = run(test)
+
+    while !result:
+      fix_issues()
+      result = run(test)
+    ```
+  - Writing a test and not executing it produces no evidence of anything. Lint and type checks passing is not the loop exiting; only the test run is.
+  - Never start the next unit of work on a red suite. A failure carried forward gets attributed to whatever was written after it, and the cost of finding it multiplies.
+  - `fix_issues()` means fixing the code or the test, whichever is actually wrong. It never means deleting the assertion, loosening it until it passes, or marking the test skipped.
+  - Run the whole unit suite, not just the new test. A change that fixes one behavior and breaks another has not passed.
+
+rules:
+  specs:
+    - "Write requirements in atomic, testable GIVEN/WHEN/THEN or RFC 2119 (MUST/SHALL) statements."
+    - "Every requirement must specify expected behavior on failure, not just the happy path."
+  tasks:
+    - "Every implementation task must include an automated test or concrete verification command."
+    - "Keep tasks atomic: one logical commit per task."
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing

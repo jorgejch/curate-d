@@ -1,0 +1,184 @@
+[project]
+name = "curate-d"
+version = "0.1.0"
+description = "Autonomous multi-cloud file and media organizer with a zero-data-loss guarantee"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [
+    { name = "Jorge", email = "jorgejch@gmail.com" }
+]
+requires-python = ">=3.12"
+keywords = [
+    "cloud-storage",
+    "file-organization",
+    "photo-management",
+    "durable-execution",
+    "rclone",
+    "pcloud",
+]
+classifiers = [
+    "Private :: Do Not Upload",
+    "Development Status :: 1 - Planning",
+    "Environment :: No Input/Output (Daemon)",
+    "Intended Audience :: System Administrators",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Archiving",
+    "Topic :: System :: Filesystems",
+    "Typing :: Typed",
+]
+
+dependencies = [
+    # Durable execution. Brings sqlalchemy[asyncio] and psycopg[binary] with it;
+    # both are declared explicitly below because we import and configure them directly.
+    "dbos~=3.2.0",
+    "sqlalchemy~=2.1.1",
+    "psycopg[binary]~=3.3.6",
+    "alembic~=1.20",
+    # Control plane API
+    "fastapi==0.142.2",
+    "uvicorn[standard]~=0.54.0",
+    "pydantic~=2.13",
+    "pydantic-settings~=2.15",
+    # Provider APIs and the rclone remote-control API
+    "httpx~=0.28",
+    # Authenticated symmetric encryption for stored provider credentials
+    "cryptography==50.0.2",
+    # Structured logging with credential redaction
+    "structlog~=26.1",
+    # Request tracing for the control plane API, exported to Logfire when a token is present
+    "logfire[fastapi]~=5.1",
+    # Media inspection and perceptual fingerprinting
+    "pillow~=12.3",
+    "pillow-heif~=1.8.0",   # HEIC/HEIF, the default format for Apple photo libraries
+    "imagehash~=4.3",
+    "numpy~=2.5",
+    # Document text extraction for the local classification tier
+    "pypdf~=6.19.0",
+    "pytesseract~=0.3.13", # requires the tesseract binary on PATH
+    # Remote classification tier. OpenRouter exposes an OpenAI-compatible API,
+    # so the model is selected by configuration rather than by client choice.
+    "openai==3.22.1",
+    # openai 3.x runs on httpx2 rather than httpx; imported directly to inject a transport.
+    "httpx2~=2.13",
+    # S3 content staging: RustFS locally, OVH Standard S3 in the cluster. Patch releases
+    # may float; the minor is pinned because a new minor can move checksum and streaming
+    # defaults underneath the wire-behavior evidence, so it needs re-verifying against both
+    # backends first. uv.lock fixes the exact release.
+    "aioboto3~=15.5.0",
+    "pyrefly~=1.3.2",
+]
+
+# Deferred:
+#   onnxruntime  - CPU inference for embedding-based semantic search
+#   pgvector     - vector index backing that search
+# Perceptual hashing covers deduplication without either.
+
+[project.scripts]
+curate-d = "curate_d:main"
+
+[dependency-groups]
+dev = [
+    "ruff~=0.16",
+    "mypy~=2.3",
+    "pytest~=9.1",
+    "pytest-asyncio~=1.4",
+    "pytest-cov~=7.1",
+    # Parallel unit runs (`-n auto`). Not in addopts: the integration suite shares one
+    # database and its advisory locks, so it stays serial.
+    "pytest-xdist~=3.8",
+    "pyyaml~=6.0",
+    "types-pyyaml~=6.0.12",
+    # S3 client types. aioboto3 ships none, and the project forbids untyped containers,
+    # so without these every staging call would surface as Any.
+    "types-aioboto3[s3]~=15.5",
+    # Property tests: rendering must be a pure function of its inputs for every input.
+    "hypothesis~=6.168",
+    # Validates the served OpenAPI document against the OpenAPI specification itself.
+    "openapi-spec-validator~=0.9",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.19,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+# Vendored agent skills and OpenSpec artifacts carry illustrative snippets that are not
+# ours to format or lint.
+extend-exclude = [".agents", ".claude", "openspec"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # import sorting
+    "N",        # pep8-naming
+    "UP",       # pyupgrade
+    "B",        # bugbear
+    "A",        # builtin shadowing
+    "C4",       # comprehensions
+    "DTZ",      # timezone-aware datetimes; naive ones corrupt file timestamps
+    "T20",      # no print(); use structured logging
+    "SIM",      # simplify
+    "PTH",      # pathlib over os.path
+    "RUF",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["curate_d", "tests"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]
+# Hand-run scripts against a deployment; their output is the point.
+"tests/local/*" = ["S101", "T201"]
+
+[tool.mypy]
+python_version = "3.12"
+# Without the plugin, every BaseModel subclass inherits `__init__(**data: Any)` and
+# trips disallow_any_explicit. init_typed synthesizes a field-typed __init__ instead,
+# which is what we actually want checked.
+plugins = ["pydantic.mypy"]
+strict = true
+warn_unreachable = true
+warn_return_any = true
+disallow_any_explicit = true      # project standard: no untyped containers
+disallow_any_generics = true
+files = ["src", "tests", "migrations"]
+
+# Third-party packages without bundled type information.
+[[tool.mypy.overrides]]
+module = ["imagehash.*", "pytesseract.*", "pillow_heif.*"]
+ignore_missing_imports = true
+
+[tool.pydantic-mypy]
+init_typed = true
+init_forbid_extra = true
+warn_required_dynamic_aliases = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# Default run is unit tests only, so the coverage gate measures isolated tests
+# alone. Integration coverage does not count toward the floor.
+testpaths = ["tests/unit"]
+addopts = """
+    -ra --strict-markers --strict-config
+    --cov=curate_d --cov-report=term-missing --cov-fail-under=80
+"""
+markers = [
+    "integration: requires the local Postgres stack or an external service",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["src/curate_d"]
+
+[tool.coverage.report]
+show_missing = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@overload",
+]

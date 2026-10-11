@@ -1,0 +1,25 @@
+# Time-scaled RustFS for observing lifecycle reclamation (matrix rows 30/31) in seconds.
+# Layered over compose.yaml in its own project by `make lifecycle-check`, so the scaled
+# clock never reaches the development stack: there, a one-second day would expire staged
+# content within seconds.
+services:
+  rustfs:
+    environment:
+      # One lifecycle "day" lasts this many seconds: the 7-day expiration and 1-day abort
+      # rules rustfs-init imports fall due after 7s and 1s. The rules themselves are unchanged.
+      RUSTFS_ILM_DEBUG_DAY_SECS: "1"
+      # Expiration is applied by the scanner, which otherwise passes about once a minute.
+      # Plain seconds: a duration string such as "1s" is ignored.
+      RUSTFS_SCANNER_CYCLE: "1"
+      # The stale-upload loop is what enforces AbortIncompleteMultipartUpload. It runs every
+      # 6h by default; its own 24h expiry is left alone, so a reclamation within the check's
+      # budget can only come from the lifecycle rule. A duration string: a bare number is
+      # rejected and silently falls back to the default.
+      RUSTFS_API_STALE_UPLOADS_CLEANUP_INTERVAL: 1s
+    ports: !override
+      - "127.0.0.1:${CURATE_D_RUSTFS_LIFECYCLE_PORT:-9110}:9000"
+    volumes: !override
+      - rustfs-lifecycle-data:/data
+
+volumes:
+  rustfs-lifecycle-data:

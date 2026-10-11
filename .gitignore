@@ -1,0 +1,63 @@
+# IntelliJ project files
+.idea
+*.iml
+out
+gen
+
+# Python virtual environment
+.venv/
+
+# Local secrets for docker compose (encryption keys, etc.)
+.env
+
+# macOS
+.DS_Store
+
+# Nimbalyst tool-local state
+nimbalyst-local/
+# Python build and tool caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+# Per-agent tool caches, so parallel sessions in one checkout do not corrupt a shared one.
+.mypy_cache_*/
+.ruff_cache_*/
+
+# Coverage
+.coverage
+*.coverage.*
+htmlcov/
+/curate-d.coverage
+/curate-d.xml
+/.mcp.json
+# Agent tool state stays local; the vendored dbos-python skill (skills-lock.json) is tracked.
+/.agents/*
+!/.agents/skills/
+/.agents/skills/*
+!/.agents/skills/dbos-python/
+/.codex/
+/.claude/*
+!/.claude/skills/
+/.claude/skills/*
+!/.claude/skills/dbos-python
+
+# Playwright MCP session artifacts
+.playwright-mcp/
+/.xml
+/.logfire/logfire_credentials.json
+
+# archify check receipts; regenerated on every finalize
+docs/diagrams/**/*.delivery.json
+docs/diagrams/**/*.delivery-pending.json
+docs/diagrams/**/*.finalize.json
+docs/diagrams/**/*.finalize-summary.json
+docs/diagrams/**/*.browser-check.json
+
+# Local spec-change workspace (proposals, designs, archive); kept out of the public repo.
+openspec/changes/
+
+# Misc.
+/.logfire/
+/.hypothesis/

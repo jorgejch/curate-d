@@ -1,0 +1,304 @@
+name: Build and Publish Container
+
+# Two environments, one image.
+#
+#   push to dev       -> dev-<UTC timestamp>-<sha>, which a deployment's dev image policy
+#                        can order by timestamp
+#   push tag vX.Y.Z   -> semver tags, which a deployment's production image policy can select
+#
+# The rule for production: a semver tag whose commit is on main, and nothing else.
+# Three things enforce it, because any one alone leaves a gap.
+#
+#   1. The tag trigger matches the semver shape, not `v*`. `v1`, `vfoo` and `v1.2.3-wip`
+#      never start a build.
+#   2. The tag's commit must be an ancestor of main. Git will happily let a tag be
+#      created on a commit that was never merged; this refuses to release one.
+#   3. The tag must equal the packaged version. DBOS pins in-flight workflows to that
+#      version, so a v0.2.0 image built from a 0.1.0 package would keep enqueueing and
+#      recovering work as 0.1.0 with nothing reporting the mismatch.
+#
+# Pushing to main without a tag builds nothing: such an image would match neither
+# image policy and would only cost registry storage.
+#
+# One image for the API and both worker profiles: DBOS pins in-flight workflows to an
+# application version, so separate tags could leave the API enqueueing work on a version
+# no worker is running. The manifests choose behaviour with `command:`.
+
+# `check` also gates merges: it runs on pull requests and on pushes to main, where there
+# is nothing to publish, so the staging contract fails a change before it reaches main
+# rather than after. `build-and-push` stays on dev and semver tags — see its `if`.
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+      - dev
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+jobs:
+  # Publishing an image that fails its own tests helps nobody, and the checks are fast
+  # enough that gating on them costs less than finding out from the cluster.
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          # Full history: the release-tag check below walks back to main.
+          fetch-depth: 0
+
+      # Production releases come from main. Git does not enforce that on its own — a tag
+      # can be created on any commit, merged or not — so it is enforced here.
+      - name: Verify the release tag is on main
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::${GITHUB_REF_NAME} points at a commit that is not on main."
+            echo "Merge to main first, then tag the merge commit."
+            exit 1
+          fi
+
+      # The tag is what the cluster deploys and what DBOS records against every workflow
+      # it runs. If it disagreed with the packaged version, the two would be untraceable
+      # to each other for the life of that release.
+      - name: Verify the release tag matches the packaged version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          packaged=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
+          tagged=${GITHUB_REF_NAME#v}
+          if [ "$packaged" != "$tagged" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match pyproject version ${packaged}."
+            echo "Bump the version in pyproject.toml, merge, then tag."
+            exit 1
+          fi
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Lint
+        run: uv run ruff check . && uv run ruff format --check .
+
+      # No raw database access from inside a workflow: such a write is not checkpointed
+      # and re-executes on replay, which is how duplicate placements happen.
+      - name: Audit in-workflow database access
+        run: uv run python -m curate_d.runtime.workflow_audit src/curate_d
+
+      - name: Type check
+        run: uv run mypy
+
+      # Unit suite only. The integration suite needs PostgreSQL, and its coverage
+      # deliberately does not count toward the floor.
+      - name: Unit tests
+        run: uv run pytest -n auto
+
+      # This fixture uses the pinned Compose images and the same adapter suite as OVH.
+      # Selecting RustFS explicitly leaves remote verification visibly PENDING.
+      #
+      # PostgreSQL comes from the same Compose file rather than a `services:` block so
+      # that CI runs the pinned PostGIS image, the initdb extensions and the C collation
+      # developers run against, instead of a second definition free to drift from them.
+      # It publishes 5433, which is the DSN `Settings` already defaults to.
+      # The local S3 engine is named once, here: RustFS, which replaced MinIO in
+      # `replace-local-s3-engine`. The pinned digests stay in compose.yaml so CI and
+      # developers cannot drift onto different server builds.
+      - name: Start the staging fixture
+        env:
+          # Compose interpolates every service even though no application runs here.
+          # This public dummy Fernet key satisfies that interpolation only.
+          CURATE_D_CREDENTIAL_ENCRYPTION_KEY: MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=
+          STAGING_S3_SERVICE: rustfs
+          STAGING_S3_INIT_SERVICE: rustfs-init
+        run: |
+          docker compose --project-name staging-contract-ci up -d --wait postgres "$STAGING_S3_SERVICE"
+          docker compose --project-name staging-contract-ci run --rm "$STAGING_S3_INIT_SERVICE"
+
+      # The integration suite reads the applied schema, not the model metadata: a CHECK
+      # constraint that exists only in Python is not an invariant.
+      - name: Apply migrations to the fixture database
+        run: uv run alembic upgrade head
+
+      # Transaction advisory locks are re-entrant within one session, so the writer lock
+      # serializing admission, publication and eviction is only observable across
+      # independent connections. The unit suite structurally cannot cover it, which is
+      # why these two files run here rather than being folded into `uv run pytest`.
+      # Separate from the contract step so the RustFS evidence below stays a count of
+      # contract tests alone.
+      - name: Staging coordination and cache-index schema
+        run: >-
+          uv run pytest
+          tests/integration/test_staging_coordination.py
+          tests/integration/test_staging_cache_schema.py
+          --no-cov -m integration
+
+      - name: RustFS staging contract (OVH verification remains PENDING)
+        run: >-
+          uv run pytest tests/integration/test_staging_contract.py
+          --no-cov -m integration --staging-backend=rustfs
+          --junitxml=staging-contract-rustfs.xml -o junit_family=legacy
+
+      # Provisioning differences the contract suite does not cover: the access matrix
+      # under real identities, anonymous denial, storage class, encryption and lifecycle
+      # readback, explicit abort, and transport. Same backend selection as above, so OVH
+      # stays PENDING here too.
+      #
+      # Rows 30 and 31 are deselected by name rather than filtered by expression, so the
+      # two that do not run here are named in the diff instead of hiding behind a pattern.
+      # On this fixture's real clock the 7-day rule cannot fall due inside a CI run, and
+      # without a budget `_observation_budget` would only skip them on the recorded
+      # observation. They are observed in the next step instead, on a separate RustFS
+      # whose lifecycle day is scaled to one second.
+      - name: RustFS backend provisioning checks (rows 30/31 in the next step)
+        run: >-
+          uv run pytest tests/integration/test_staging_backend_checks.py
+          --no-cov -m integration --staging-backend=rustfs
+          --deselect tests/integration/test_staging_backend_checks.py::test_expiration_removes_an_aged_object
+          --deselect tests/integration/test_staging_backend_checks.py::test_stale_multipart_is_reclaimed
+          --junitxml=staging-backend-checks-rustfs.xml -o junit_family=legacy
+
+      # Real expiration and real reclamation of an abandoned upload, observed rather than
+      # inferred from a stored rule. compose.lifecycle.yaml scales only the engine's clock,
+      # in its own Compose project; the rules are the ones rustfs-init imports. The make
+      # target sets its own short budget, which is legitimate only because the day is
+      # scaled: the guard below still refuses a job-wide budget.
+      - name: RustFS lifecycle reclamation, time-scaled (rows 30/31)
+        env:
+          CURATE_D_CREDENTIAL_ENCRYPTION_KEY: MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=
+        run: >-
+          make lifecycle-check
+          LIFECYCLE_PYTEST_ARGS="--junitxml=staging-lifecycle-rustfs.xml -o junit_family=legacy"
+
+      # On a real clock a wall-clock budget cannot be satisfied by a CI job, so a job-wide
+      # one would mean someone set it small enough to pass on the unscaled fixture —
+      # turning an unobserved reclamation into green. Fail loudly instead of inheriting it.
+      - name: Refuse a CI-sized observation budget
+        if: env.CURATE_D_TEST_STAGING_LIFECYCLE_TIMEOUT_SECONDS != ''
+        run: |
+          echo "::error::CURATE_D_TEST_STAGING_LIFECYCLE_TIMEOUT_SECONDS is set in CI."
+          echo "Rows 30/31 need a multi-day observation no job outlasts; a budget short"
+          echo "enough to pass here would record unobserved reclamation as verified."
+          exit 1
+
+      - name: Record RustFS contract evidence
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          from xml.etree import ElementTree
+
+          def counts(path: Path, heading: str, missing: str) -> list[str]:
+              lines = ["", f"### {heading}", ""]
+              if not path.exists():
+                  return lines + [missing]
+              for suite in ElementTree.parse(path).findall(".//testsuite"):
+                  lines.append(
+                      f"Tests: {suite.get('tests')}; failures: {suite.get('failures')}; "
+                      f"errors: {suite.get('errors')}; skipped: {suite.get('skipped')}."
+                  )
+              return lines
+
+          report = Path("staging-contract-rustfs.xml")
+          lines = ["### RustFS staging contract", "", "OVH verification remains PENDING.", ""]
+          if report.exists():
+              root = ElementTree.parse(report)
+              for suite in root.findall(".//testsuite"):
+                  lines.append(
+                      f"Tests: {suite.get('tests')}; failures: {suite.get('failures')}; "
+                      f"errors: {suite.get('errors')}."
+                  )
+              for prop in root.findall(".//property[@name='sdk_checksum_headers']"):
+                  lines.extend(["", "Safe SDK checksum headers:", "```json", prop.get("value", ""), "```"])
+          else:
+              lines.append("RustFS contract did not produce a result; verification did not pass.")
+
+          # Reported separately so no count is mistaken for another, and so the rows the
+          # provisioning step deselects are named in the run rather than only here.
+          lines += counts(
+              Path("staging-backend-checks-rustfs.xml"),
+              "RustFS backend provisioning checks (rows 30/31 deselected)",
+              "Backend checks did not produce a result; verification did not pass.",
+          )
+          lines += counts(
+              Path("staging-lifecycle-rustfs.xml"),
+              "RustFS lifecycle reclamation, time-scaled (rows 30/31)",
+              "Lifecycle observation did not produce a result; rows 30/31 are not verified.",
+          )
+          lines.extend(
+              [
+                  "",
+                  "Rows 30 and 31 were observed on a RustFS whose lifecycle day is scaled to "
+                  "one second (compose.lifecycle.yaml); the rules are unchanged. On OVH they "
+                  "were observed separately.",
+              ]
+          )
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary:
+              summary.write("\n".join(lines) + "\n")
+          PY
+
+      - name: Remove the staging fixture
+        if: always()
+        env:
+          CURATE_D_CREDENTIAL_ENCRYPTION_KEY: MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=
+        run: docker compose --project-name staging-contract-ci down --volumes
+
+  build-and-push:
+    needs: check
+    # The triggers above also cover pull requests and main so that `check` gates merges.
+    # Neither produces a publishable image: a pull request is unmerged code, and an
+    # untagged main commit matches neither image policy. Without this, every PR would
+    # push an image built from code that may never merge.
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/'))
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Extract container metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern=v{{version}}
+            type=semver,pattern=v{{major}}.{{minor}}
+            # Not is_default_branch: dev is not the default branch, so that condition
+            # would never fire and the dev environment would never receive an image.
+            type=raw,value=dev-{{date 'YYYYMMDDHHmmss'}}-{{sha}},enable=${{ github.ref == 'refs/heads/dev' }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # On dev the only tag is the dev one, so `version` is that tag: the image's
+          # DBOS application version names its build. A release image gets none and runs
+          # as the bare packaged version the release guard checked.
+          build-args: |
+            CURATE_D_BUILD_REVISION=${{ github.ref == 'refs/heads/dev' && steps.meta.outputs.version || '' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

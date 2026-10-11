@@ -1,0 +1,231 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "curate.d runtime architecture",
+    "output": "docs/diagrams/architecture/curate-d-architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "openrouter",
+      "type": "external",
+      "label": "OpenRouter",
+      "sublabel": "remote classifier tier",
+      "tag": "monthly spend cap",
+      "pos": [320, 80],
+      "size": [160, 64],
+      "sources": [
+        { "path": "src/curate_d/classification/remote.py", "line": 1, "end_line": 12, "label": "remote tier" },
+        { "path": "src/curate_d/classification/remote.py", "line": 40, "label": "base URL" },
+        { "path": "src/curate_d/workflows/classify.py", "line": 3, "end_line": 13, "label": "escalation and spend cap" }
+      ]
+    },
+    {
+      "id": "conductor",
+      "type": "external",
+      "label": "DBOS Conductor",
+      "sublabel": "optional · observability",
+      "pos": [925, 80],
+      "size": [180, 64],
+      "sources": [
+        { "path": "src/curate_d/runtime/conductor.py", "line": 1, "end_line": 20, "label": "read-only gate" },
+        { "path": "src/curate_d/runtime/conductor.py", "line": 485, "end_line": 503, "label": "opt-in connection" },
+        { "path": "src/curate_d/config.py", "line": 321, "end_line": 329, "label": "proxy for Conductor" }
+      ]
+    },
+    {
+      "id": "pcloud",
+      "type": "external",
+      "label": "pCloud",
+      "sublabel": "sources · destinations",
+      "pos": [40, 260],
+      "size": [150, 234],
+      "sources": [
+        { "path": "src/curate_d/domain/source.py", "line": 17, "end_line": 23, "label": "only provider" },
+        { "path": "src/curate_d/providers/pcloud/files.py", "line": 1, "end_line": 11, "label": "listing and download" },
+        { "path": "src/curate_d/domain/policy.py", "line": 42, "end_line": 49, "label": "destinations" }
+      ]
+    },
+    {
+      "id": "rclone",
+      "type": "backend",
+      "label": "rclone sidecar",
+      "sublabel": "rcd · remotes from ledger",
+      "pos": [320, 260],
+      "size": [160, 64],
+      "sources": [
+        { "path": "src/curate_d/placement/remotes.py", "line": 1, "end_line": 6, "label": "sidecar remotes" },
+        { "path": "src/curate_d/placement/rclone.py", "line": 1, "end_line": 12, "label": "copyfile and evidence" }
+      ]
+    },
+    {
+      "id": "io",
+      "type": "backend",
+      "label": "I/O worker",
+      "sublabel": "scan · stage · transfer · verify",
+      "tag": "applies schedules",
+      "pos": [600, 260],
+      "size": [200, 64],
+      "sources": [
+        { "path": "src/curate_d/runtime/queues.py", "line": 205, "end_line": 216, "label": "I/O queues" },
+        { "path": "src/curate_d/workflows/registry.py", "line": 28, "end_line": 47, "label": "I/O-only schedules" },
+        { "path": "src/curate_d/worker/main.py", "line": 483, "end_line": 557, "label": "I/O-only services" }
+      ]
+    },
+    {
+      "id": "staging",
+      "type": "cloud",
+      "label": "S3 staging bucket",
+      "sublabel": "OVH · content/",
+      "tag": "SSE-S3 · lifecycle expiry",
+      "pos": [925, 260],
+      "size": [180, 64],
+      "sources": [
+        { "path": "src/curate_d/staging/object_store.py", "line": 1, "end_line": 14, "label": "S3 adapter" },
+        { "path": "infrastructure/README.md", "line": 118, "end_line": 133, "label": "identities and lifecycle" }
+      ]
+    },
+    {
+      "id": "cpu",
+      "type": "backend",
+      "label": "CPU worker",
+      "sublabel": "fingerprint · classify-cheap",
+      "pos": [1250, 260],
+      "size": [180, 64],
+      "sources": [
+        { "path": "src/curate_d/runtime/queues.py", "line": 217, "end_line": 220, "label": "CPU queues" },
+        { "path": "src/curate_d/workflows/ingest.py", "line": 1, "end_line": 7, "label": "fingerprint half" },
+        { "path": "src/curate_d/classification/local.py", "line": 1, "end_line": 11, "label": "OCR and keyword tier" }
+      ]
+    },
+    {
+      "id": "pg",
+      "type": "database",
+      "label": "PostgreSQL",
+      "sublabel": "ledger · dbos schema",
+      "tag": "queues · schedules · leases",
+      "pos": [925, 430],
+      "size": [180, 64],
+      "sources": [
+        { "path": "src/curate_d/runtime/dbos_app.py", "line": 1, "end_line": 8, "label": "system tables in ledger" },
+        { "path": "src/curate_d/runtime/lease.py", "line": 1, "end_line": 33, "label": "executor lease · pooler" },
+        { "path": "src/curate_d/runtime/schedule_authority.py", "line": 1, "end_line": 12, "label": "schedule authority" }
+      ]
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "Control plane API",
+      "sublabel": "FastAPI · DBOSClient",
+      "pos": [925, 600],
+      "size": [180, 64],
+      "sources": [
+        { "path": "src/curate_d/api/app.py", "line": 92, "end_line": 104, "label": "routers" },
+        { "path": "src/curate_d/api/backends.py", "line": 84, "end_line": 100, "label": "ledger and DBOSClient" },
+        { "path": "src/curate_d/api/connections.py", "line": 233, "end_line": 259, "label": "seals OAuth tokens" }
+      ]
+    },
+    {
+      "id": "logfire",
+      "type": "external",
+      "label": "Logfire",
+      "sublabel": "request traces",
+      "pos": [1520, 600],
+      "size": [150, 64],
+      "sources": [
+        { "path": "src/curate_d/observability/tracing.py", "line": 1, "end_line": 5, "label": "export" },
+        { "path": "src/curate_d/api/__main__.py", "line": 39, "end_line": 57, "label": "API only" }
+      ]
+    },
+    {
+      "id": "operator",
+      "type": "external",
+      "icon": "person",
+      "label": "Operator",
+      "sublabel": "connections · config · review",
+      "pos": [925, 770],
+      "size": [180, 64],
+      "sources": [
+        { "path": "src/curate_d/api/connections.py", "line": 1, "end_line": 10, "label": "authorize accounts" },
+        { "path": "src/curate_d/api/review.py", "line": 1, "end_line": 7, "label": "review queue" },
+        { "path": "src/curate_d/api/configuration.py", "line": 35, "end_line": 37, "label": "authenticating reverse proxy identity" }
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Kubernetes + S3-compatible object storage",
+      "wraps": ["rclone", "io", "staging", "cpu", "pg", "api"]
+    },
+    {
+      "kind": "security-group",
+      "label": "I/O pod · provider credentials",
+      "wraps": ["rclone", "io"]
+    },
+    {
+      "kind": "security-group",
+      "label": "CPU pod",
+      "wraps": ["cpu"]
+    }
+  ],
+  "connections": [
+    { "id": "io-pcloud", "from": "io", "to": "pcloud", "label": "list · download", "fromSide": "bottom", "toSide": "right" },
+    { "id": "io-rclone", "from": "io", "to": "rclone", "label": "RC API" },
+    { "id": "rclone-pcloud", "from": "rclone", "to": "pcloud", "label": "copyfile · stat" },
+    { "id": "io-stage", "from": "io", "to": "staging", "label": "stage (writer)", "variant": "emphasis" },
+    { "id": "staging-cpu", "from": "staging", "to": "cpu", "label": "verified GET (reader)", "variant": "emphasis" },
+    { "id": "io-pg", "from": "io", "to": "pg", "label": "workflows · ledger tx", "fromSide": "bottom", "toSide": "left" },
+    { "id": "cpu-pg", "from": "cpu", "to": "pg", "label": "workflows · ledger tx", "fromSide": "bottom", "toSide": "right" },
+    { "id": "io-openrouter", "from": "io", "to": "openrouter", "label": "classify-llm", "fromSide": "top", "toSide": "right" },
+    { "id": "io-conductor", "from": "io", "to": "conductor", "label": "read-only", "variant": "dashed", "fromSide": "top", "toSide": "left" },
+    { "id": "cpu-conductor", "from": "cpu", "to": "conductor", "label": "read-only · optional proxy", "variant": "dashed", "fromSide": "top", "toSide": "right" },
+    { "id": "api-pg", "from": "api", "to": "pg", "label": "ledger · enqueue", "fromSide": "top", "toSide": "bottom" },
+    { "id": "api-pcloud", "from": "api", "to": "pcloud", "label": "OAuth code exchange", "fromSide": "left", "toSide": "bottom" },
+    { "id": "api-logfire", "from": "api", "to": "logfire", "label": "spans", "variant": "dashed" },
+    { "id": "operator-api", "from": "operator", "to": "api", "label": "HTTP · authenticating reverse proxy", "fromSide": "top", "toSide": "bottom" }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "Pipeline",
+      "items": [
+        "scan, stage, then fingerprint and classify-cheap on the CPU worker",
+        "classify-llm runs on the I/O worker only when the local tiers escalate",
+        "reconcile, transfer-small/large through rclone, then verify",
+        "Each hand-off is a DBOS enqueue under a deterministic workflow ID"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Isolation",
+      "items": [
+        "Of the workers, only the I/O pod reaches pCloud and OpenRouter and decrypts provider tokens",
+        "The API holds the credential key only to seal the tokens the OAuth exchange returns",
+        "The CPU pod decodes untrusted bytes with a read-only reader identity"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Durable execution",
+      "items": [
+        "DBOS system tables live in the ledger database, schema dbos",
+        "The I/O worker applies persisted schedules under an advisory-lock authority",
+        "Each worker holds an executor lease; the API never launches DBOS and uses DBOSClient",
+        "Ledger connections go through a session-mode pooler, as the lease requires",
+        "Migrations bring the dbos schema up before the ledger's own revisions"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Operations",
+      "items": [
+        "Conductor is opt-in; its gate refuses every write command",
+        "The API traces requests to Logfire, health probes excepted",
+        "reset-environment.sh empties the local or dev ledger, dbos schema included, and content/ prefix",
+        "The reset keeps pCloud connections unless --drop-connections is given"
+      ]
+    }
+  ]
+}

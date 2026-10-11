@@ -1,0 +1,900 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "curate.d content pipeline",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "output": "docs/diagrams/internals/curate-d-pipeline.html",
+    "views": [
+      {
+        "id": "intake",
+        "label": "Intake: scan, stage, fingerprint",
+        "focus": [
+          "scan",
+          "ingest",
+          "staging",
+          "fingerprint",
+          "ledger_objects",
+          "src_provider"
+        ],
+        "note": "A listed file becomes a staged version, then a content object keyed by its SHA-256."
+      },
+      {
+        "id": "classification",
+        "label": "Classification tiers",
+        "focus": [
+          "classify",
+          "remote",
+          "openrouter",
+          "classif",
+          "review"
+        ],
+        "note": "Deterministic and local OCR tiers first; only unsettled content reaches OpenRouter under the spend cap, or a person."
+      },
+      {
+        "id": "placement",
+        "label": "Convergence and placement",
+        "focus": [
+          "classif",
+          "reconcile",
+          "place",
+          "verify",
+          "placements",
+          "destination"
+        ],
+        "note": "Reconcile enqueues every missing placement; deterministic IDs collapse repeats."
+      },
+      {
+        "id": "runtime",
+        "label": "Worker runtime: lease, schedules, retention",
+        "focus": [
+          "startup",
+          "lease",
+          "sched",
+          "dbos_sys",
+          "prune",
+          "sweep"
+        ],
+        "note": "Lease before launch; schedules written under one advisory lock; prune and sweep act on the dbos schema."
+      }
+    ],
+    "legend": {
+      "entries": {
+        "frontend": {
+          "label": "Control-plane API"
+        },
+        "backend": {
+          "label": "DBOS workflow / worker code"
+        },
+        "security": {
+          "label": "Lock or authority"
+        },
+        "messagebus": {
+          "label": "DBOS system tables"
+        },
+        "database": {
+          "label": "Ledger tables"
+        },
+        "cloud": {
+          "label": "Object storage"
+        },
+        "external": {
+          "label": "External service"
+        }
+      }
+    }
+  },
+  "lanes": [
+    {
+      "id": "prov",
+      "label": "Providers"
+    },
+    {
+      "id": "io",
+      "label": "I/O worker"
+    },
+    {
+      "id": "state",
+      "label": "Stores"
+    },
+    {
+      "id": "cpu",
+      "label": "CPU worker \u00b7 untrusted bytes"
+    },
+    {
+      "id": "people",
+      "label": "Person \u00b7 control-plane API",
+      "variant": "exception"
+    },
+    {
+      "id": "rt",
+      "label": "Worker runtime"
+    }
+  ],
+  "mainPath": [
+    "scan",
+    "ingest",
+    "staging",
+    "fingerprint",
+    "classify",
+    "classif",
+    "reconcile",
+    "place",
+    "verify",
+    "placements"
+  ],
+  "nodes": [
+    {
+      "id": "src_provider",
+      "lane": "prov",
+      "col": 0,
+      "type": "external",
+      "label": "Source provider",
+      "sublabel": "pCloud API",
+      "width": 120,
+      "sources": [
+        {
+          "path": "src/curate_d/providers/pcloud/files.py",
+          "line": 1,
+          "end_line": 12,
+          "label": "listing, digests, download"
+        }
+      ]
+    },
+    {
+      "id": "openrouter",
+      "lane": "prov",
+      "col": 2,
+      "type": "external",
+      "label": "OpenRouter",
+      "sublabel": "configured model",
+      "width": 120,
+      "sources": [
+        {
+          "path": "src/curate_d/classification/remote.py",
+          "line": 1,
+          "end_line": 12,
+          "label": "remote tier, structured output"
+        },
+        {
+          "path": "src/curate_d/classification/remote.py",
+          "line": 40,
+          "end_line": 40,
+          "label": "OPENROUTER_BASE_URL"
+        }
+      ]
+    },
+    {
+      "id": "destination",
+      "lane": "prov",
+      "col": 4,
+      "type": "external",
+      "label": "Destination",
+      "sublabel": "rclone sidecar",
+      "width": 120,
+      "sources": [
+        {
+          "path": "src/curate_d/placement/transfer.py",
+          "line": 1,
+          "end_line": 10,
+          "label": "copyfile + both-side stat"
+        }
+      ]
+    },
+    {
+      "id": "scan",
+      "lane": "io",
+      "col": 0,
+      "type": "backend",
+      "label": "scan_root",
+      "sublabel": "scan queue",
+      "tag": "scan-all tick",
+      "width": 120,
+      "sources": [
+        {
+          "path": "src/curate_d/workflows/scan.py",
+          "line": 265,
+          "end_line": 340,
+          "label": "scan_root workflow"
+        },
+        {
+          "path": "src/curate_d/workflows/scan.py",
+          "line": 356,
+          "end_line": 372,
+          "label": "scan_all schedule"
+        }
+      ]
+    },
+    {
+      "id": "ingest",
+      "lane": "io",
+      "col": 1,
+      "type": "backend",
+      "label": "ingest_source",
+      "sublabel": "stage queue",
+      "width": 120,
+      "sources": [
+        {
+          "path": "src/curate_d/workflows/ingest.py",
+          "line": 242,
+          "end_line": 305,
+          "label": "ingest_source workflow"
+        },
+        {
+          "path": "src/curate_d/workflows/ingest.py",
+          "line": 115,
+          "end_line": 133,
+          "label": "enqueue_ingest"
+        }
+      ]
+    },
+    {
+      "id": "remote",
+      "lane": "io",
+      "col": 2,
+      "type": "backend",
+      "label": "classify_remote",
+      "sublabel": "classify-llm queue",
+      "tag": "spend cap",
+      "width": 130,
+      "sources": [
+        {
+          "path": "src/curate_d/workflows/classify.py",
+          "line": 351,
+          "end_line": 446,
+          "label": "classify_remote workflow"
+        },
+        {
+          "path": "src/curate_d/workflows/classify.py",
+          "line": 174,
+          "end_line": 184,
+          "label": "_remote_step"
+        }
+      ]
+    },
+    {
+      "id": "reconcile",
+      "lane": "io",
+      "col": 3,
+      "type": "backend",
+      "label": "reconcile",
+      "sublabel": "maintenance queue",
+      "tag": "reconcile tick",
+      "width": 120,
+      "sources": [
+        {
+          "path": "src/curate_d/workflows/reconcile.py",
+          "line": 283,
+          "end_line": 351,
+          "label": "reconcile, reconcile_all"
+        },
+        {
+          "path": "src/curate_d/reconciliation/convergence.py",
+          "line": 1,
+          "end_line": 14,
+          "label": "desired vs observed"
+        }
+      ]
+    },
+    {
+      "id": "place",
+      "lane": "io",
+      "col": 4,
+      "type": "backend",
+      "label": "place_content",
+      "sublabel": "transfer-small/large",
+      "width": 130,
+      "sources": [
+        {
+          "path": "src/curate_d/workflows/placement.py",
+          "line": 237,
+          "end_line": 288,
+          "label": "place_content workflow"
+        },
+        {
+          "path": "src/curate_d/workflows/placement.py",
+          "line": 107,
+          "end_line": 115,
+          "label": "size-class queue"
+        },
+        {
+          "path": "src/curate_d/workflows/placement.py",
+          "line": 136,
+          "end_line": 166,
+          "label": "_copy_step, provider to provider"
+        }
+      ]
+    },
+    {
+      "id": "verify",
+      "lane": "io",
+      "col": 5,
+      "type": "backend",
+      "label": "verify_placement",
+      "sublabel": "verify queue",
+      "width": 130,
+      "sources": [
+        {
+          "path": "src/curate_d/workflows/placement.py",
+          "line": 291,
+          "end_line": 324,
+          "label": "verify_placement workflow"
+        }
+      ],
+      "tag": "may re-ingest source"
+    },
+    {
+      "id": "ledger_objects",
+      "lane": "state",
+      "col": 0,
+      "type": "database",
+      "label": "Object ledger",
+      "sublabel": "sources \u00b7 contents",
+      "width": 120,
+      "sources": [
+        {
+          "path": "src/curate_d/ledger/tables.py",
+          "line": 73,
+          "end_line": 100,
+          "label": "source_objects"
+        },
+        {
+          "path": "src/curate_d/ledger/tables.py",
+          "line": 165,
+          "end_line": 192,
+          "label": "content_objects"
+        },
+        {
+          "path": "src/curate_d/ledger/tables.py",
+          "line": 382,
+          "end_line": 440,
+          "label": "scans, scan_folders"
+        }
+      ]
+    },
+    {
+      "id": "staging",
+      "lane": "state",
+      "col": 1,
+      "type": "cloud",
+      "label": "S3 staging",
+      "sublabel": "immutable versions",
+      "width": 120,
+      "sources": [
+        {
+          "path": "src/curate_d/staging/publish.py",
+          "line": 1,
+          "end_line": 14,
+          "label": "publish under writer lock"
+        },
+        {
+          "path": "src/curate_d/staging/snapshots.py",
+          "line": 1,
+          "end_line": 15,
+          "label": "verified local snapshot"
+        }
+      ]
+    },
+    {
+      "id": "classif",
+      "lane": "state",
+      "col": 3,
+      "type": "database",
+      "label": "Classifications",
+      "sublabel": "facts \u00b7 reviews \u00b7 spend",
+      "width": 135,
+      "sources": [
+        {
+          "path": "src/curate_d/workflows/classify.py",
+          "line": 190,
+          "end_line": 246,
+          "label": "record or open review"
+        },
+        {
+          "path": "src/curate_d/ledger/tables.py",
+          "line": 473,
+          "end_line": 592,
+          "label": "classifications .. holds"
+        }
+      ]
+    },
+    {
+      "id": "placements",
+      "lane": "state",
+      "col": 5,
+      "type": "database",
+      "label": "Placements",
+      "sublabel": "PRESENT after verify",
+      "width": 125,
+      "sources": [
+        {
+          "path": "src/curate_d/placement/pipeline.py",
+          "line": 1,
+          "end_line": 15,
+          "label": "copy, verify, register"
+        },
+        {
+          "path": "src/curate_d/placement/pipeline.py",
+          "line": 306,
+          "end_line": 365,
+          "label": "conclude"
+        }
+      ]
+    },
+    {
+      "id": "fingerprint",
+      "lane": "cpu",
+      "col": 1,
+      "type": "backend",
+      "label": "fingerprint_source",
+      "sublabel": "fingerprint queue",
+      "width": 130,
+      "sources": [
+        {
+          "path": "src/curate_d/workflows/ingest.py",
+          "line": 308,
+          "end_line": 372,
+          "label": "fingerprint_source workflow"
+        },
+        {
+          "path": "src/curate_d/ingest/pipeline.py",
+          "line": 165,
+          "end_line": 186,
+          "label": "inspect_staged"
+        }
+      ]
+    },
+    {
+      "id": "classify",
+      "lane": "cpu",
+      "col": 2,
+      "type": "backend",
+      "label": "classify_content",
+      "sublabel": "classify-cheap queue",
+      "tag": "deterministic + OCR",
+      "width": 135,
+      "sources": [
+        {
+          "path": "src/curate_d/workflows/classify.py",
+          "line": 312,
+          "end_line": 348,
+          "label": "classify_content workflow"
+        },
+        {
+          "path": "src/curate_d/classification/prepare.py",
+          "line": 62,
+          "end_line": 114,
+          "label": "deterministic and local tiers"
+        }
+      ]
+    },
+    {
+      "id": "review",
+      "lane": "people",
+      "col": 3,
+      "type": "frontend",
+      "label": "Review queue",
+      "sublabel": "resolve \u00b7 exclude",
+      "width": 120,
+      "sources": [
+        {
+          "path": "src/curate_d/api/review.py",
+          "line": 142,
+          "end_line": 196,
+          "label": "review routes"
+        },
+        {
+          "path": "src/curate_d/api/reclassification.py",
+          "line": 17,
+          "end_line": 29,
+          "label": "reclassify via DBOSClient"
+        }
+      ]
+    },
+    {
+      "id": "startup",
+      "lane": "rt",
+      "col": 1,
+      "type": "backend",
+      "label": "Worker start",
+      "sublabel": "launch \u2192 queues",
+      "width": 120,
+      "sources": [
+        {
+          "path": "src/curate_d/worker/main.py",
+          "line": 733,
+          "end_line": 747,
+          "label": "lease, launch, register, apply"
+        },
+        {
+          "path": "src/curate_d/runtime/datasource.py",
+          "line": 28,
+          "end_line": 44,
+          "label": "ledger datasource before launch"
+        },
+        {
+          "path": "src/curate_d/runtime/queues.py",
+          "line": 200,
+          "end_line": 220,
+          "label": "IO and CPU queue split"
+        }
+      ]
+    },
+    {
+      "id": "lease",
+      "lane": "rt",
+      "col": 0,
+      "type": "security",
+      "label": "Executor lease",
+      "sublabel": "advisory lock",
+      "width": 120,
+      "sources": [
+        {
+          "path": "src/curate_d/runtime/lease.py",
+          "line": 1,
+          "end_line": 15,
+          "label": "one live process per identity"
+        },
+        {
+          "path": "src/curate_d/worker/main.py",
+          "line": 787,
+          "end_line": 803,
+          "label": "exit 75 when lost"
+        }
+      ]
+    },
+    {
+      "id": "sched",
+      "lane": "rt",
+      "col": 2,
+      "type": "security",
+      "label": "apply_schedules",
+      "sublabel": "xact lock \u00b7 I/O only",
+      "width": 130,
+      "sources": [
+        {
+          "path": "src/curate_d/worker/main.py",
+          "line": 597,
+          "end_line": 645,
+          "label": "apply_schedules"
+        },
+        {
+          "path": "src/curate_d/runtime/schedule_authority.py",
+          "line": 1,
+          "end_line": 12,
+          "label": "pg_advisory_xact_lock authority"
+        },
+        {
+          "path": "src/curate_d/workflows/registry.py",
+          "line": 28,
+          "end_line": 47,
+          "label": "schedules_for"
+        }
+      ]
+    },
+    {
+      "id": "dbos_sys",
+      "lane": "rt",
+      "col": 3,
+      "type": "messagebus",
+      "label": "DBOS system schema",
+      "sublabel": "queues \u00b7 schedules",
+      "width": 135,
+      "sources": [
+        {
+          "path": "src/curate_d/runtime/dbos_app.py",
+          "line": 1,
+          "end_line": 11,
+          "label": "system tables in the ledger DB"
+        },
+        {
+          "path": "src/curate_d/runtime/dbos_app.py",
+          "line": 89,
+          "end_line": 94,
+          "label": "schema dbos, ledger URL"
+        }
+      ]
+    },
+    {
+      "id": "prune",
+      "lane": "rt",
+      "col": 4,
+      "type": "backend",
+      "label": "prune_history",
+      "sublabel": "maintenance queue",
+      "tag": "retention tick",
+      "width": 120,
+      "sources": [
+        {
+          "path": "src/curate_d/workflows/retention.py",
+          "line": 23,
+          "end_line": 48,
+          "label": "prune_history schedule"
+        },
+        {
+          "path": "src/curate_d/runtime/retention.py",
+          "line": 107,
+          "end_line": 138,
+          "label": "garbage_collect + checkpoints"
+        }
+      ],
+      "yOffset": -44
+    },
+    {
+      "id": "sweep",
+      "lane": "rt",
+      "col": 4,
+      "type": "backend",
+      "label": "run_recovery_sweep",
+      "sublabel": "library \u00b7 not wired",
+      "width": 135,
+      "sources": [
+        {
+          "path": "src/curate_d/runtime/sweep.py",
+          "line": 1,
+          "end_line": 23,
+          "label": "re-enqueue or fork stranded work"
+        },
+        {
+          "path": "src/curate_d/runtime/sweep.py",
+          "line": 286,
+          "end_line": 360,
+          "label": "lease as liveness test"
+        }
+      ],
+      "yOffset": 44
+    }
+  ],
+  "edges": [
+    {
+      "id": "scan-list",
+      "from": "scan",
+      "to": "src_provider",
+      "label": "list \u00b7 digests",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "scan-record",
+      "from": "scan",
+      "to": "ledger_objects",
+      "label": "record_folder tx",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "scan-ingest",
+      "from": "scan",
+      "to": "ingest",
+      "label": "per file",
+      "role": "main"
+    },
+    {
+      "id": "ingest-fetch",
+      "from": "ingest",
+      "to": "src_provider",
+      "label": "fetch bytes",
+      "fromSide": "top",
+      "toSide": "right"
+    },
+    {
+      "id": "ingest-publish",
+      "from": "ingest",
+      "to": "staging",
+      "label": "publish + enqueue",
+      "role": "main"
+    },
+    {
+      "id": "staging-read",
+      "from": "staging",
+      "to": "fingerprint",
+      "label": "verified snapshot",
+      "variant": "security",
+      "role": "main"
+    },
+    {
+      "id": "fingerprint-record",
+      "from": "fingerprint",
+      "to": "ledger_objects",
+      "label": "record_fingerprint tx",
+      "variant": "emphasis"
+    },
+    {
+      "id": "fingerprint-classify",
+      "from": "fingerprint",
+      "to": "classify",
+      "label": "by sha256",
+      "role": "main"
+    },
+    {
+      "id": "classify-escalate",
+      "from": "classify",
+      "to": "remote",
+      "label": "escalate",
+      "variant": "dashed",
+      "role": "branch"
+    },
+    {
+      "id": "remote-call",
+      "from": "remote",
+      "to": "openrouter",
+      "label": "structured call"
+    },
+    {
+      "id": "classify-record",
+      "from": "classify",
+      "to": "classif",
+      "label": "decision tx",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "remote-record",
+      "from": "remote",
+      "to": "classif",
+      "label": "decision tx",
+      "variant": "emphasis"
+    },
+    {
+      "id": "review-resolve",
+      "from": "review",
+      "to": "classif",
+      "label": "resolve \u00b7 exclude",
+      "variant": "dashed"
+    },
+    {
+      "id": "classif-reconcile",
+      "from": "classif",
+      "to": "reconcile",
+      "label": "facts + policy",
+      "role": "main"
+    },
+    {
+      "id": "reconcile-place",
+      "from": "reconcile",
+      "to": "place",
+      "label": "per target",
+      "role": "main"
+    },
+    {
+      "id": "place-copy",
+      "from": "place",
+      "to": "destination",
+      "label": "copyfile from source"
+    },
+    {
+      "id": "place-evidence",
+      "from": "place",
+      "to": "placements",
+      "label": "start \u00b7 evidence tx",
+      "variant": "emphasis"
+    },
+    {
+      "id": "place-verify",
+      "from": "place",
+      "to": "verify",
+      "label": "enqueue",
+      "role": "main"
+    },
+    {
+      "id": "verify-conclude",
+      "from": "verify",
+      "to": "placements",
+      "label": "conclude tx",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "startup-lease",
+      "from": "startup",
+      "to": "lease",
+      "label": "acquire",
+      "variant": "security"
+    },
+    {
+      "id": "startup-sched",
+      "from": "startup",
+      "to": "sched",
+      "label": "after launch"
+    },
+    {
+      "id": "sched-write",
+      "from": "sched",
+      "to": "dbos_sys",
+      "label": "upsert",
+      "variant": "security"
+    },
+    {
+      "id": "prune-gc",
+      "from": "prune",
+      "to": "dbos_sys",
+      "label": "collect"
+    },
+    {
+      "id": "sweep-lease",
+      "from": "sweep",
+      "to": "lease",
+      "label": "dead only if lease taken",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "bottom",
+      "route": "bottom-channel"
+    },
+    {
+      "id": "sweep-requeue",
+      "from": "sweep",
+      "to": "dbos_sys",
+      "label": "requeue \u00b7 fork",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "orange",
+      "title": "Two worker profiles",
+      "items": [
+        "I/O worker: beside the rclone sidecar and provider credentials; dequeues scan, stage, classify-llm, transfer-small, transfer-large, verify and maintenance",
+        "CPU worker: decodes untrusted bytes with read-only staging access; dequeues fingerprint and classify-cheap",
+        "Queue limits are per worker; provider-facing queues are partitioned by provider with a shared rate limit"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Exactly-once ledger writes",
+      "items": [
+        "Arrows labelled tx are ledger datasource transactions (run_tx_step_async): the row and its tracking record commit together",
+        "classify_remote reserves spend, calls OpenRouter in a step, settles spend and records the decision, each write its own transaction",
+        "Provider calls, staging I/O and reads a workflow branches on are DBOS steps; make lint runs workflow_audit against raw database calls in workflows"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Deterministic workflow IDs",
+      "items": [
+        "ingest:<source>:<version> \u00b7 classify:sha256:<digest> \u00b7 placement:sha256:<digest>:<destination>@<locator hash>#<attempt>",
+        "A repeated enqueue collapses, so reconcile can enqueue every missing placement on every pass",
+        "Scan and reconcile hand over to continuation workflows after a bounded batch"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Failure routes",
+      "items": [
+        "Staging full or transfer not admitted: durable sleep and retry, then recorded failed",
+        "Staged entry evicted before fingerprinting: restaged at most twice",
+        "Credentials rejected: connection flagged for re-authentication",
+        "Spend cap reached: content held; the daily classification-holds pass hands it back next period",
+        "Digest mismatch: placement UNTRUSTED; source changed since fingerprinting: placement FAILED and the source re-ingested; failed copy: next reconcile starts a new attempt"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Persisted schedules (maintenance queue)",
+      "items": [
+        "connections-refresh, scan-all, full-rescan-all, classification-holds, group-events, reconcile, check-destinations, prune-workflow-history",
+        "Only the I/O profile applies them, and only a worker on the latest application version; undeclared schedules are deleted",
+        "check-destinations lists each destination, marks lost copies ABSENT and reconciles that content"
+      ]
+    },
+    {
+      "dot": "slate",
+      "title": "Executor lease and recovery",
+      "items": [
+        "A worker takes its lease before DBOS.launch() runs startup recovery, and exits 75 if the lease is lost",
+        "run_recovery_sweep re-enqueues a dead executor's work while holding its lease, and forks work pinned to a retired version",
+        "The sweep exists as a library function only: no schedule or entry point calls it at this revision",
+        "prune_history deletes completed workflow records and orphaned datasource checkpoints; audit entries are never pruned"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Control plane",
+      "items": [
+        "Review resolve and exclude write the ledger in one direct transaction, outside any workflow",
+        "Promoting rejected values to the taxonomy enqueues reclassify_rejected through DBOSClient; dry runs go the same way"
+      ]
+    }
+  ]
+}

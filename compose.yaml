@@ -1,0 +1,226 @@
+# Local development stack. Mirrors the deployed topology closely enough to be useful:
+# one PostgreSQL instance serving the ledger, the work queue, the DBOS system store and
+# the audit log, with the two extensions the design depends on, plus the API and the two
+# worker profiles built from the same image (see docker/Dockerfile), the rclone sidecar,
+# and RustFS standing in for OVH content staging.
+name: curate-d
+
+# Staging settings common to both worker profiles. Credentials are deliberately absent:
+# they are per-role and appear only on the worker that is entitled to them. The API is
+# not a staging participant and gets none of this, including the endpoint — a configured
+# endpoint without credentials is rejected at startup rather than silently disabled.
+x-staging-s3: &staging-s3
+  CURATE_D_STAGING_S3_ENDPOINT_URL: http://rustfs:9000
+  CURATE_D_STAGING_S3_BUCKET: ${CURATE_D_STAGING_S3_BUCKET:-curate-d-staging}
+  CURATE_D_STAGING_S3_REGION: us-east-1
+  # Path style and no TLS verification: this is the explicitly configured local fixture
+  # the settings validator allows. OVH is virtual-hosted style over verified HTTPS.
+  CURATE_D_STAGING_S3_ADDRESSING_STYLE: path
+  CURATE_D_STAGING_S3_VERIFY_TLS: "false"
+  CURATE_D_STAGING_S3_CONTENT_PREFIX: ${CURATE_D_STAGING_S3_CONTENT_PREFIX:-content/}
+
+# Settings common to the API and both worker profiles.
+x-app-environment: &app-environment
+  CURATE_D_ENVIRONMENT: local
+  CURATE_D_LEDGER_DATABASE_URL: postgresql+psycopg://curate_d:curate_d@postgres:5432/curate_d
+  CURATE_D_CREDENTIAL_ENCRYPTION_KEY: "${CURATE_D_CREDENTIAL_ENCRYPTION_KEY:?set a Fernet key, e.g. via python -c 'from curate_d.providers.crypto import generate_key; print(generate_key())'}"
+
+services:
+  postgres:
+    # PostGIS images track PostgreSQL majors; pg_trgm ships with PostgreSQL itself.
+    # `postgis/postgis` publishes amd64 only, so local development uses the multi-arch
+    # build from the same docker-postgis maintainer. Override to the official image
+    # wherever amd64 is guaranteed.
+    image: ${CURATE_D_POSTGRES_IMAGE:-imresamu/postgis:18-3.6}
+    environment:
+      POSTGRES_USER: curate_d
+      POSTGRES_PASSWORD: curate_d
+      POSTGRES_DB: curate_d
+      # Deterministic collation: locale-dependent sort order would make path ordering
+      # differ between a developer's machine and the cluster.
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+    ports:
+      - "${CURATE_D_POSTGRES_PORT:-5433}:5432"
+    volumes:
+      # PostgreSQL 18 images expect the mount one level up so that pg_upgrade --link
+      # can move data between major-version subdirectories without crossing a mount point.
+      - postgres-data:/var/lib/postgresql
+      - ./infrastructure/postgres/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U curate_d -d curate_d"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    command:
+      # LISTEN/NOTIFY needs a session that outlives a transaction, and the listener holds
+      # a connection outside the pool; a low ceiling here surfaces leaks early.
+      - postgres
+      - -c
+      - max_connections=100
+      # Each worker's executor lease is a session advisory lock (runtime/lease.py), freed
+      # only when the server ends that session. A crashed process's kernel closes the
+      # socket at once; a vanished host or network sends nothing, and without keepalives
+      # the lock would outlive it for the kernel's default of about two hours. Probing an
+      # idle client after 30s, every 10s, three times, reaps it within about a minute.
+      - -c
+      - tcp_keepalives_idle=30
+      - -c
+      - tcp_keepalives_interval=10
+      - -c
+      - tcp_keepalives_count=3
+
+  # Content staging, standing in for OVH Standard S3 in the cluster. The application
+  # reaches this through the same S3 adapter it uses against OVH; only the endpoint,
+  # addressing style, TLS trust and credentials differ. Local success here is never
+  # evidence about OVH — see infrastructure/rustfs/initialize.sh. It replaced MinIO, whose
+  # upstream is archived (docs/staging.md, "Local engine: RustFS").
+  rustfs:
+    # Pinned by digest to the multi-arch index, linux/amd64 for CI and linux/arm64 locally:
+    # compatibility evidence is only meaningful against an exact server build.
+    image: rustfs/rustfs:1.0.0@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff
+    environment:
+      RUSTFS_ACCESS_KEY: ${CURATE_D_RUSTFS_ROOT_USER:-rustfsadmin}
+      RUSTFS_SECRET_KEY: ${CURATE_D_RUSTFS_ROOT_PASSWORD:-rustfsadmin}
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_CONSOLE_ADDRESS: ":9001"
+      # SSE-S3 without a KMS. A missing or malformed key does not stop the server; it
+      # rejects every SSE-S3 write instead, which rustfs-init's encrypted probe turns into
+      # a failed stack-up rather than a backend storing staged media in the clear.
+      RUSTFS_SSE_S3_MASTER_KEY: ${CURATE_D_RUSTFS_SSE_S3_MASTER_KEY:-Y3VyYXRlLWQtbG9jYWwtZGV2LXNzZS1zMy1rZXktMzI=}
+    ports:
+      # Loopback only. These are development credentials on a service holding staged
+      # media; binding 0.0.0.0 would publish both to the local network.
+      - "127.0.0.1:${CURATE_D_RUSTFS_PORT:-9100}:9000"
+      - "127.0.0.1:${CURATE_D_RUSTFS_CONSOLE_PORT:-9101}:9001"
+    volumes:
+      - rustfs-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/health/ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Provisions the bucket, SSE-S3, the lifecycle rules and the two scoped identities, then
+  # proves encryption and the access matrix with the real credentials before exiting.
+  # Runs to completion on every `stack-up`; it is idempotent, so that is a no-op once ready.
+  rustfs-init:
+    image: rustfs/rc:v0.1.36@sha256:ab024bfebee49a750ce886b4c70963ccd9ddaa03f491704a90710641d7a26699
+    entrypoint: ["/bin/sh", "/initialize.sh"]
+    environment:
+      RUSTFS_ENDPOINT: http://rustfs:9000
+      RUSTFS_ROOT_USER: ${CURATE_D_RUSTFS_ROOT_USER:-rustfsadmin}
+      RUSTFS_ROOT_PASSWORD: ${CURATE_D_RUSTFS_ROOT_PASSWORD:-rustfsadmin}
+      RUSTFS_STAGING_BUCKET: ${CURATE_D_STAGING_S3_BUCKET:-curate-d-staging}
+      RUSTFS_STAGING_PREFIX: ${CURATE_D_STAGING_S3_CONTENT_PREFIX:-content/}
+      RUSTFS_STAGING_READER_KEY: ${CURATE_D_STAGING_READER_KEY:-curate-d-staging-reader}
+      RUSTFS_STAGING_READER_SECRET: ${CURATE_D_STAGING_READER_SECRET:-reader-development-secret}
+      RUSTFS_STAGING_WRITER_KEY: ${CURATE_D_STAGING_WRITER_KEY:-curate-d-staging-writer}
+      RUSTFS_STAGING_WRITER_SECRET: ${CURATE_D_STAGING_WRITER_SECRET:-writer-development-secret}
+    volumes:
+      - ./infrastructure/rustfs/initialize.sh:/initialize.sh:ro
+      - ./infrastructure/rustfs/policies:/policies:ro
+    depends_on:
+      rustfs:
+        condition: service_healthy
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: curate-d:dev
+    command: ["python", "-m", "curate_d.api"]
+    environment:
+      <<: *app-environment
+      # Passed through from the host when set; absent, the API exports no spans
+      # (send_to_logfire="if-token-present").
+      LOGFIRE_TOKEN:
+    ports:
+      - "${CURATE_D_API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # I/O profile: scan, LLM classification, transfer and verify, running beside the rclone
+  # sidecar that holds live provider credentials. Verify only compares digests the providers
+  # report, so it sits with the transfer. See runtime/profiles.py for why this is split from
+  # the CPU profile rather than run as one process.
+  worker-io:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: curate-d:dev
+    # Fixed, so `--scale` refuses: every replica would claim the one executor identity
+    # below, and the second would wait on the first's executor lease (runtime/lease.py).
+    container_name: curate-d-worker-io
+    command: ["python", "-m", "curate_d.worker"]
+    environment:
+      <<: [*app-environment, *staging-s3]
+      CURATE_D_WORKER_PROFILE: io
+      CURATE_D_EXECUTOR_ID: worker-io
+      CURATE_D_RCLONE_RC_URL: http://rclone:5572
+      # Writer: uploads, deletes, and reconciles orphans. Never the root identity.
+      CURATE_D_STAGING_S3_ROLE: writer
+      CURATE_D_STAGING_S3_ACCESS_KEY_ID: ${CURATE_D_STAGING_WRITER_KEY:-curate-d-staging-writer}
+      CURATE_D_STAGING_S3_SECRET_ACCESS_KEY: ${CURATE_D_STAGING_WRITER_SECRET:-writer-development-secret}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rustfs-init:
+        condition: service_completed_successfully
+
+  # rclone's remote-control API, sidecar to worker-io only: the CPU profile decodes
+  # untrusted file content and must never be able to reach a process holding provider
+  # credentials. Deliberately absent from the application image (docker/Dockerfile).
+  rclone:
+    image: rclone/rclone:1.75.1
+    command:
+      - rcd
+      - --rc-addr=:5572
+      - --rc-no-auth
+    ports:
+      # Loopback only, for the integration suite: the control API is unauthenticated here
+      # and would otherwise hand the local network whatever remotes are configured.
+      - "127.0.0.1:${CURATE_D_RCLONE_PORT:-5572}:5572"
+    volumes:
+      - rclone-config:/config/rclone
+
+  # CPU profile: fingerprinting and local inference. No rclone sidecar and no provider
+  # credentials reach this process; see runtime/profiles.py.
+  worker-cpu:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: curate-d:dev
+    # Fixed for the same reason as worker-io: one container per executor identity.
+    container_name: curate-d-worker-cpu
+    command: ["python", "-m", "curate_d.worker"]
+    environment:
+      <<: [*app-environment, *staging-s3]
+      CURATE_D_WORKER_PROFILE: cpu
+      CURATE_D_EXECUTOR_ID: worker-cpu
+      # Reader: GetObject on the content prefix and nothing else.
+      CURATE_D_STAGING_S3_ROLE: reader
+      CURATE_D_STAGING_S3_ACCESS_KEY_ID: ${CURATE_D_STAGING_READER_KEY:-curate-d-staging-reader}
+      CURATE_D_STAGING_S3_SECRET_ACCESS_KEY: ${CURATE_D_STAGING_READER_SECRET:-reader-development-secret}
+    # Reader readiness needs a GET of the zero-byte marker at the exact content prefix,
+    # and only the writer can create it — worker-io does, during its own readiness check.
+    # Compose cannot express "after worker-io has passed readiness", so on a fresh volume
+    # this container can lose that race, fail readiness and exit. Without a restart policy
+    # it would then stay dead and take `docker compose up --wait`, and so `make stack-up`,
+    # down with it; with one, Compose waits through the retry and the stack comes up.
+    #
+    # Seeding the marker from rustfs-init instead would be the better fix, but the pinned
+    # rc cannot write an object whose key ends in `/`: it treats such a target as a
+    # directory and appends the source file name (`content/empty`). Deployments need the
+    # equivalent: a restarting pod, or CPU started after I/O.
+    restart: on-failure
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rustfs-init:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-data:
+  rclone-config:
+  rustfs-data:

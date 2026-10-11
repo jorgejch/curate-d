@@ -1,0 +1,121 @@
+# content-staging Specification
+
+## Purpose
+
+Provide recoverable temporary media storage between I/O and CPU workers while preserving immutable reads, bounded active occupancy, and separation from source-provider authority.
+
+## Requirements
+
+### Requirement: Persistent environment-isolated staging storage
+Local development SHALL use a pinned self-hosted S3 engine through the same application S3
+backend used for private OVH Standard S3 staging storage in the Kubernetes dev and prod
+environments. Filesystem staging MUST NOT be the normal development path or substitute for
+S3 integration testing. Runtime workers MUST NOT create or delete buckets. A missing or
+inaccessible bucket MUST fail readiness explicitly.
+
+#### Scenario: Empty staging
+- **WHEN** all staged content has been released
+- **THEN** the bucket remains provisioned and contains no retained completed media or unnecessary versions
+
+#### Scenario: Missing bucket
+- **WHEN** a worker cannot access its configured staging bucket
+- **THEN** staging fails explicitly without creating a bucket or fetching from a different provider
+
+#### Scenario: Local engine substitution
+- **WHEN** the local S3 engine is replaced with a different implementation
+- **THEN** the application adapter, request construction, integrity checks and failure handling are unchanged, and any change forced in application code is reported as a compatibility finding rather than absorbed
+
+#### Scenario: Local engine is no longer maintained upstream
+- **WHEN** the pinned local engine's upstream repository is archived or otherwise unmaintained
+- **THEN** it is replaced by an actively maintained engine that meets the same compatibility bar, and it is kept only as the interim local engine until that replacement passes
+
+### Requirement: Reader authority limited to staged media
+CPU workers SHALL read staged objects using an environment-specific reader identity whose object access is GetObject on the staged-content prefix only. Where the backend cannot otherwise distinguish a missing object from a denial, the reader MAY also hold ListBucket on its own environment's staging bucket; that grant covers the whole bucket. Where the backend evaluates the prefix's readiness marker against its key without the trailing slash, the reader MAY also hold GetObject on that one slash-less key; that grant SHALL be documented. They MUST NOT receive source-provider, backup, writer, or bucket-management credentials. Workers SHOULD have network egress limited to what they need. Disallowed access MUST be denied.
+
+#### Scenario: Reader access matrix
+- **WHEN** the CPU identity reads staged media and attempts writes, deletion, or access to another environment or backup bucket
+- **THEN** its staged-media read succeeds and every disallowed operation fails
+
+#### Scenario: Reader bucket listing
+- **WHEN** the CPU identity lists its own environment's staging bucket
+- **THEN** the listing succeeds only on a backend where the reader holds the ListBucket grant, and is denied everywhere else
+
+### Requirement: Immutable atomic publication
+Staged content SHALL be keyed by a validated source-derived identifier and SHALL become readable only after a complete verified upload is registered. Repeating a completed stage MUST preserve the registered bytes. A failed or stale writer MUST NOT replace a published winner.
+
+#### Scenario: Concurrent or failed uploads
+- **WHEN** two writers stage one key and one fails or finishes after losing ownership
+- **THEN** readers see only the complete registered winner, never partial or overwritten content
+
+### Requirement: Bounded active staging capacity
+Admission SHALL reserve the incoming declared maximum before consuming a source stream and SHALL account for completed remote occupancy across workers. The system SHALL evict eligible idle content by age and oldest-first under pressure. An oversized stream, exhausted capacity, or uncertain occupancy MUST fail explicitly. Residual multipart/orphan storage SHALL be separately reported and cleaned; active capacity limits MUST NOT be presented as a hard billing cap.
+
+#### Scenario: Capacity pressure during active download
+- **WHEN** admitting another item would exceed the configured bound and remaining candidates have active downloads
+- **THEN** admission fails without removing any protected object
+
+### Requirement: Verified seekable read snapshots
+CPU readers SHALL receive seekable local snapshots only after the requested immutable object's size and SHA-256 match its registered metadata. Local disk reservations SHALL remain active until the handle closes and SHALL be bounded across concurrent reads. A missing object, truncated response, checksum mismatch or disk exhaustion MUST raise a specific failure without source-provider fallback.
+
+#### Scenario: Deletion after download
+- **WHEN** remote content is released after its complete verified local snapshot is opened
+- **THEN** the decoder continues to read unchanged bytes until it closes the handle
+
+#### Scenario: Corrupt or unavailable content
+- **WHEN** a download is missing, truncated or differs from its registered digest
+- **THEN** no decoder handle is returned and temporary local resources are reclaimed
+
+### Requirement: Cleanup without active ingestion
+Completed objects SHALL be deleted promptly when no download uses them. Periodic cleanup SHALL reclaim eligible aged entries even when no new jobs arrive. Failed cleanup MUST be visible and retryable. Incomplete multipart uploads and abandoned content SHALL have independently verified backend-appropriate cleanup backstops (lifecycle or server cleanup plus explicit abort) without retention tiers or object versions that impose unnecessary minimum-duration charges.
+
+#### Scenario: Worker dies during transfer
+- **WHEN** a worker dies after starting an upload or before publishing completed content
+- **THEN** no incomplete object becomes readable and residual storage is reclaimed by reconciliation or the verified backend-specific lifecycle/server cleanup
+
+### Requirement: Compatibility verified on the local engine and OVH
+For every S3 behavior introduced or changed, including SDK upgrades and changes of local
+engine, the project MUST check authoritative documentation for the pinned local engine and
+for OVH, and execute the affected shared contract tests on both the pinned local release
+and the target OVH endpoint. Evidence SHALL identify the engine, its pinned version or
+digest, the endpoint, date, results and documented differences. Passing only one backend
+MUST NOT establish compatibility. Failed or unavailable required checks SHALL block
+acceptance and activation of that behavior.
+
+#### Scenario: Local engine supports an operation that OVH does not
+- **WHEN** an operation or request option succeeds on the local engine but is unsupported or fails on OVH
+- **THEN** the implementation is rejected until a verified common behavior or explicit provisioning-specific solution preserves the required contract
+
+#### Scenario: Remote tests cannot run
+- **WHEN** local tests pass but required OVH checks cannot be executed
+- **THEN** the report marks OVH verification pending and S3 activation remains blocked
+
+#### Scenario: SDK or server changes
+- **WHEN** a pinned local release or SDK version changes, or a provider capability used by staging changes
+- **THEN** affected signatures, headers, checksums, multipart behavior, permissions and error handling are reverified on both backends before release
+
+#### Scenario: The local engine is replaced
+- **WHEN** a different local S3 engine is adopted
+- **THEN** every compatibility entry whose local evidence came from the previous engine returns to pending, is re-earned against the new engine at its pinned version, and the superseded evidence is retained and labelled rather than deleted
+
+### Requirement: Equivalent development security and cleanup behavior
+Local development SHALL provision dedicated reader/writer identities and verified
+encryption and residual-upload cleanup. Provisioning mechanisms MAY differ from OVH, but
+access and cleanup guarantees MUST be tested independently on each. Runtime workers MUST
+NOT use bootstrap administrator credentials. Unsupported configuration MUST fail explicitly
+rather than silently disabling the guarantee.
+
+#### Scenario: Abort lifecycle rule is unsupported locally
+- **WHEN** the local engine does not support the incomplete-upload lifecycle action used on OVH
+- **THEN** initialization uses a verified engine-specific cleanup mechanism and tests explicit abort and stale-upload reclamation without claiming the OVH lifecycle configuration was tested locally
+
+#### Scenario: Abort lifecycle rule is accepted locally
+- **WHEN** the local engine accepts the same incomplete-upload lifecycle payload OVH accepts
+- **THEN** reclamation is observed before the mechanisms are treated as converged, and a rule that is stored but not enforced keeps the cleanup evidence pending
+
+#### Scenario: Encryption is unavailable
+- **WHEN** key management required for the configured encryption mode is missing
+- **THEN** initialization or encrypted staging checks fail and do not fall back to unencrypted storage
+
+#### Scenario: Reader authority under a different policy mechanism
+- **WHEN** the local engine expresses identity scoping through a different policy mechanism than the previous engine
+- **THEN** the same allow/deny matrix is proven against it: the reader may read staged media under the content prefix and every write, delete, listing, prefix escape, other-bucket and bucket-creation attempt is denied
