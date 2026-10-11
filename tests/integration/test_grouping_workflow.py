@@ -65,6 +65,6 @@ async def test_geotagged_photos_are_grouped_into_their_events(
                 assert result is not None
                 assert result.facts.event_group is not None
                 groups.setdefault(result.facts.event_group, set()).add(source.path.split("/")[1])
-        assert sorted(groups.values(), key=sorted) == [{"paris"}, {"lyon"}]
+        assert sorted(groups.values(), key=sorted) == [{"lyon"}, {"paris"}]
         assert any(g.startswith("2026-07-10-") for g in groups)
         assert any(g.startswith("2026-07-17-") for g in groups)
