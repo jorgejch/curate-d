@@ -120,6 +120,12 @@ class FakeSession:
                 del self.server.holders[key]
                 self.server.events.append("lease-released")
 
+    def holder_mode(self, key: int) -> str | None:
+        self._check()
+        if self.server.holders.get(key) not in {None, self}:
+            return "exclusive"
+        return "shared" if self.server.shared.get(key, set()) - {self} else None
+
     def holder(self, key: int) -> str | None:
         self._check()
         return "pid 42 (fake)" if self.server.mode(key) is not None else None
