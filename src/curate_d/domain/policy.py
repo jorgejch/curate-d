@@ -3,8 +3,8 @@
 Destinations are named targets. Placement rules map facts to the destinations content
 should have copies at; every matching rule contributes, so policies compose. Retention is
 separate: an original is kept unless a retention rule explicitly permits release, and even
-then only once enough strongly verified copies exist — counting the original itself when
-the policy says it is one of the copies.
+then only once enough strongly verified copies exist at destinations the policy defines —
+counting the original itself when the policy says it is one of the copies.
 """
 
 from collections.abc import Mapping
