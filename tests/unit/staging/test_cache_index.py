@@ -8,7 +8,7 @@ known time.
 """
 
 import asyncio
-from collections.abc import AsyncGenerator, AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Iterator, Mapping
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from typing import BinaryIO, cast
@@ -423,10 +423,13 @@ _LOCK_DELAY = 0.02
 
 
 class EmptyResult:
-    """Grants every lock probe and finds no row."""
+    """Answers every lock probe with `granted` and finds no row."""
+
+    def __init__(self, granted: bool = True) -> None:
+        self._granted = granted
 
     def scalar_one(self) -> bool:
-        return True
+        return self._granted
 
     def mappings(self) -> "EmptyResult":
         return self
@@ -434,19 +437,30 @@ class EmptyResult:
     def one_or_none(self) -> None:
         return None
 
+    def all(self) -> list[object]:
+        return []
+
+    def __iter__(self) -> Iterator[object]:
+        return iter(())
+
 
 class SlowLockConnection:
-    """Takes `delay` seconds to grant any blocking advisory lock, and finds no rows."""
+    """Takes `delay` seconds to grant any blocking advisory lock, and finds no rows.
 
-    def __init__(self, delay: float) -> None:
+    `granted` is the answer to every entry try-lock, so a test can stand in for a reader
+    holding the entry.
+    """
+
+    def __init__(self, delay: float, *, granted: bool = True) -> None:
         self.delay = delay
+        self.granted = granted
 
     async def execute(
         self, statement: Executable, parameters: Mapping[str, int] | None = None
     ) -> EmptyResult:
         if "pg_advisory_xact_lock" in str(statement):
             await asyncio.sleep(self.delay)
-        return EmptyResult()
+        return EmptyResult(self.granted)
 
 
 class ScriptedEngine:
@@ -478,9 +492,10 @@ class ScriptedEngine:
             self.outcomes.append(outcome)
 
 
-def slow_index(delay: float = _LOCK_DELAY) -> PostgresStagingCacheIndex:
-    """An index whose lock acquisitions each take `delay` seconds."""
-    return PostgresStagingCacheIndex(cast(AsyncEngine, ScriptedEngine(SlowLockConnection(delay))))
+def slow_index(delay: float = _LOCK_DELAY, *, granted: bool = True) -> PostgresStagingCacheIndex:
+    """Return an index whose lock acquisitions each take `delay` seconds."""
+    connection = SlowLockConnection(delay, granted=granted)
+    return PostgresStagingCacheIndex(cast(AsyncEngine, ScriptedEngine(connection)))
 
 
 async def test_a_fresh_writer_lock_reports_its_wait_and_hold_on_release() -> None:
@@ -499,6 +514,7 @@ async def test_a_fresh_writer_lock_reports_its_wait_and_hold_on_release() -> Non
     assert event["caller"] == "occupancy.reserve"
     assert event["wait_seconds"] >= _LOCK_DELAY
     assert event["held_seconds"] >= _LOCK_DELAY
+    assert event["entry_claims"] == 0
 
 
 async def test_a_reentrant_writer_lock_reports_nothing_of_its_own() -> None:
@@ -598,3 +614,118 @@ async def test_a_reader_reports_its_shared_lock_wait_and_a_miss() -> None:
     assert event["staging_key"] == str(key)
     assert event["registered"] is False
     assert event["wait_seconds"] >= _LOCK_DELAY
+
+
+def held_events[E: Mapping[str, object]](events: list[E]) -> list[E]:
+    """Return the writer-lock holding events among `events`."""
+    return [e for e in events if e["event"] == "staging.writer_lock_held"]
+
+
+async def test_a_holding_counts_the_entry_locks_its_evictions_took() -> None:
+    """Both claims stay held to the end of the holding, registered or not."""
+    index = slow_index(0)
+
+    with capture_logs() as events:
+        async with index.writer_lock("occupancy.reserve"):
+            assert await index.evict(key_for(1)) is None
+            assert await index.evict(key_for(2)) is None
+
+    assert [(e["caller"], e["entry_claims"]) for e in held_events(events)] == [
+        ("occupancy.reserve", 2)
+    ]
+
+
+async def test_one_entry_lock_claimed_twice_counts_once() -> None:
+    """A re-taken advisory lock is one lock, and one lock is what a reader waits on."""
+    index = slow_index(0)
+
+    with capture_logs() as events:
+        async with index.writer_lock("occupancy.reserve"):
+            await index.evict(key_for(1))
+            await index.evict(key_for(1))
+
+    assert held_events(events)[0]["entry_claims"] == 1
+
+
+async def test_keys_colliding_on_one_entry_lock_count_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The count is of locks held, not of keys touched."""
+    monkeypatch.setattr("curate_d.staging.cache_index.entry_lock_id", lambda key: 42)
+    index = slow_index(0)
+
+    with capture_logs() as events:
+        async with index.writer_lock("occupancy.reserve"):
+            await index.evict(key_for(1))
+            await index.evict(key_for(2))
+
+    assert held_events(events)[0]["entry_claims"] == 1
+
+
+async def test_a_refused_claim_is_not_counted() -> None:
+    """A reader holding the entry means the writer holds nothing a reader could wait on."""
+    index = slow_index(0, granted=False)
+
+    with capture_logs() as events:
+        async with index.writer_lock("occupancy.sweep"):
+            assert await index.evict(key_for(1)) is None
+
+    assert held_events(events)[0]["entry_claims"] == 0
+
+
+async def test_the_claim_count_starts_afresh_for_each_holding() -> None:
+    """Locks taken by an earlier transaction were released with it."""
+    index = slow_index(0)
+
+    with capture_logs() as events:
+        async with index.writer_lock("occupancy.reserve"):
+            await index.evict(key_for(1))
+            await index.evict(key_for(2))
+        async with index.writer_lock("occupancy.release"):
+            await index.evict(key_for(3))
+        async with index.writer_lock("occupancy.sweep"):
+            pass
+
+    assert [(e["caller"], e["entry_claims"]) for e in held_events(events)] == [
+        ("occupancy.reserve", 2),
+        ("occupancy.release", 1),
+        ("occupancy.sweep", 0),
+    ]
+
+
+async def test_reconciliation_counts_the_claim_it_takes_on_an_orphan() -> None:
+    """Collecting an orphan locks its key, which is the window #1 describes."""
+    index = slow_index(0)
+    orphan = staged(key_for(4))
+    store = FakeObjectStore(orphan.object_key)
+
+    with capture_logs() as events:
+        async with index.writer_lock("occupancy.sweep"):
+            assert await index.reconcile(store) == 1
+
+    assert store.deleted == [orphan.object_key]
+    assert [(e["caller"], e["entry_claims"]) for e in held_events(events)] == [
+        ("occupancy.sweep", 1)
+    ]
+
+
+async def test_a_fresh_evict_reports_its_own_claim() -> None:
+    """Outside an occupancy holding the index's own acquisition carries the count."""
+    index = slow_index(0)
+
+    with capture_logs() as events:
+        await index.evict(key_for(1))
+
+    assert [(e["caller"], e["entry_claims"]) for e in held_events(events)] == [("index.evict", 1)]
+
+
+async def test_a_failed_holding_still_reports_its_claims() -> None:
+    """The claims were held until the rollback, and readers waited on them all the same."""
+    index = slow_index(0)
+
+    with capture_logs() as events, pytest.raises(RuntimeError):
+        async with index.writer_lock("occupancy.reserve"):
+            await index.evict(key_for(1))
+            raise RuntimeError
+
+    assert held_events(events)[0]["entry_claims"] == 1

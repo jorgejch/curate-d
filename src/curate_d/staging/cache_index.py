@@ -204,6 +204,8 @@ class PostgresStagingCacheIndex:
         self._engine = engine
         self._writer_gate = asyncio.Lock()
         self._writer: AsyncConnection | None = None
+        # The entry lock ids the current holding has taken, for its timing event.
+        self._claimed: set[int] = set()
 
     @asynccontextmanager
     async def writer_lock(self, caller: str) -> AsyncGenerator[AsyncConnection, None]:
@@ -217,8 +219,10 @@ class PostgresStagingCacheIndex:
         part way registers nothing.
 
         A fresh acquisition logs `staging.writer_lock_held` once the transaction that owns
-        the lock has ended, with the wait to acquire it and the time it was held. A
-        re-entrant one logs nothing: its time is already inside the outer holding.
+        the lock has ended, with the wait to acquire it, the time it was held and
+        `entry_claims`: the number of distinct entry locks the holding took, every one of
+        them held until the holding ended. A re-entrant acquisition logs nothing: its time
+        and its claims are already inside the outer holding.
 
         Args:
             caller: Label for the operation taking the lock, carried on the event so
@@ -234,6 +238,7 @@ class PostgresStagingCacheIndex:
             return
         requested = time.monotonic()
         acquired: float | None = None
+        claimed: set[int] = set()
         try:
             async with self._writer_gate:
                 with _failures_translated("take the staging writer lock"):
@@ -241,12 +246,14 @@ class PostgresStagingCacheIndex:
                         await connection.execute(_ACQUIRE_WRITER, _WRITER_LOCK_PARAMS)
                         acquired = time.monotonic()
                         self._writer = connection
+                        self._claimed = claimed
                         token = _WRITER_HOLDERS.set(holders | {self})
                         try:
                             yield connection
                         finally:
                             _WRITER_HOLDERS.reset(token)
                             self._writer = None
+                            self._claimed = set()
         finally:
             # After the transaction ends, because that is when PostgreSQL lets go.
             if acquired is not None:
@@ -255,7 +262,21 @@ class PostgresStagingCacheIndex:
                     caller=caller,
                     wait_seconds=acquired - requested,
                     held_seconds=time.monotonic() - acquired,
+                    entry_claims=len(claimed),
                 )
+
+    async def _claim(self, connection: AsyncConnection, key: StagingKey) -> bool:
+        """Try `key`'s exclusive entry lock, counting it against the current holding.
+
+        Counted by lock id rather than by key, because the id is what blocks a reader: a
+        key claimed twice, or two keys colliding on one id, hold one lock. A claim on a
+        key that turns out to be unregistered counts too, since the lock stays held all
+        the same — reclaiming an orphan blocks readers of its key's registered winner.
+        """
+        if not await _claim_entry(connection, key):
+            return False
+        self._claimed.add(entry_lock_id(key))
+        return True
 
     @asynccontextmanager
     async def _current_connection(self) -> AsyncGenerator[AsyncConnection, None]:
@@ -384,7 +405,7 @@ class PostgresStagingCacheIndex:
         """
         async with self.writer_lock("index.evict") as connection:
             with _failures_translated(f"evict staging key {key}"):
-                if not await _claim_entry(connection, key):
+                if not await self._claim(connection, key):
                     return None
                 registration = await registration_of(connection, key)
                 if registration is None:
@@ -419,6 +440,6 @@ class PostgresStagingCacheIndex:
 
             async def claim(key: StagingKey) -> bool:
                 with _failures_translated(f"claim staging key {key} for cleanup"):
-                    return await _claim_entry(connection, key)
+                    return await self._claim(connection, key)
 
             return await delete_orphans(store, registered, claim=claim)
