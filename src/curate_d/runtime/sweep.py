@@ -330,7 +330,11 @@ class ClientRecoveryControl:
     """
 
     def __init__(self, client: DBOSClient, *, before_write: Callable[[], None]) -> None:
-        """Bind the adapter to `client`."""
+        """Bind the adapter to `client` and a guard called before each recovery write.
+
+        `before_write` must raise to refuse a write; its return value is ignored and
+        its exceptions propagate from fork, cancel and re-enqueue calls.
+        """
         self._client = client
         self._before_write = before_write
 
@@ -441,9 +445,20 @@ async def _recover_version(
 ) -> tuple[str, bool]:
     """Commit or reuse one successor, then retire its source; never cancel on fork failure.
 
-    The return flag distinguishes a new fork from repairing a previous transfer.
     Database uniqueness is the cross-process lock: only a committed matching successor
     makes an insertion conflict recoverable. Other database errors still surface.
+    Control errors also propagate, including cancellation failures after the successor
+    has been committed.
+
+    Returns:
+        The successor ID and whether this call created it, rather than reusing a
+        previously committed or concurrently created successor.
+
+    Raises:
+        ValueError: The successor belongs to another source, the source is no longer
+            eligible without a matching successor, or the fork published no successor.
+        IntegrityError: The fork violated a constraint other than the workflow primary
+            key, or a primary-key conflict had no confirmed matching successor.
     """
     original = workflow.workflow_id
     successor = recovery_successor_id(original)
@@ -564,7 +579,11 @@ class _Sweep:
         self.tally = _Tally()
 
     def refuse_misrouted(self, entries: list[StrandedWorkflow]) -> list[StrandedWorkflow]:
-        """Report fork and re-enqueue rows without a named queue as failed; return the rest."""
+        """Fail fork and re-enqueue rows with no queue or DBOS's internal queue.
+
+        Return the remaining entries, including retirements and this sweep's own ticks,
+        which bypass the queue check.
+        """
         kept: list[StrandedWorkflow] = []
         for entry in entries:
             workflow = entry.workflow
@@ -700,7 +719,9 @@ class _Sweep:
 
         Returns:
             False if the latest version changed after the lock was taken, in which case
-            nothing more is forked or retired by this sweep.
+            nothing more is forked or retired by this sweep. True allows the next source
+            version to proceed, even if this version was locked elsewhere or failed;
+            failures are recorded in the tally.
         """
         ids = [entry.workflow.workflow_id for entry in entries]
         try:
@@ -756,7 +777,8 @@ async def run_recovery_sweep(
         settings: Resolved configuration; names the database holding the leases.
         control: The DBOS operations to sweep with: the launched instance's or a client's.
         own_version: The version this sweeper runs. Only a sweeper on the target, DBOS's
-            latest version, forks or retires.
+            latest version, handles fork and retire candidates. Dead-executor recovery
+            runs on every version, including cancellation of those executors' stale ticks.
         lease_factory: Builds the lease for one executor identity. Defaults to a lease on
             the configured DBOS system database.
         version_holds: Tries to hold one version's lock exclusively. Defaults to
@@ -769,8 +791,9 @@ async def run_recovery_sweep(
         would leave the remaining orphans stranded for another interval.
 
     Raises:
-        Exception: Reading the latest version, the pending rows or the registry failed;
-            nothing was written.
+        Exception: The initial latest-version read, pending-row listing or registry read
+            failed; nothing was written. Errors re-reading the latest version under a
+            source lock are instead recorded as per-workflow failures.
     """
     leases = lease_factory or (
         lambda executor_id: ExecutorLease.for_settings(

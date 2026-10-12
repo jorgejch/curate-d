@@ -47,7 +47,18 @@ class _RefusedError(Exception):
 
 
 async def _sweep(settings: Settings, client: DBOSClient, target: str) -> int:
-    """Check the target, hold its version lease, sweep, and print the outcome."""
+    """Check the target, hold its version lease, sweep, and print the outcome as JSON.
+
+    Returns:
+        `EXIT_LEASE_LOST` if lease loss was detected, otherwise `EXIT_FAILED_ROWS` if
+        any row failed, or 0. Lease loss takes precedence over row failures.
+
+    Raises:
+        _RefusedError: The target is not both latest and this build's version, is not
+            registered, or its lease could not be acquired. No recovery writes occur.
+        Exception: Version reads, monitoring or the sweep failed outside per-row handling;
+            these errors propagate rather than becoming an exit status.
+    """
     latest = (await client.get_latest_application_version_async())["version_name"]
     own = dbos_app.APPLICATION_VERSION
     if target != latest or target != own:
@@ -92,10 +103,16 @@ def _print(outcome: SweepOutcome) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run one operator sweep and return the process exit status.
 
+    Print the completed sweep's outcome as JSON on stdout. Errors escaping the sweep
+    propagate unless they are a target or lease refusal converted to `EXIT_REFUSED`.
+
     Returns:
         0 when no row failed, `EXIT_FAILED_ROWS` when any did, `EXIT_REFUSED` when the
         target or the lease is refused before anything is written, `EXIT_LEASE_LOST` when
         the version lease was lost mid-run.
+
+    Raises:
+        SystemExit: Argument parsing requests help or rejects invalid arguments.
     """
     parser = argparse.ArgumentParser(
         prog="python -m curate_d.runtime.operator_sweep",

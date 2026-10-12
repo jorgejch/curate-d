@@ -49,7 +49,12 @@ class PromotionReadBackError(RuntimeError):
 
 
 def _database_now(settings: Settings) -> datetime:
-    """Return the database's clock, read on a short-lived dedicated connection."""
+    """Return the database's clock, read on a short-lived dedicated connection.
+
+    Raises:
+        PromotionRefusedError: The query returned no row or a non-datetime value.
+        psycopg.Error: Connecting to or querying the database failed.
+    """
     connection = connect_dedicated(
         lease_conninfo(settings), application_name=f"{APPLICATION_NAME} promote"
     )
@@ -65,8 +70,13 @@ def _database_now(settings: Settings) -> datetime:
 def _check_clock(settings: Settings) -> float:
     """Return the skew between this clock and the database's, refusing more than 1 s.
 
+    The skew is absolute, in seconds, measured against the midpoint of the database
+    round trip. Exactly `MAX_CLOCK_SKEW_SECONDS` is accepted.
+
     Raises:
-        PromotionRefusedError: The clocks differ by more than `MAX_CLOCK_SKEW_SECONDS`.
+        PromotionRefusedError: The database returned no valid time, or the clocks differ
+            by more than `MAX_CLOCK_SKEW_SECONDS`.
+        psycopg.Error: Reading the database clock failed.
     """
     before = time.time()
     database = _database_now(settings).timestamp()
@@ -91,9 +101,11 @@ def promote(client: DBOSClient, settings: Settings, version: str) -> str:
 
     Raises:
         PromotionRefusedError: `version` is not registered for this application, or the
-            clocks disagree; nothing was written.
+            database clock is invalid or differs by more than 1 s; nothing was written.
         DBOSException: DBOS refused the promotion, as for another application's version.
-        PromotionReadBackError: The latest version read back is not `version`.
+        psycopg.Error: Reading the database clock failed before promotion.
+        PromotionReadBackError: The latest version read back is not `version`; the
+            promotion was already written and is not rolled back.
     """
     known = {info["version_name"] for info in client.list_application_versions()}
     if version not in known:
@@ -116,8 +128,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Promote one version and return the process exit status.
 
     Returns:
-        0 once the version reads back as latest; `EXIT_REFUSED` on any refusal or
-        mismatch, having written nothing on a refusal.
+        0 once the version reads back as latest; `EXIT_REFUSED` for a pre-write refusal,
+        a DBOS or psycopg error during promotion, or a read-back mismatch. A mismatch
+        occurs after the promotion was written.
+
+    Raises:
+        SystemExit: Argument parsing requests help or rejects invalid arguments.
     """
     parser = argparse.ArgumentParser(
         prog="python -m curate_d.runtime.promote",

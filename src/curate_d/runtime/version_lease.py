@@ -142,7 +142,8 @@ async def registrations(settings: Settings) -> Mapping[str, datetime]:
     """Return every registered version with its first registration time.
 
     Raises:
-        VersionRegistryError: The registry could not be read.
+        VersionRegistryError: The registry could not be read, or a row contains a
+            non-string version or a non-datetime registration time.
     """
     try:
         rows = await asyncio.to_thread(_run, settings, "version registry read", _REGISTRATIONS, {})
@@ -176,7 +177,9 @@ async def hold_exclusive(
     """Try once to hold `version`'s lock exclusively, on a dedicated connection.
 
     Yields a held `VersionHold` until the block exits, or a refused one naming the mode
-    another session holds. The lock is released, and the connection closed, on every exit.
+    another session holds, if visible. On exit, attempt to release any acquired lock and
+    close the session, suppressing cleanup errors. Exceptions from the caller's block
+    propagate.
 
     Args:
         settings: Resolved configuration naming the system database.
@@ -186,7 +189,7 @@ async def hold_exclusive(
         application_name: The DBOS application name, part of the lock key.
 
     Raises:
-        psycopg.Error: Connecting or taking the lock failed; nothing is held.
+        psycopg.Error: Connecting, taking the lock or reading its holder's mode failed.
     """
     key = version_lease_key(application_name, version)
     session = await asyncio.to_thread(connect or (lambda: _connect_exclusive(settings, version)))
