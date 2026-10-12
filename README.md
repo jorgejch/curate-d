@@ -19,9 +19,9 @@ Anything can move files between clouds. The part that matters here is not losing
 - **Verification is graded, not assumed.** Providers expose different hash algorithms and
   some content has no stable bytes to hash at all. Each placement records the strongest
   check actually achieved, and only strong levels can ever unlock source cleanup.
-- **Retention is a policy outcome, not a pipeline stage.** A source may itself be one of
-  the copies a redundancy rule requires, in which case deleting it would violate the rule
-  the transfer existed to satisfy.
+- **Retention is a policy outcome, not a pipeline stage.** A finished transfer releases
+  nothing. An original is released only when a policy permits it, and only once the copies
+  that policy requires exist without it.
 - **Uncertainty quarantines rather than guesses.** A stalled file is recoverable; a
   confidently misfiled one is not.
 
