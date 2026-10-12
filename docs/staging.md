@@ -147,11 +147,13 @@ These events measure the writer-lock and reader-lock contention that #1's revisi
 depends on (#4). Each is one JSON log line per occurrence. Durations are seconds, as
 floats, from a monotonic clock. The events carry no pod or executor identity: the pod the
 line came from supplies it, whether that is the pod named in `kubectl logs` or the log
-shipper's pod metadata.
+shipper's pod metadata. Every line also has the logger's ISO-8601 UTC `timestamp`, taken
+when the line is written.
 
 | Event | Level | Emitted by | Fields |
 | --- | --- | --- | --- |
-| `staging.writer_lock_held` | info | I/O, once per fresh writer-lock holding, after its transaction ends | `caller`, `wait_seconds` (request to acquisition, including the in-process gate and connection checkout), `held_seconds` (acquisition to commit or rollback) |
+| `staging.writer_lock_held` | info | I/O, once per fresh writer-lock holding, after its transaction ends | `caller`, `wait_seconds` (request to acquisition, including the in-process gate and connection checkout), `held_seconds` (acquisition to commit or rollback), `entry_claims` (distinct entry locks the holding took, all held until it ended) |
+| `staging.reservation_phases` | info | I/O, once per `publish()` reservation, however it ended | `staging_key`, `declared_bytes`, `outcome`, `error`, `admission_seconds`, `upload_seconds`, `registration_seconds`, `commit_seconds`, `evicted`, `protected`, `orphans_deleted` |
 | `staging.reader_lock_wait` | info | CPU (and I/O if it reads), once per `hold_for_download` | `staging_key`, `wait_seconds` (the `pg_advisory_xact_lock_shared` call alone), `registered` (`false` is a cache miss) |
 | `staging.transfer_deadline_hit` | warning | Either profile, when an upload or download exceeds `CURATE_D_STAGING_TRANSFER_TIMEOUT_SECONDS` | `transfer` (`uploading <object key>` or `downloading <object key>`), `deadline_seconds` |
 
@@ -159,13 +161,39 @@ shipper's pod metadata.
 only paths that take the writer lock fresh. `index.register`, `index.evict`,
 `index.reconcile` and `index.release` label the index's own acquisitions, which in
 production always re-enter an occupancy holding. A re-entrant acquisition emits nothing,
-because its time is already inside the outer holding. The `occupancy.reserve` hold covers
-admission, the upload and the registration together. It is not yet split into those three
-parts.
+because its time and its entry claims are already inside the outer holding.
 
-The queries read one pod's JSON lines over a chosen window. Pick the window with
-`--since`, add `-c <container>` for a pod that runs a sidecar, and skip non-JSON lines
-with `fromjson?`. `pct` picks the sample at rank `floor((n - 1) * p)` of the sorted values:
+`entry_claims` counts entry locks, not keys: a key claimed twice, or two keys whose
+four-byte lock ids collide, is one lock. Eviction and reconciliation both claim, and a
+claim counts even when the key turns out to have nothing registered, because the lock is
+held all the same. That is #1's case: collecting an orphan locks its key, and a reader of
+the key's registered winner waits until the holding ends. A claim a reader refused is
+not counted. `entry_claims` together with `held_seconds` is the window #1 describes.
+
+`staging.reservation_phases` splits the `occupancy.reserve` hold. `admission_seconds`
+runs from acquiring the lock to the admission decision (measuring, reclaiming and
+evicting). `upload_seconds` is the upload and `registration_seconds` the row insert.
+`commit_seconds` runs from the insert to the end of the reservation block, which is
+mostly the writer transaction's commit. Admission, upload, registration and commit add
+up to the holding's `held_seconds`, less a few statements. The lock wait is not a phase:
+it is the holding's `wait_seconds`. `outcome` is one of:
+
+- `registered`: the reservation committed. A later lookup that finds another attempt's
+  registration still raises `StagingIntegrityError`, but outside the reservation.
+- `refused`: admission raised `StagingCapacityExhaustedError`. No phase ran, so every
+  phase field and the reclamation counts are `null`.
+- `cancelled`: the task was cancelled, typically by a drain.
+- `failed`: any other exception, such as a short source, a transfer deadline or a
+  database failure.
+
+`error` is the exception's class name, or `null` when the outcome is `registered`. A
+phase that never started is `null`. A phase that a failure or cancellation cut short
+runs to the end of the reservation, rollback included. `evicted` and `protected` count
+keys, and `orphans_deleted` counts objects, from the admission's reclamation.
+
+The queries read JSON lines over a chosen window. Pick the window with `--since`, add
+`-c <container>` for a pod that runs a sidecar, and skip non-JSON lines with `fromjson?`.
+`pct` picks the sample at rank `floor((n - 1) * p)` of the sorted values:
 
 ```bash
 PCT='def pct(p): sort | .[((length - 1) * p) | floor];'
@@ -179,12 +207,49 @@ kubectl logs -n <namespace> <io-pod> --since=24h \
       held_p50: (map(.held_seconds) | pct(0.5)), held_p95: (map(.held_seconds) | pct(0.95)),
       held_max: (map(.held_seconds) | max)})'
 
+# Reservation phases by outcome (I/O pod). A phase that never ran is left out of its
+# distribution, so a phase with no samples prints nulls.
+kubectl logs -n <namespace> <io-pod> --since=24h \
+  | jq -cR 'fromjson? | select(.event == "staging.reservation_phases")' \
+  | jq -s "$PCT"' def dist(f): map(f | select(. != null))
+        | {count: length, p50: pct(0.5), p95: pct(0.95), max: max};
+      group_by(.outcome) | map({outcome: .[0].outcome, count: length,
+        admission: dist(.admission_seconds), upload: dist(.upload_seconds),
+        registration: dist(.registration_seconds), commit: dist(.commit_seconds)})'
+
+# Holdings that took entry locks: the window #1 describes (I/O pod).
+kubectl logs -n <namespace> <io-pod> --since=24h \
+  | jq -cR 'fromjson? | select(.event == "staging.writer_lock_held"
+      and (.caller == "occupancy.reserve" or .caller == "occupancy.sweep")
+      and (.entry_claims // 0) > 0)' \
+  | jq -s "$PCT"' group_by(.caller) | map({caller: .[0].caller, count: length,
+      claims_p50: (map(.entry_claims) | pct(0.5)), claims_max: (map(.entry_claims) | max),
+      held_p95: (map(.held_seconds) | pct(0.95))})'
+
+# Writer-lock duty cycle across every I/O pod: the share of the window the global lock
+# was held, overall and for the busiest hour. With a selector, `kubectl logs` keeps only
+# the last 10 lines per pod unless given `--tail=-1`. `--prefix` names each line's pod,
+# and the `sub` strips that name off again. Set WINDOW to the `--since` window in
+# seconds. A holding counts toward the hour in which it ended.
+WINDOW=86400
+kubectl logs -n <namespace> -l <io-selector> --since=24h --tail=-1 --prefix \
+    --max-log-requests=<io-pod-count> \
+  | jq -cR 'sub("^\\[[^]]*\\] "; "") | fromjson? | select(.event == "staging.writer_lock_held")' \
+  | jq -s --argjson window "$WINDOW" '{holdings: length,
+      duty_cycle: ((map(.held_seconds) | add // 0) / $window),
+      busiest_hour: (group_by(.timestamp[0:13])
+        | map({hour: .[0].timestamp[0:13], holdings: length,
+               duty_cycle: ((map(.held_seconds) | add) / 3600)})
+        | max_by(.duty_cycle))}'
+
 # Reader shared-lock wait, split into registered reads and misses (CPU pod).
+# `blocked_1s` counts the reads that waited a second or more.
 kubectl logs -n <namespace> <cpu-pod> --since=24h \
   | jq -cR 'fromjson? | select(.event == "staging.reader_lock_wait")' \
   | jq -s "$PCT"' group_by(.registered) | map({registered: .[0].registered, count: length,
       wait_p50: (map(.wait_seconds) | pct(0.5)), wait_p95: (map(.wait_seconds) | pct(0.95)),
-      wait_max: (map(.wait_seconds) | max)})'
+      wait_max: (map(.wait_seconds) | max),
+      blocked_1s: (map(select(.wait_seconds >= 1)) | length)})'
 
 # Transfer deadline hits by direction (either pod).
 kubectl logs -n <namespace> <pod> --since=24h \
@@ -194,9 +259,27 @@ kubectl logs -n <namespace> <pod> --since=24h \
              deadline_seconds: (map(.deadline_seconds) | unique)})'
 ```
 
-An empty selection makes the grouped queries print `[]`. `kubectl logs` reaches back
+An empty selection makes the grouped queries print `[]`, and the duty-cycle query print
+`{"holdings": 0, "duty_cycle": 0, "busiest_hour": null}`. `kubectl logs` reaches back
 only as far as the container's current log, so a reading that spans restarts needs the
 log shipper's store. The fields and filters are the same there.
+
+### Revisit threshold for #1
+
+These are proposed defaults, open to change in review. Read them over at least seven days
+of real ingest in one environment. The global writer lock counts as binding, and #1's
+narrowing is due, when any of these holds:
+
+- `occupancy.reserve` `wait_seconds` p95 is 30 seconds or more. That is 10% of the default
+  300-second `CURATE_D_STAGING_TRANSFER_TIMEOUT_SECONDS`, so writers queue for a
+  meaningful share of a transfer.
+- The writer-lock duty cycle is 50% or more in the busiest hour. Admission is then
+  serialized for most of the peak, and adding I/O pods cannot add throughput.
+- `staging.reader_lock_wait` events with `registered: true` and `wait_seconds` of one
+  second or more are at least 1% of all reader events. Readers of live content then wait
+  on reclamation's entry claims often enough to matter.
+
+The first reading from dev, and the threshold's link, go in a comment on #1.
 
 ## DBOS step boundaries
 
