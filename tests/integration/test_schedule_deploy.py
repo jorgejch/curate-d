@@ -4,14 +4,16 @@ What reconciliation decides to write is unit-tested against an in-memory client.
 only a real server can show is that DBOS's client keeps a row's id, pause status and
 firing history across an apply, that the fence runs inside the client's own
 transactions, that a stale command cannot commit after a newer version registers, that a
-connection lost part-way leaves a state a re-run converges from, and that a launching
-worker no longer touches the rows at all.
+connection lost part-way leaves a state a re-run converges from, that the command maps
+each of those outcomes to its exit status, and that a launching worker no longer touches
+the rows at all.
 
 Each test acts as an application of its own (`curate-d-test-<id>`), with its own
 versions, queue and schedules, so it neither reads nor deletes the rows of the
 application the local stack runs, and no launched DBOS fires its schedules.
 """
 
+import io
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -34,6 +36,7 @@ from curate_d.runtime.schedule_fence import (
     fenced_engine,
     schedule_authority_key,
 )
+from curate_d.schedules import __main__ as command
 from curate_d.schedules.deployment import (
     Patience,
     ScheduleReconciliation,
@@ -551,6 +554,40 @@ def test_the_fence_reads_dbos_version_table_as_dbos_does(
         assert client.get_latest_application_version()["version_name"] == latest
         with fence.armed():
             assert client.list_schedules(application_name=app.name) == []
+
+
+def test_the_command_maps_each_real_outcome_to_its_exit_status(
+    settings: Settings, app: _App, observer: DBOSClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI on its real fenced client: 0, then 6 under a held lock, then 4 once superseded."""
+    version = app.register_version()
+    declared = [app.entry("kept")]
+    monkeypatch.setattr(command, "application_name", lambda environment: app.name)
+    monkeypatch.setattr(command, "declared_schedules", lambda settings: declared)
+    monkeypatch.setattr(dbos_app, "APPLICATION_VERSION", version)
+
+    def run(*argv: str) -> tuple[int, str]:
+        out = io.StringIO()
+        return command.run(list(argv), settings=settings, out=out), out.getvalue()
+
+    assert run("reconcile", "--wait-seconds", "2")[0] == 0
+    assert set(app.stored(observer)) == {"kept"}
+    assert run("show")[1].splitlines()[1:] == [f"= {app.prefix}kept"]
+
+    with app.engine.connect() as holder:
+        holder.execute(
+            sa.text("SELECT pg_advisory_xact_lock(CAST(:key AS bigint))"),
+            {"key": schedule_authority_key()},
+        )
+        status, _ = run("reconcile", "--wait-seconds", "2", "--lock-timeout-seconds", "0.3")
+        holder.rollback()
+    assert status == command.EXIT_AUTHORITY_UNAVAILABLE == 6
+
+    app.register_version()
+    declared.append(app.entry("added"))
+    assert run("reconcile", "--wait-seconds", "2")[0] == command.EXIT_SUPERSEDED == 4
+    assert run("reconcile", "--wait-seconds", "2", "--allow-superseded")[0] == 0
+    assert set(app.stored(observer)) == {"kept"}
 
 
 @pytest.fixture

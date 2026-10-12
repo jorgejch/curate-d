@@ -9,11 +9,11 @@ Subcommands:
   the workers are rolled back.
 - `show`: print what `reconcile` would change, writing nothing.
 
-Exit status: 0 done; 1 unexpected failure; 2 the schedule authority stayed held; 3 the
-version was not registered in time; 4 another version is the latest (0 with
-`--allow-superseded`); 5 a queue was not
-registered in time. Every status leaves the schedules either as they were or partly
-reconciled in a state a re-run converges from.
+Exit status: 0 done; 1 unexpected failure; 2 usage error (argparse's); 3 the version was
+not registered in time; 4 another version is the latest (0 with `--allow-superseded`); 5 a
+queue was not registered in time; 6 the schedule authority stayed held. Every status
+leaves the schedules either as they were or partly reconciled in a state a re-run
+converges from.
 """
 
 import argparse
@@ -49,7 +49,8 @@ from curate_d.workflows.registry import declared_schedules
 
 logger = get_logger(__name__)
 
-EXIT_AUTHORITY_UNAVAILABLE: Final = 2
+# Not 2: argparse exits 2 on a usage error, which a retry does not fix.
+EXIT_AUTHORITY_UNAVAILABLE: Final = 6
 EXIT_SUPERSEDED: Final = VersionSupersededError.exit_code
 
 ClientOpener = Callable[[Settings, ScheduleFence], AbstractContextManager[ScheduleClient]]

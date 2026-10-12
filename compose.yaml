@@ -170,13 +170,16 @@ services:
 
   # The deploy job's schedule step: workers never write schedules, so this applies the
   # build's declarations and retires dropped ones (python -m curate_d.schedules). It waits
-  # for this version's workers to register the version and queues, then exits; `up --wait`
-  # waits for it, and `make schedules` runs it again.
+  # for this version's workers to register the version and queues, then exits. Behind a
+  # profile so plain `up` skips it: `up --wait` neither waits for a one-shot to finish nor
+  # reports its exit status, while `run` does both. `make stack-up` runs it after the
+  # stack is up, and `make schedules` runs it again.
   schedules:
     build:
       context: .
       dockerfile: docker/Dockerfile
     image: curate-d:dev
+    profiles: [deploy]
     command: ["python", "-m", "curate_d.schedules", "reconcile"]
     environment:
       <<: *app-environment

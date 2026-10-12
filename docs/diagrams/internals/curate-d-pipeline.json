@@ -503,9 +503,9 @@
       "sources": [
         {
           "path": "src/curate_d/worker/main.py",
-          "line": 733,
-          "end_line": 747,
-          "label": "lease, launch, register, apply"
+          "line": 642,
+          "end_line": 655,
+          "label": "lease, launch, register"
         },
         {
           "path": "src/curate_d/runtime/datasource.py",
@@ -538,8 +538,8 @@
         },
         {
           "path": "src/curate_d/worker/main.py",
-          "line": 787,
-          "end_line": 803,
+          "line": 697,
+          "end_line": 713,
           "label": "exit 75 when lost"
         }
       ]

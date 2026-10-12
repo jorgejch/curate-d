@@ -12,6 +12,10 @@
 #          restarts the pooler and the optional egress proxy, scales the API and the
 #          workers back, and removes the annotation. The database pod keeps running.
 #
+# The wipe takes DBOS's persisted schedules with it, and workers never write them, so both
+# end by running the deploy job's schedule step (`python -m curate_d.schedules reconcile`)
+# once the workers are back: locally the `schedules` service, in dev a one-off pod.
+#
 # Dev settings (environment variables):
 #   CURATE_D_RESET_NAMESPACE         Required. Namespace of the environment to reset.
 #   CURATE_D_RESET_CONFIGMAP         ConfigMap holding CURATE_D_ENVIRONMENT (curate-d-config).
@@ -126,6 +130,9 @@ local_reset() {
   # shellcheck disable=SC2046 # one word per service name
   docker compose stop $(docker compose config --services | grep -vx postgres)
   docker compose up -d --wait
+  log "Reconciling persisted schedules"
+  docker compose run --rm schedules ||
+    fail "reset done, but the schedules were not reconciled; run make schedules"
   log "Done"
 }
 
@@ -210,6 +217,10 @@ dev_reset() {
     "${K[@]}" rollout status "$workload" --timeout=10m
   done
   "${K[@]}" annotate "${APP_WORKLOADS[@]}" ${PAUSE_ANNOTATION:+"$PAUSE_ANNOTATION-"} "$RECORD-"
+
+  log "Reconciling persisted schedules"
+  dev_helper "python -m curate_d.schedules reconcile" ||
+    fail "reset done, but the schedules were not reconciled; rerun the deploy job's schedule step"
   log "Done"
 }
 

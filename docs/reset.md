@@ -46,7 +46,7 @@ restore the provider connections.
 | Where | What | Result |
 | --- | --- | --- |
 | Ledger database (`curate_d`) | Application tables in `public` | wiped, recreated empty by migrations |
-| | DBOS tables in `dbos` (workflows, steps, queues, schedules, versions) | wiped, recreated empty by migrations |
+| | DBOS tables in `dbos` (workflows, steps, queues, schedules, versions) | wiped, recreated empty by migrations; the schedules are written again at the end |
 | | `provider_connections` | set aside, restored as stored (pCloud stays authorized) |
 | | PostGIS `spatial_ref_sys` and other extension objects | kept |
 | | Audit triggers | recreated by migrations |
@@ -87,6 +87,11 @@ Each pod in `<namespace>` across the phases of `reset-environment.sh dev --execu
 - **Restart infrastructure.** Connection infrastructure restarts so it drops server connections and prepared
   statements that point at dropped objects. The database is
   never restarted: the wipe is plain SQL and does not need it.
+- **Reconcile schedules.** The wipe removed DBOS's persisted schedules, and workers never write
+  them, so once the workers are back the script runs the deploy job's schedule step,
+  `python -m curate_d.schedules reconcile`, in another one-off pod from the I/O worker's
+  template (locally, the `schedules` Compose service). If that step fails, the reset itself is
+  done; rerun the step (see [Persisted schedules](../infrastructure/README.md#persisted-schedules)).
 
 ## Local and dev side by side
 
@@ -96,6 +101,7 @@ Each pod in `<namespace>` across the phases of `reset-environment.sh dev --execu
 | Stops first | `api`, `worker-io`, `worker-cpu` | the same three, scaled to 0, the reconciler kept off them |
 | Restarts after | every service except `postgres` | connection infrastructure, then the API and workers |
 | Waits for | `docker compose up -d --wait` (healthy) | `rollout status` on every workload |
+| Then reconciles schedules with | `docker compose run --rm schedules` | a one-off pod running `python -m curate_d.schedules reconcile` |
 | Needs on your machine | the stack's `CURATE_D_CREDENTIAL_ENCRYPTION_KEY` exported, as for `make stack-up` | a kubectl context for the cluster, and `jq` |
 
 ## What it refuses

@@ -131,13 +131,15 @@ step is idempotent. The job may retry freely.
 | --- | --- | --- |
 | 0 | Reconciled | |
 | 1 | Unexpected failure, a lost connection included | Retry |
-| 2 | Another writer held the schedule lock past `--lock-timeout-seconds` (120) | The log names its backend; retry once it ends |
+| 2 | Usage error: an unknown subcommand or option | Fix the job's command line |
 | 3 | The version was not registered within the wait | Check that this version's workers started |
 | 4 | Another version is the latest | A newer deployment owns the schedules: nothing to do (`--allow-superseded` exits 0 instead); after a rollback, run `promote` |
 | 5 | A schedule's queue was not registered within the wait | Check the workers' startup logs |
+| 6 | Another writer held the schedule lock past `--lock-timeout-seconds` (120) | The log names its backend; retry once it ends |
 
-The local stack runs `reconcile` as the one-shot `schedules` service on every
-`make stack-up`; `make schedules` runs it again.
+The local stack runs `reconcile` as the one-shot `schedules` service (Compose profile
+`deploy`) at the end of every `make stack-up`, which fails if it does; `make schedules`
+runs it again.
 
 ## Content staging on RustFS
 

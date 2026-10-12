@@ -39,8 +39,10 @@ test-integration: ## Integration suite (needs the local stack); no coverage gate
 
 check: lint typecheck test ## Lint, type check and unit suite; CI adds staging integration
 
-stack-up: ## Start the local stack (PostgreSQL, RustFS, API and workers) and wait for it
+# Then the deploy job's schedule step, as a deployment runs it after the workers roll out.
+stack-up: ## Start the local stack (PostgreSQL, RustFS, API and workers), wait, reconcile schedules
 	docker compose up -d --wait
+	docker compose run --rm schedules
 
 # Separate from stack-up so a staging problem is diagnosable on its own: this prints the
 # provisioning steps and fails on the first one that cannot be verified.

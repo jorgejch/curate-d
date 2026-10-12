@@ -10,6 +10,7 @@ from curate_d.config import Settings
 from curate_d.runtime import dbos_app
 from curate_d.runtime.schedule_fence import ScheduleAuthorityUnavailableError, ScheduleFence
 from curate_d.schedules import __main__ as command
+from curate_d.schedules.deployment import QueuesNotDeclaredError, VersionNotRegisteredError
 from curate_d.workflows.registry import declared_schedule_names
 from tests.unit.schedules.fakes import FakeScheduleClient
 
@@ -126,10 +127,27 @@ def test_allow_superseded_exits_0_when_a_newer_rollout_owns_the_schedules(
     assert harness.client is not None and harness.client.writes == []
 
 
-def test_a_held_authority_exits_2(harness: _Harness) -> None:
+def test_a_held_authority_exits_6(harness: _Harness) -> None:
     """Another writer stuck holding the lock fails the job, distinctly."""
     harness.fail = ScheduleAuthorityUnavailableError("pid 1 holds it")
-    assert harness.run("reconcile")[0] == 2
+    assert harness.run("reconcile")[0] == 6
+
+
+def test_a_usage_error_is_told_apart_from_every_status_the_command_returns(
+    harness: _Harness,
+) -> None:
+    """argparse's 2 means a broken command line, which no retry fixes."""
+    with pytest.raises(SystemExit) as raised:
+        harness.run("reconcile", "--no-such-option")
+    returned = {
+        command.EXIT_AUTHORITY_UNAVAILABLE,
+        command.EXIT_SUPERSEDED,
+        VersionNotRegisteredError.exit_code,
+        QueuesNotDeclaredError.exit_code,
+    }
+    assert raised.value.code == 2
+    assert 2 not in returned
+    assert harness.client is None
 
 
 def test_promote_makes_the_version_latest_and_reconciles(harness: _Harness) -> None:

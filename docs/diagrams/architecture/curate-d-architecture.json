@@ -69,8 +69,8 @@
       "size": [200, 64],
       "sources": [
         { "path": "src/curate_d/runtime/queues.py", "line": 205, "end_line": 216, "label": "I/O queues" },
-        { "path": "src/curate_d/workflows/registry.py", "line": 28, "end_line": 47, "label": "I/O-only schedules" },
-        { "path": "src/curate_d/worker/main.py", "line": 483, "end_line": 557, "label": "I/O-only services" }
+        { "path": "src/curate_d/workflows/registry.py", "line": 30, "end_line": 48, "label": "maintenance-queue schedules" },
+        { "path": "src/curate_d/worker/main.py", "line": 480, "end_line": 554, "label": "I/O-only services" }
       ]
     },
     {
@@ -211,7 +211,7 @@
       "title": "Durable execution",
       "items": [
         "DBOS system tables live in the ledger database, schema dbos",
-        "The I/O worker applies persisted schedules under an advisory-lock authority",
+        "The deploy job writes persisted schedules behind a latest-version fence; workers never do",
         "Each worker holds an executor lease; the API never launches DBOS and uses DBOSClient",
         "Ledger connections go through a session-mode pooler, as the lease requires",
         "Migrations bring the dbos schema up before the ledger's own revisions"
