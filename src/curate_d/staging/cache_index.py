@@ -18,8 +18,12 @@ transaction-scoped, and the writer transaction outlives everything a caller does
 reclamation merely touched therefore waits on `hold_for_download`'s shared lock until
 that transaction ends, and the four-byte entry lock space means a key that only collides
 with a reclaimed one waits with it. The wait is bounded by the holder's transfer timeout
-rather than by a `lock_timeout`, because narrowing it means narrowing the writer lock
-itself, which is the decision recorded in `occupancy`'s module docstring.
+rather than by a `lock_timeout`, which would turn a bounded stall into a failed download.
+Narrowing it does not need a narrower writer lock: reclamation can commit in a writer-lock
+holding of its own before the admitting one starts, so its entry locks end at that commit
+rather than after the upload. That change is deferred with the rest of the decision
+recorded in `occupancy`'s module docstring, until the measurement there shows the lock
+binding (#1, #4).
 """
 
 import asyncio
@@ -88,8 +92,10 @@ def entry_lock_id(key: StagingKey) -> int:
 
     Hashed rather than sliced out of the key so that any key shape maps into the lock
     space, and hashed with a fixed function rather than `hash()`, whose per-process salt
-    would put two pods on different locks for the same entry. A collision costs an
-    unnecessary eviction skip, never a lost protection.
+    would put two pods on different locks for the same entry. A collision never loses a
+    protection, but it costs on both sides of the lock: a writer's try-lock skips an
+    eviction or an orphan delete it did not need to, and a reader's blocking shared lock
+    waits for as long as the transaction of a writer that claimed the colliding key lasts.
     """
     digest = hashlib.blake2b(key.encode(), digest_size=4).digest()
     return int.from_bytes(digest, "big", signed=True)
@@ -281,7 +287,9 @@ class PostgresStagingCacheIndex:
 
         The block holds a pooled connection and an open transaction for as long as the
         caller keeps it, and can wait on the shared lock for as long as a reclaiming
-        writer's transaction lasts. Callers keep the block to the remote read: work on
+        writer's transaction lasts: the writer need only have claimed `key`, an orphan
+        under it or a key whose entry lock collides with it, and a key it evicted yields
+        None once the wait ends. Callers keep the block to the remote read: work on
         bytes that already landed locally needs no protection from eviction and must not
         be done inside it.
 

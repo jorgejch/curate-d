@@ -163,6 +163,11 @@ because its time is already inside the outer holding. The `occupancy.reserve` ho
 admission, the upload and the registration together. It is not yet split into those three
 parts.
 
+A `staging.reader_lock_wait` names the key the reader asked for, not the key the writer
+claimed. Entry locks are a four-byte hash of the key, so a reader can wait behind a writer
+that claimed only a colliding key, or an orphan under the reader's own live key. A long
+wait on a key no worker was touching is that case, not a fault.
+
 The queries read one pod's JSON lines over a chosen window. Pick the window with
 `--since`, add `-c <container>` for a pod that runs a sidecar, and skip non-JSON lines
 with `fromjson?`. `pct` picks the sample at rank `floor((n - 1) * p)` of the sorted values:
