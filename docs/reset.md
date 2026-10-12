@@ -144,3 +144,25 @@ Reset the local stack without the prompt:
 ```bash
 infrastructure/reset/reset-environment.sh local --execute --yes
 ```
+
+## Migration baseline
+
+Before the first production deploy the migration chain was squashed into one revision,
+`0001_baseline` (issue #7). A database still recorded at a retired revision
+(`0001_source_objects` to `0019_command_completed_audit`) fails `alembic upgrade head` with
+`Can't locate revision`, so every image from the squash on fails its migration step there
+until the database is moved onto the baseline, one of two ways:
+
+- **Reset it.** `reset-environment.sh local|dev --execute`, or `make stack-reset` locally. The
+  wipe drops `alembic_version` with the rest of `public`, and the migrate step lands on the
+  baseline. Provider connections are kept unless `--drop-connections` is given.
+- **Stamp it, keeping its data.** Only from `0019_command_completed_audit`, whose schema is the
+  baseline's (`scripts/verify_migration_baseline.sh` diffs the two). An older revision lacks
+  part of it: reset that one instead.
+
+  ```bash
+  CURATE_D_LEDGER_DATABASE_URL=... uv run alembic stamp --purge 0001_baseline
+  ```
+
+  `--purge` clears the version table first: a plain `stamp` tries to resolve the recorded
+  revision and fails the same way `upgrade` does.
