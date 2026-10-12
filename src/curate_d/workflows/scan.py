@@ -23,7 +23,7 @@ from typing import Final
 from urllib.parse import quote
 from uuid import UUID
 
-from dbos import DBOS, ScheduleInput, SetEnqueueOptions, SetWorkflowID
+from dbos import DBOS, ClientScheduleInput, SetEnqueueOptions, SetWorkflowID
 from pydantic import AwareDatetime, Field
 
 from curate_d.config import Settings
@@ -57,6 +57,9 @@ from curate_d.workflows.ingest import IngestRequest, enqueue_ingest
 logger = get_logger(__name__)
 
 SCHEDULE_NAME: Final = "scan-all"
+# Explicit, because stored schedule rows start a workflow by name: renaming the
+# function must not orphan them or their firing history.
+SCAN_ALL_WORKFLOW: Final = "scan_all"
 
 
 class ScanOutcome(StrEnum):
@@ -353,7 +356,7 @@ async def enqueue_scan(
         )
 
 
-@DBOS.workflow()
+@DBOS.workflow(name=SCAN_ALL_WORKFLOW)
 async def scan_all(scheduled_time: datetime, context: object) -> None:
     """Start a scan of every configured root; each resumes its own open scan if any."""
     cycle = scheduled_time.strftime("%Y%m%dT%H%M%SZ")
@@ -361,11 +364,11 @@ async def scan_all(scheduled_time: datetime, context: object) -> None:
         await enqueue_scan(configured.provider, configured.account, configured.root, cycle)
 
 
-def schedule(settings: Settings) -> ScheduleInput:
-    """The persisted schedule that scans every configured root."""
+def schedule(settings: Settings) -> ClientScheduleInput:
+    """Return the persisted schedule that scans every configured root."""
     return {
         "schedule_name": SCHEDULE_NAME,
-        "workflow_fn": scan_all,
+        "workflow_name": SCAN_ALL_WORKFLOW,
         "schedule": settings.scan_schedule,
         "context": None,
         "queue_name": QueueName.MAINTENANCE.value,

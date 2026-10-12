@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Final, Protocol
 
-from dbos import DBOS, ScheduleInput
+from dbos import DBOS, ClientScheduleInput
 from pydantic import AwareDatetime
 
 from curate_d.domain import DomainModel, OAuthTokens, Provider, ProviderConnection
@@ -37,6 +37,9 @@ from curate_d.runtime.services import current
 logger = get_logger(__name__)
 
 SCHEDULE_NAME: Final = "connections-refresh"
+# Explicit, because stored schedule rows start a workflow by name: renaming the
+# function must not orphan them or their firing history.
+REFRESH_CONNECTIONS_WORKFLOW: Final = "refresh_connections"
 # Every ten minutes: well inside the default one-hour window, so a pass that finds the
 # provider unreachable leaves several more before the token lapses.
 SCHEDULE: Final = "*/10 * * * *"
@@ -250,7 +253,7 @@ async def _record_transaction(attempt: RefreshAttempt, refreshed_at: datetime) -
     )
 
 
-@DBOS.workflow()
+@DBOS.workflow(name=REFRESH_CONNECTIONS_WORKFLOW)
 async def refresh_connections(scheduled_time: datetime, context: object) -> None:
     """Renew every token inside its refresh window; flag the ones only a person can fix."""
     counts: dict[str, int] = {}
@@ -272,11 +275,11 @@ async def refresh_connections(scheduled_time: datetime, context: object) -> None
     logger.info("connections.refresh_pass", **counts)
 
 
-def schedule() -> ScheduleInput:
-    """The persisted schedule that runs `refresh_connections`, routed to the I/O profile."""
+def schedule() -> ClientScheduleInput:
+    """Return the persisted schedule of `refresh_connections`, routed to the I/O profile."""
     return {
         "schedule_name": SCHEDULE_NAME,
-        "workflow_fn": refresh_connections,
+        "workflow_name": REFRESH_CONNECTIONS_WORKFLOW,
         "schedule": SCHEDULE,
         "context": None,
         "queue_name": QueueName.MAINTENANCE.value,

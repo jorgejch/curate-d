@@ -16,13 +16,12 @@ import os
 import signal
 import sys
 import threading
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import Callable, Coroutine
 from contextlib import suppress
-from dataclasses import dataclass
 from types import FrameType
 from typing import Final, Protocol, runtime_checkable
 
-from dbos import DBOS, ScheduleInput
+from dbos import DBOS
 from dbos._dbos import _get_dbos_instance
 from dbos._error import DBOSException
 from sqlalchemy.exc import SQLAlchemyError
@@ -44,11 +43,6 @@ from curate_d.runtime.identity import resolve_executor_id
 from curate_d.runtime.lease import ExecutorLease, ExecutorLeaseLostError
 from curate_d.runtime.profiles import WorkerProfile, resolve_profile
 from curate_d.runtime.queues import register_all
-from curate_d.runtime.schedule_authority import (
-    ScheduleAuthority,
-    StoredSchedule,
-    schedule_authority,
-)
 from curate_d.runtime.services import Services, StagingAccess, install
 from curate_d.staging.errors import StagingError, StagingNotReadyError, StagingRoleMismatchError
 from curate_d.staging.factories import (
@@ -61,7 +55,10 @@ from curate_d.staging.factories import (
     run_idle_cleanup,
 )
 from curate_d.staging.object_store import S3ClientFactory
-from curate_d.workflows.registry import declared_schedule_names, schedules_for
+
+# Imported for its side effect: it imports every workflow module, which registers their
+# functions with DBOS before launch. A workflow DBOS has not seen cannot be recovered.
+from curate_d.workflows import registry as _registry  # noqa: F401
 
 logger = get_logger(__name__)
 
@@ -557,94 +554,6 @@ def prepare_services(
     return services
 
 
-@dataclass(frozen=True, slots=True)
-class Reconciliation:
-    """What one schedule reconciliation wrote, once its transaction commits.
-
-    Attributes:
-        latest_version: DBOS's latest application version, read under the authority.
-        applied: Whether this worker was on that version and so applied its schedules.
-        deleted: The stored schedules it deleted because no profile declares them.
-    """
-
-    latest_version: str
-    applied: bool
-    deleted: tuple[StoredSchedule, ...] = ()
-
-
-def reconcile_schedules(
-    authority: ScheduleAuthority,
-    *,
-    version: str,
-    schedules: Sequence[ScheduleInput],
-    declared: frozenset[str],
-) -> Reconciliation:
-    """Apply `schedules` and delete stored ones outside `declared`, if `version` is the latest.
-
-    Every read and write goes through `authority`, so all of it commits with the
-    transaction that holds the lock or none of it does.
-    """
-    latest = authority.latest_version()
-    if latest != version:
-        return Reconciliation(latest_version=latest, applied=False)
-    authority.apply(schedules)
-    retired = tuple(stored for stored in authority.stored() if stored.name not in declared)
-    for stored in retired:
-        authority.delete(stored.name)
-    return Reconciliation(latest_version=latest, applied=True, deleted=retired)
-
-
-def apply_schedules(profile: WorkerProfile, settings: Settings) -> None:
-    """Upsert this profile's persisted schedules, then delete undeclared ones. Call after launch.
-
-    A stored schedule (this application's, or one no application has claimed, as
-    `DBOS.list_schedules` returns them) that no profile declares any more is deleted, so
-    a renamed or dropped pass stops firing instead of ticking a workflow nobody runs. Only
-    a profile that applies schedules deletes any, and it keeps every profile's names, not
-    just its own. A crash before the commit leaves the deletions for the next start.
-
-    Schedule rows are shared by every version of the application, so only a worker on the
-    deployment's latest version (DBOS's, by registration time) touches them: DBOS enqueues
-    every tick on that version, so its declarations are the ones that count. A replica of
-    an older version restarting mid-rollout would otherwise delete a schedule the newer
-    one added or rewrite one it changed, and the newer workers apply only at startup.
-    Every build is its own version: a dev image carries its build in the version
-    (`dbos_app.application_version`), so an older dev build is never the latest either.
-
-    The version check, the upsert and the deletions run in one system-database
-    transaction holding a lock shared by every worker (`runtime/schedule_authority.py`).
-    A worker that passes the check and stalls keeps the next one waiting; one whose
-    backend is lost meanwhile loses the lock and its pending writes together, so it
-    cannot apply or delete after a newer version has registered and applied its own.
-    Outcomes are logged after the commit, so a logged deletion happened.
-
-    `DBOS.set_latest_application_version` only changes which version is latest; it
-    applies nothing. After a rollback, promote the restored version before its workers
-    start, or restart them afterwards.
-
-    Raises:
-        ScheduleAuthorityUnavailableError: Another worker held the lock past the timeout.
-        sqlalchemy.exc.DBAPIError: The transaction failed, its backend lost included;
-            nothing it wrote was committed.
-    """
-    schedules = schedules_for(profile, settings)
-    if not schedules:
-        return
-    declared = declared_schedule_names(settings)
-    with schedule_authority() as authority:
-        outcome = reconcile_schedules(
-            authority, version=DBOS.application_version, schedules=schedules, declared=declared
-        )
-    if not outcome.applied:
-        logger.warning(
-            "worker.schedules_left_to_latest_version",
-            version=DBOS.application_version,
-            latest_version=outcome.latest_version,
-        )
-    for stored in outcome.deleted:
-        logger.info("worker.schedule_deleted", schedule=stored.name, workflow=stored.workflow)
-
-
 def _install_shutdown_handler(stop: threading.Event) -> None:
     """Set `stop` on SIGTERM or SIGINT so Kubernetes gets a clean drain rather than a kill."""
 
@@ -744,7 +653,8 @@ def run(
         DBOS.launch()
         launched = True
         register_all()
-        apply_schedules(profile, settings)
+        # No schedule writes: the deployment command owns them (curate_d.schedules), so
+        # restarting or scaling workers never changes a schedule.
         # Last: only a launched executor holding its lease reports, and Conductor failing
         # or misconfigured never stops the worker serving.
         start_conductor(settings, profile)

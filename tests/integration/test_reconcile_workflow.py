@@ -8,13 +8,13 @@ scheduled sweep does over every content object.
 """
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from dbos import DBOS, ScheduleInput, SetWorkflowID, WorkflowHandleAsync
+from dbos import DBOS, ClientScheduleInput, ScheduleInput, SetWorkflowID, WorkflowHandleAsync
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -179,12 +179,28 @@ async def _reconcile(pipeline: Pipeline, *content_ids: ContentObjectId) -> Recon
     return await handle.get_result()
 
 
-async def _backfill(pipeline: Pipeline, schedule: ScheduleInput) -> None:
-    """Apply `schedule`, run the ticks it would have fired on 2026-01-01, then delete it.
+type ScheduledWorkflow = Callable[[datetime, object], Coroutine[object, object, None]]
+
+
+async def _backfill(
+    pipeline: Pipeline, declared: ClientScheduleInput, workflow: ScheduledWorkflow
+) -> None:
+    """Apply `declared`, run the ticks it would have fired on 2026-01-01, then delete it.
+
+    In-process DBOS applies a schedule by function, so `workflow` stands in for the
+    declaration's workflow name, which it must register under.
 
     A backfilled tick is enqueued with no executor, which `settle` does not wait for, so
     each is awaited by its identity before the work it enqueued is settled.
     """
+    assert vars(workflow)["dbos_function_name"] == declared["workflow_name"]
+    schedule: ScheduleInput = {
+        "schedule_name": declared["schedule_name"],
+        "workflow_fn": workflow,
+        "schedule": declared["schedule"],
+        "context": declared.get("context"),
+        "queue_name": declared.get("queue_name"),
+    }
     await DBOS.apply_schedules_async([schedule])
     try:
         ticks = await asyncio.to_thread(
@@ -580,7 +596,7 @@ async def test_the_sweep_starts_a_run_on_each_scheduled_tick(
     async with transfer_pipeline(
         settings, ledger_engine, tmp_path, remotes, ScriptedAccess()
     ) as pipeline:
-        await _backfill(pipeline, sweep)
+        await _backfill(pipeline, sweep, reconcile.reconcile_all)
 
     backfilled = sorted(
         (r.run, r.part, r.content_object_ids) for r in started if r.run.startswith("sweep-2026")
@@ -618,7 +634,7 @@ async def test_a_scheduled_check_finds_a_lost_copy_and_re_establishes_it(
         await rclone.delete("/", f"{workspace}/destination{placed.locator}")
         since = await _high_water(ledger_engine)
 
-        await _backfill(pipeline, check)
+        await _backfill(pipeline, check, reconcile.check_destinations)
 
         [absent] = await _audit(ledger_engine, content_id, AuditEntryType.PLACEMENT_ABSENT, since)
         assert absent.details["checked"] == "check 20260101T020000"

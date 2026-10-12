@@ -8,6 +8,8 @@ sequence itself is what gets asserted.
 """
 
 import os
+import subprocess
+import sys
 import threading
 
 import pytest
@@ -58,11 +60,10 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, object]]:
         "prepare_services",
         lambda settings, profile, staging: recorded.append(("prepare_services", profile)),
     )
-    monkeypatch.setattr(
-        worker_main,
-        "apply_schedules",
-        lambda profile, settings: recorded.append(("apply_schedules", profile)),
-    )
+    for method in ("apply_schedules", "create_schedule", "delete_schedule"):
+        monkeypatch.setattr(
+            DBOS, method, lambda *args, method=method, **kwargs: recorded.append((method, args))
+        )
     monkeypatch.setattr(
         worker_main,
         "start_conductor",
@@ -101,7 +102,7 @@ def test_queues_are_registered_after_launch(calls: list[tuple[str, object]]) -> 
 
 @pytest.mark.parametrize("profile", list(WorkerProfile))
 def test_the_full_startup_sequence(calls: list[tuple[str, object]], profile: WorkerProfile) -> None:
-    """Take the lease, create services, configure, listen, launch, register, schedule, report."""
+    """Take the lease, create services, configure, listen, launch, register, report."""
     worker_main.run(Settings(), profile, block=False)
     assert [name for name, _ in calls] == [
         "lease",
@@ -110,10 +111,41 @@ def test_the_full_startup_sequence(calls: list[tuple[str, object]], profile: Wor
         "listen_queues",
         "launch",
         "register_all",
-        "apply_schedules",
         "start_conductor",
     ]
     assert ("start_conductor", profile) in calls
+
+
+@pytest.mark.parametrize("profile", list(WorkerProfile))
+def test_a_starting_worker_writes_no_schedule(
+    calls: list[tuple[str, object]], profile: WorkerProfile
+) -> None:
+    """Restarting or scaling workers never changes a schedule: the deploy job owns them."""
+    worker_main.run(Settings(), profile, block=False)
+    assert not [name for name, _ in calls if "schedule" in name]
+    assert not hasattr(worker_main, "apply_schedules")
+
+
+def test_the_worker_registers_every_scheduled_workflow_before_launch() -> None:
+    """Importing the worker imports every workflow module, which registers it with DBOS."""
+    probe = (
+        "import sys, curate_d.worker.main; "
+        "print(','.join(sorted(m for m in sys.modules if m.startswith('curate_d.workflows.'))))"
+    )
+    imported = subprocess.run(
+        [sys.executable, "-c", probe], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    for module in (
+        "classify",
+        "connections",
+        "grouping",
+        "reconcile",
+        "registry",
+        "rescan",
+        "retention",
+        "scan",
+    ):
+        assert f"curate_d.workflows.{module}" in imported.split(",")
 
 
 @pytest.mark.parametrize("profile", list(WorkerProfile))

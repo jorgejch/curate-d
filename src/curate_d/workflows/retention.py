@@ -10,7 +10,7 @@ re-executed step only finds less to delete.
 from datetime import datetime
 from typing import Final
 
-from dbos import DBOS, ScheduleInput
+from dbos import DBOS, ClientScheduleInput
 
 from curate_d.config import Settings
 from curate_d.runtime.queues import QueueName
@@ -18,6 +18,9 @@ from curate_d.runtime.retention import prune_workflow_history
 from curate_d.runtime.services import current
 
 SCHEDULE_NAME: Final = "prune-workflow-history"
+# Explicit, because stored schedule rows start a workflow by name: renaming the
+# function must not orphan them or their firing history.
+PRUNE_HISTORY_WORKFLOW: Final = "prune_history"
 
 
 @DBOS.step()
@@ -31,17 +34,17 @@ async def _prune_history_step(scheduled_time: datetime) -> str:
     return window.cutoff.isoformat()
 
 
-@DBOS.workflow()
+@DBOS.workflow(name=PRUNE_HISTORY_WORKFLOW)
 async def prune_history(scheduled_time: datetime, context: object) -> None:
     """Delete workflow records older than the configured retention period."""
     await _prune_history_step(scheduled_time)
 
 
-def schedule(settings: Settings) -> ScheduleInput:
+def schedule(settings: Settings) -> ClientScheduleInput:
     """Return the persisted schedule of the workflow-history prune."""
     return {
         "schedule_name": SCHEDULE_NAME,
-        "workflow_fn": prune_history,
+        "workflow_name": PRUNE_HISTORY_WORKFLOW,
         "schedule": settings.workflow_retention_schedule,
         "context": None,
         "queue_name": QueueName.MAINTENANCE.value,

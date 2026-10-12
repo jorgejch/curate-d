@@ -17,7 +17,7 @@ be listed is recorded as unchecked, and nothing about its placements changes.
 from datetime import datetime
 from typing import Final
 
-from dbos import DBOS, ScheduleInput, SetWorkflowID
+from dbos import DBOS, ClientScheduleInput, SetWorkflowID
 from pydantic import Field
 
 from curate_d.classification.store import ReviewRepository
@@ -67,7 +67,11 @@ from curate_d.workflows.placement import (
 logger = get_logger(__name__)
 
 SCHEDULE_NAME: Final = "reconcile"
+# Explicit, because stored schedule rows start a workflow by name: renaming the
+# function must not orphan them or their firing history.
+RECONCILE_ALL_WORKFLOW: Final = "reconcile_all"
 CHECK_SCHEDULE_NAME: Final = "check-destinations"
+CHECK_DESTINATIONS_WORKFLOW: Final = "check_destinations"
 _RUNNING: Final = frozenset({"ENQUEUED", "PENDING"})
 _PRESENT_PAGE: Final = 1000
 
@@ -344,7 +348,7 @@ async def reconcile(request: ReconcileRequest) -> ReconcileSummary:
     return summary.model_copy(update={"continued": True})
 
 
-@DBOS.workflow()
+@DBOS.workflow(name=RECONCILE_ALL_WORKFLOW)
 async def reconcile_all(scheduled_time: datetime, context: object) -> None:
     """Start a reconciliation run over every content object."""
     run = f"sweep-{scheduled_time.strftime('%Y%m%dT%H%M%S')}"
@@ -382,7 +386,7 @@ async def check_destination(destination: DestinationConfig, cycle: str) -> int:
     return len(affected)
 
 
-@DBOS.workflow()
+@DBOS.workflow(name=CHECK_DESTINATIONS_WORKFLOW)
 async def check_destinations(scheduled_time: datetime, context: object) -> None:
     """Check every configured destination."""
     policy = (await current().datasource.run_tx_step_async({"name": "open_check"}, _open_tx)).policy
@@ -394,22 +398,22 @@ async def check_destinations(scheduled_time: datetime, context: object) -> None:
             )
 
 
-def schedule(settings: Settings) -> ScheduleInput:
-    """The persisted schedule of the reconciliation sweep."""
+def schedule(settings: Settings) -> ClientScheduleInput:
+    """Return the persisted schedule of the reconciliation sweep."""
     return {
         "schedule_name": SCHEDULE_NAME,
-        "workflow_fn": reconcile_all,
+        "workflow_name": RECONCILE_ALL_WORKFLOW,
         "schedule": settings.reconcile_schedule,
         "context": None,
         "queue_name": QueueName.MAINTENANCE.value,
     }
 
 
-def check_schedule(settings: Settings) -> ScheduleInput:
-    """The persisted schedule of the destination checks."""
+def check_schedule(settings: Settings) -> ClientScheduleInput:
+    """Return the persisted schedule of the destination checks."""
     return {
         "schedule_name": CHECK_SCHEDULE_NAME,
-        "workflow_fn": check_destinations,
+        "workflow_name": CHECK_DESTINATIONS_WORKFLOW,
         "schedule": settings.destination_check_schedule,
         "context": None,
         "queue_name": QueueName.MAINTENANCE.value,

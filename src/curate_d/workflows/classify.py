@@ -26,7 +26,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import BinaryIO, Final
 
-from dbos import DBOS, ScheduleInput, SetWorkflowID
+from dbos import DBOS, ClientScheduleInput, SetWorkflowID
 
 from curate_d.classification.deterministic import TierResult
 from curate_d.classification.gating import (
@@ -84,6 +84,9 @@ RECLASSIFY_PREFIX: Final = "reclassify"
 RECLASSIFY_WORKFLOW: Final = "reclassify_rejected"
 _REVIEW_PAGE: Final = 500
 HOLDS_SCHEDULE_NAME: Final = "classification-holds"
+# Explicit, because stored schedule rows start a workflow by name: renaming the
+# function must not orphan them or their firing history.
+RELEASE_HOLDS_WORKFLOW: Final = "release_holds"
 # Transient remote failures are retried this many times, a minute apart and doubling.
 REMOTE_ATTEMPTS: Final = 4
 
@@ -446,7 +449,7 @@ async def classify_remote(
     )
 
 
-@DBOS.workflow()
+@DBOS.workflow(name=RELEASE_HOLDS_WORKFLOW)
 async def release_holds(scheduled_time: datetime, context: object) -> None:
     """Hand content held by an earlier period's cap back to the remote tier."""
     datasource = current().datasource
@@ -538,11 +541,11 @@ def reclassification_workflow_id(taxonomy_version: int) -> str:
     return f"{RECLASSIFY_PREFIX}:taxonomy-{taxonomy_version}"
 
 
-def schedule() -> ScheduleInput:
-    """The daily pass that releases holds once their period has turned."""
+def schedule() -> ClientScheduleInput:
+    """Return the daily schedule that releases holds once their period has turned."""
     return {
         "schedule_name": HOLDS_SCHEDULE_NAME,
-        "workflow_fn": release_holds,
+        "workflow_name": RELEASE_HOLDS_WORKFLOW,
         "schedule": "15 0 * * *",
         "context": None,
         "queue_name": QueueName.MAINTENANCE.value,

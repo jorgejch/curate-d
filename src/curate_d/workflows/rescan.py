@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Final
 
-from dbos import DBOS, ScheduleInput, SetEnqueueOptions, SetWorkflowID
+from dbos import DBOS, ClientScheduleInput, SetEnqueueOptions, SetWorkflowID
 from pydantic import AwareDatetime
 
 from curate_d.config import Settings
@@ -48,6 +48,9 @@ from curate_d.workflows.ingest import IngestRequest, enqueue_ingest
 logger = get_logger(__name__)
 
 SCHEDULE_NAME: Final = "full-rescan-all"
+# Explicit, because stored schedule rows start a workflow by name: renaming the
+# function must not orphan them or their firing history.
+FULL_RESCAN_ALL_WORKFLOW: Final = "full_rescan_all"
 DECIDED_BY: Final = "full_rescan"
 
 
@@ -277,7 +280,7 @@ async def enqueue_full_rescan(provider: Provider, account: str, cycle: str, part
         )
 
 
-@DBOS.workflow()
+@DBOS.workflow(name=FULL_RESCAN_ALL_WORKFLOW)
 async def full_rescan_all(scheduled_time: datetime, context: object) -> None:
     """Start a full-rescan run for every account with a configured root."""
     cycle = scheduled_time.strftime("%Y%m%dT%H%M%SZ")
@@ -286,11 +289,11 @@ async def full_rescan_all(scheduled_time: datetime, context: object) -> None:
         await enqueue_full_rescan(provider, account, cycle)
 
 
-def schedule(settings: Settings) -> ScheduleInput:
-    """The persisted schedule of full-rescan runs, independent of incremental scans."""
+def schedule(settings: Settings) -> ClientScheduleInput:
+    """Return the persisted schedule of full-rescan runs, independent of incremental scans."""
     return {
         "schedule_name": SCHEDULE_NAME,
-        "workflow_fn": full_rescan_all,
+        "workflow_name": FULL_RESCAN_ALL_WORKFLOW,
         "schedule": settings.full_rescan_schedule,
         "context": None,
         "queue_name": QueueName.MAINTENANCE.value,

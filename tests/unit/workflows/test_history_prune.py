@@ -7,10 +7,9 @@ from types import SimpleNamespace
 import pytest
 
 from curate_d.config import Settings
-from curate_d.runtime.profiles import WorkerProfile
 from curate_d.runtime.retention import RetentionWindow
 from curate_d.workflows import retention
-from curate_d.workflows.registry import schedules_for
+from curate_d.workflows.registry import declared_schedules
 
 _TICK = datetime(2026, 10, 3, 5, 20, tzinfo=UTC)
 
@@ -20,8 +19,8 @@ def test_the_prune_runs_on_its_configured_schedule() -> None:
     settings = Settings(workflow_retention_schedule="0 1 * * *")
     entry = retention.schedule(settings)
     assert (entry["schedule"], entry["queue_name"]) == ("0 1 * * *", "maintenance")
-    assert entry["workflow_fn"] is retention.prune_history
-    assert entry in schedules_for(WorkerProfile.IO, settings)
+    assert entry["workflow_name"] == retention.PRUNE_HISTORY_WORKFLOW
+    assert entry in declared_schedules(settings)
 
 
 def test_the_default_prune_runs_once_a_day() -> None:

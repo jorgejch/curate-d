@@ -15,9 +15,8 @@ from curate_d.domain import (
     StrongFingerprint,
 )
 from curate_d.reconciliation.convergence import Action, Target, decide
-from curate_d.runtime.profiles import WorkerProfile
 from curate_d.workflows import reconcile
-from curate_d.workflows.registry import schedules_for
+from curate_d.workflows.registry import declared_schedule_names
 
 _CONTENT = ContentObjectId(uuid4())
 _LOCATOR = "/lib/Photos/2024/a.jpg"
@@ -87,5 +86,4 @@ def test_the_sweep_and_the_checks_run_on_their_configured_schedules() -> None:
     sweep, check = reconcile.schedule(settings), reconcile.check_schedule(settings)
     assert (sweep["schedule"], sweep["queue_name"]) == ("*/5 * * * *", "maintenance")
     assert (check["schedule"], check["queue_name"]) == ("0 2 * * *", "maintenance")
-    applied = {s["schedule_name"] for s in schedules_for(WorkerProfile.IO, settings)}
-    assert {sweep["schedule_name"], check["schedule_name"]} <= applied
+    assert {sweep["schedule_name"], check["schedule_name"]} <= declared_schedule_names(settings)

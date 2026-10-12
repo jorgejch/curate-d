@@ -10,7 +10,7 @@ through review; a changed group is a changed fact, and reconciliation re-renders
 from datetime import datetime
 from typing import Final
 
-from dbos import DBOS, ScheduleInput
+from dbos import DBOS, ClientScheduleInput
 
 from curate_d.classification.clustering import cluster
 from curate_d.classification.store import ClassificationRepository
@@ -23,6 +23,9 @@ from curate_d.runtime.services import current
 logger = get_logger(__name__)
 
 SCHEDULE_NAME: Final = "group-events"
+# Explicit, because stored schedule rows start a workflow by name: renaming the
+# function must not orphan them or their firing history.
+GROUP_EVENTS_WORKFLOW: Final = "group_events"
 DECIDED_BY: Final = "clustering"
 
 
@@ -55,7 +58,7 @@ async def _group_tx(now: datetime) -> int:
     return len(changed)
 
 
-@DBOS.workflow()
+@DBOS.workflow(name=GROUP_EVENTS_WORKFLOW)
 async def group_events(scheduled_time: datetime, context: object) -> None:
     """Recompute event groups across the library."""
     changed = await current().datasource.run_tx_step_async(
@@ -64,11 +67,11 @@ async def group_events(scheduled_time: datetime, context: object) -> None:
     logger.info("grouping.pass", changed=changed)
 
 
-def schedule() -> ScheduleInput:
-    """The daily grouping pass."""
+def schedule() -> ClientScheduleInput:
+    """Return the persisted schedule of the daily grouping pass."""
     return {
         "schedule_name": SCHEDULE_NAME,
-        "workflow_fn": group_events,
+        "workflow_name": GROUP_EVENTS_WORKFLOW,
         "schedule": "45 2 * * *",
         "context": None,
         "queue_name": QueueName.MAINTENANCE.value,

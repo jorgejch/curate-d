@@ -312,7 +312,6 @@ def startup_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     monkeypatch.setattr(DBOS, "launch", lambda: calls.append("launch"))
     monkeypatch.setattr(worker, "register_all", lambda: calls.append("register"))
     monkeypatch.setattr(worker, "prepare_services", lambda settings, profile, staging: None)
-    monkeypatch.setattr(worker, "apply_schedules", lambda profile, settings: None)
     monkeypatch.setattr(DBOS, "destroy", lambda **kw: calls.append("drain"))
     monkeypatch.setattr(worker, "_install_shutdown_handler", lambda stop: None)
     locks = FakeLockServer(events=calls)

@@ -485,7 +485,7 @@ def _install_key_filter(target: logging.Logger, key: str) -> None:
 def start_conductor(settings: Settings, profile: WorkerProfile) -> ConductorWebsocket | None:
     """Open this worker's Conductor connection if the settings call for one.
 
-    Call after `DBOS.launch()` and after schedules are applied. Logs exactly one of
+    Call after `DBOS.launch()` and queue registration. Logs exactly one of
     `conductor.disabled`, `conductor.misconfigured` or `conductor.connecting`. Never
     raises over configuration: workflow execution does not depend on Conductor.
 
