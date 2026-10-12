@@ -118,3 +118,10 @@ def test_the_rules_minimum_level_is_respected() -> None:
     decision = decide_retention(rule, [_copy("a", VerificationLevel.STRONG_IN_TRANSIT)])
     assert decision.outcome is RetentionOutcome.RETAIN
     assert decision.audit_details()["minimum_level"] == "strong_common_hash"
+
+
+def test_a_decision_records_the_policy_version_it_applied() -> None:
+    """The version survives the policy being replaced; unknown stays null, not guessed."""
+    decision = decide_retention(RetentionRule(name="keep"), [_copy("a")])
+    assert decision.audit_details(policy_version=4)["policy_version"] == 4
+    assert decision.audit_details()["policy_version"] is None
