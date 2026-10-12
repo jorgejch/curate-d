@@ -570,6 +570,22 @@ remote_spend = Table(
     CheckConstraint("spent_usd >= 0", name="spent_non_negative"),
 )
 
+lease_versions = Table(
+    "lease_versions",
+    metadata,
+    Column("version", Text, primary_key=True, comment="A DBOS application version."),
+    Column(
+        "first_registered",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        comment="When a worker of this version first registered, by the database clock; "
+        "deploy order, which a version promotion does not rewrite.",
+    ),
+    comment="Versions whose workers hold the version lease while they run. The recovery "
+    "sweep forks or retires only a registered version older than its target.",
+)
+
 classification_holds = Table(
     "classification_holds",
     metadata,
@@ -766,6 +782,7 @@ __all__ = [
     "dry_run_items",
     "dry_runs",
     "enum_check",
+    "lease_versions",
     "metadata",
     "placements",
     "provider_connections",
