@@ -4,6 +4,7 @@ The SQL runs against PostgreSQL in tests/integration/test_version_lease.py; what
 here is what each piece does with its connection and its locks, on in-memory doubles.
 """
 
+import asyncio
 import threading
 from datetime import UTC, datetime
 
@@ -234,3 +235,86 @@ def test_a_lost_standalone_lease_stops_the_next_write() -> None:
     with pytest.raises(ExecutorLeaseLostError, match="stopping before the next write"):
         standalone.ensure_held()
     standalone.release()
+
+
+async def test_an_empty_registry_returns_no_versions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty deployment registry is a valid read, with no invented target."""
+    connection = _Connection(rows=[])
+    _connect_to(monkeypatch, connection)
+    assert await registrations(Settings()) == {}
+    assert connection.closed == 1
+
+
+async def test_a_non_string_version_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Invalid identifiers cannot silently change the sweep's version membership checks."""
+    connection = _Connection(rows=[(42, datetime(2026, 10, 1, tzinfo=UTC))])
+    _connect_to(monkeypatch, connection)
+    with pytest.raises(VersionRegistryError, match="unexpected lease_versions row"):
+        await registrations(Settings())
+    assert connection.closed == 1
+
+
+async def test_a_refused_lock_with_no_visible_holder_stays_refused() -> None:
+    """A disappearing holder is not proof that this session acquired the version lock."""
+    server = FakeLockServer()
+    server.refuse_locks = 1
+    async with hold_exclusive(Settings(), "v1", connect=server.connect) as hold:
+        assert not hold.held
+        assert hold.holder_mode is None
+    assert server.events == []
+    assert server.sessions[0].closed
+
+
+@pytest.mark.parametrize("operation", ["try_lock", "holder_mode"])
+async def test_a_lock_query_failure_closes_the_opened_session(
+    monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    """Query errors release the dedicated connection before propagating."""
+    server = FakeLockServer()
+    session = server.connect()
+    server.refuse_locks = 1
+    error = psycopg.OperationalError("lock query failed")
+
+    def fail(key: int) -> None:
+        """Raise the database failure at the selected query boundary."""
+        raise error
+
+    monkeypatch.setattr(session, operation, fail)
+    with pytest.raises(psycopg.OperationalError) as raised:
+        async with hold_exclusive(Settings(), "v1", connect=lambda: session):
+            pytest.fail("a query failure must not enter the recovery block")
+    assert raised.value is error
+    assert session.closed
+    assert server.mode(KEY) is None
+
+
+async def test_an_unlock_failure_closes_the_session_and_preserves_the_body_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Closing releases the lock even when unlock fails during failed recovery."""
+    server = FakeLockServer()
+    session = server.connect()
+
+    def fail_unlock(key: int) -> None:
+        """Simulate a database failure before the lock can be explicitly released."""
+        raise psycopg.OperationalError("unlock failed")
+
+    monkeypatch.setattr(session, "unlock", fail_unlock)
+    error = RuntimeError("recovery failed")
+    with pytest.raises(RuntimeError) as raised:
+        async with hold_exclusive(Settings(), "v1", connect=lambda: session):
+            assert server.mode(KEY) == "exclusive"
+            raise error
+    assert raised.value is error
+    assert session.closed
+    assert server.mode(KEY) is None
+
+
+async def test_cancelling_recovery_releases_the_exclusive_version_hold() -> None:
+    """Task cancellation propagates after releasing the source version's lock."""
+    server = FakeLockServer()
+    with pytest.raises(asyncio.CancelledError):
+        async with hold_exclusive(Settings(), "v1", connect=server.connect):
+            raise asyncio.CancelledError
+    assert server.mode(KEY) is None
+    assert all(session.closed for session in server.sessions)

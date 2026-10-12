@@ -3,9 +3,11 @@
 import json
 from collections.abc import Mapping
 from datetime import datetime
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from dbos import DBOS
+from structlog.testing import capture_logs
 
 from curate_d.config import Settings
 from curate_d.runtime import dbos_app, operator_sweep, version_lease
@@ -173,3 +175,55 @@ def test_a_lost_lease_exits_non_zero(harness: _Harness) -> None:
     harness.lease.lose = True
     assert operator_sweep.main(["--target-version", OWN]) == operator_sweep.EXIT_LEASE_LOST
     assert harness.lease.released
+
+
+@pytest.mark.parametrize("operation", ["monitor", "sweep"])
+def test_a_failure_after_acquisition_releases_the_lease_and_client(
+    harness: _Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    operation: str,
+) -> None:
+    """A failed run cannot leak the target lease or print a successful summary."""
+    error = RuntimeError("sweep infrastructure failed")
+    if operation == "monitor":
+        monkeypatch.setattr(harness.lease, "monitor", Mock(side_effect=error))
+    else:
+        monkeypatch.setattr(operator_sweep, "run_recovery_sweep", AsyncMock(side_effect=error))
+    with pytest.raises(RuntimeError) as raised:
+        operator_sweep.main(["--target-version", OWN])
+    assert raised.value is error
+    assert harness.lease.released
+    assert not harness.lease.held
+    assert harness.client.destroyed
+    assert capsys.readouterr().out == ""
+
+
+def test_a_registry_read_failure_closes_the_client_before_leasing(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unknown registration state aborts before taking a lease or sweeping."""
+    error = version_lease.VersionRegistryError("registry unavailable")
+    monkeypatch.setattr(version_lease, "registrations", AsyncMock(side_effect=error))
+    acquire = Mock(wraps=harness.lease.acquire)
+    monkeypatch.setattr(harness.lease, "acquire", acquire)
+    with pytest.raises(version_lease.VersionRegistryError) as raised:
+        operator_sweep.main(["--target-version", OWN])
+    assert raised.value is error
+    acquire.assert_not_called()
+    assert harness.sweeps == []
+    assert harness.client.destroyed
+
+
+def test_lease_loss_takes_precedence_over_failed_rows(
+    harness: _Harness, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The operator sees the lost-lease exit code while retaining per-row failures."""
+    harness.lease.lose = True
+    harness.outcome = SweepOutcome(failed=(("orphan", "write refused"),))
+    with capture_logs() as events:
+        assert operator_sweep.main(["--target-version", OWN]) == operator_sweep.EXIT_LEASE_LOST
+    assert json.loads(capsys.readouterr().out)["failed"] == [["orphan", "write refused"]]
+    assert [event["event"] for event in events] == ["operator_sweep.stopped_on_lease_loss"]
+    assert harness.lease.released
+    assert harness.client.destroyed

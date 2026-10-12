@@ -1,7 +1,10 @@
 """Promotion of an already-registered version, on an in-memory DBOS client."""
 
+import time
 from datetime import UTC, datetime
+from unittest.mock import Mock
 
+import psycopg
 import pytest
 from dbos._error import DBOSException
 from structlog.testing import capture_logs
@@ -115,3 +118,74 @@ def test_a_version_is_required() -> None:
     with pytest.raises(SystemExit) as raised:
         promote.main([])
     assert raised.value.code == 2
+
+
+@pytest.mark.parametrize("offset", [-1.0, 0.0, 1.0])
+def test_clock_skew_accepts_the_exact_boundary_using_the_round_trip_midpoint(
+    monkeypatch: pytest.MonkeyPatch, offset: float
+) -> None:
+    """Both clock directions accept one second, measured at the request midpoint."""
+    readings = iter([1000.0, 1004.0])
+    monkeypatch.setattr(time, "time", lambda: next(readings))
+    monkeypatch.setattr(
+        promote, "_database_now", lambda settings: datetime.fromtimestamp(1002.0 + offset, UTC)
+    )
+    assert promote._check_clock(Settings()) == abs(offset)
+
+
+@pytest.mark.parametrize("offset", [-1.001, 1.001])
+def test_clock_skew_just_outside_the_boundary_is_refused(
+    monkeypatch: pytest.MonkeyPatch, offset: float
+) -> None:
+    """Skew beyond one second fails for both a fast and a slow database clock."""
+    monkeypatch.setattr(time, "time", lambda: 1000.0)
+    monkeypatch.setattr(
+        promote, "_database_now", lambda settings: datetime.fromtimestamp(1000.0 + offset, UTC)
+    )
+    with pytest.raises(promote.PromotionRefusedError, match="more than 1s"):
+        promote._check_clock(Settings())
+
+
+@pytest.mark.parametrize(
+    "operation", ["list_application_versions", "get_latest_application_version"]
+)
+def test_a_version_read_failure_closes_the_client_without_promoting(
+    client: _Client, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    """A database outage before the promotion cannot be reported as success."""
+
+    def fail() -> None:
+        """Simulate a failed version lookup."""
+        raise psycopg.OperationalError("version lookup failed")
+
+    monkeypatch.setattr(client, operation, fail)
+    assert promote.main(["v1"]) == promote.EXIT_REFUSED
+    assert client.promoted == []
+    assert client.destroyed
+
+
+@pytest.mark.parametrize("row", [None, (None,), ("not a timestamp",)])
+def test_an_invalid_database_clock_closes_its_connection(
+    monkeypatch: pytest.MonkeyPatch, row: tuple[object, ...] | None
+) -> None:
+    """Absent or malformed clock data fails closed and releases its dedicated session."""
+    connection = Mock()
+    connection.execute.return_value.fetchone.return_value = row
+    monkeypatch.setattr(promote, "connect_dedicated", lambda *args, **kwargs: connection)
+    with pytest.raises(promote.PromotionRefusedError, match="database returned no time"):
+        promote._database_now(Settings())
+    connection.close.assert_called_once_with()
+
+
+def test_a_failed_database_clock_read_closes_its_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clock query failure releases its connection and preserves the database error."""
+    error = psycopg.OperationalError("clock unavailable")
+    connection = Mock()
+    connection.execute.side_effect = error
+    monkeypatch.setattr(promote, "connect_dedicated", lambda *args, **kwargs: connection)
+    with pytest.raises(psycopg.OperationalError) as raised:
+        promote._database_now(Settings())
+    assert raised.value is error
+    connection.close.assert_called_once_with()

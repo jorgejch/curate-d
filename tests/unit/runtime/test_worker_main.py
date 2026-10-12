@@ -398,3 +398,41 @@ def test_a_worker_never_promotes_its_version(
     )
     worker_main.run(Settings(), WorkerProfile.IO, block=False)
     assert promoted == []
+
+
+@pytest.mark.parametrize("profile", list(WorkerProfile))
+def test_both_worker_profiles_lease_the_registered_build_version(
+    calls: list[tuple[str, object]], monkeypatch: pytest.MonkeyPatch, profile: WorkerProfile
+) -> None:
+    """The version registered before startup is the same one held throughout execution."""
+    monkeypatch.setattr(dbos_app, "APPLICATION_VERSION", "build-under-test")
+    worker_main.run(Settings(), profile, block=False)
+    assert ("register_version", "build-under-test") in calls
+    assert ("lease", ("worker-io-0", "build-under-test")) in calls
+
+
+def test_startup_failure_releases_both_worker_locks(
+    calls: list[tuple[str, object]], monkeypatch: pytest.MonkeyPatch, locks: FakeLockServer
+) -> None:
+    """A service preparation failure must not leave the unlaunched version looking live."""
+    error = RuntimeError("service preparation failed")
+
+    def fail(settings: Settings, profile: WorkerProfile, staging: object) -> None:
+        """Fail after both worker locks have been acquired."""
+        assert locks.holders
+        assert any(locks.shared.values())
+        raise error
+
+    monkeypatch.setattr(worker_main, "prepare_services", fail)
+    with pytest.raises(RuntimeError) as raised:
+        worker_main.run(
+            Settings(staging_s3_endpoint_url=None),
+            WorkerProfile.IO,
+            block=False,
+            lease_factory=locks.factory,
+        )
+    assert raised.value is error
+    assert "launch" not in [name for name, _ in calls]
+    assert locks.holders == {}
+    assert not any(locks.shared.values())
+    assert all(session.closed for session in locks.sessions)

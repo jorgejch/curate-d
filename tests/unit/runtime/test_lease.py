@@ -384,3 +384,49 @@ def test_a_worker_lease_for_settings_carries_its_version(monkeypatch: pytest.Mon
     lease = ExecutorLease.for_settings(Settings(), "worker-io-0", version="v1")
     assert lease.version == "v1"
     assert lease.version_key == version_lease_key("curate-d", "v1")
+
+
+@pytest.mark.parametrize("lost_key", ["executor", "version"])
+def test_losing_either_worker_lock_discards_both(lost_key: str) -> None:
+    """A surviving half of the worker's lease cannot keep the worker running."""
+    server = FakeLockServer()
+    lease = server.lease("worker-io-0", version="v1")
+    assert lease.try_acquire()
+    assert lease.version_key is not None
+    session = server.sessions[0]
+    if lost_key == "executor":
+        session.unlock(lease.key)
+    else:
+        session.unlock_shared(lease.version_key)
+    assert not lease._probe()
+    assert not lease.held
+    assert session.closed
+    assert server.mode(lease.key) is None
+    assert server.mode(lease.version_key) is None
+    lease.release()
+
+
+@pytest.mark.parametrize("operation", ["try_lock_shared", "unlock_shared"])
+def test_a_shared_lock_error_never_leaves_an_executor_lock_behind(
+    monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    """A partial acquire or release closes the session and releases every held key."""
+    server = FakeLockServer()
+    session = server.connect()
+    lease = ExecutorLease("worker-io-0", version="v1", connect=lambda: session)
+
+    def fail(key: int) -> None:
+        """Raise at the shared-lock operation."""
+        raise psycopg.OperationalError("shared lock failed")
+
+    monkeypatch.setattr(session, operation, fail)
+    if operation == "try_lock_shared":
+        with pytest.raises(psycopg.OperationalError, match="shared lock failed"):
+            lease.try_acquire()
+    else:
+        assert lease.try_acquire()
+        lease.release()
+    assert not lease.held
+    assert session.closed
+    assert server.holders == {}
+    assert not any(server.shared.values())

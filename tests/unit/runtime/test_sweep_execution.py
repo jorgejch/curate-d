@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 from dbos import DBOS, DBOSClient
 from dbos._context import get_local_dbos_context
+from dbos._sys_db import WorkflowStatuses
 from dbos._utils import INTERNAL_QUEUE_NAME
 from sqlalchemy.exc import IntegrityError
 
@@ -216,7 +217,8 @@ async def test_the_client_adapter_checks_the_lease_before_every_write() -> None:
     assert client.calls[:3] == [f"fork:{SUCCESSOR}", "cancel", "reenqueue"]
 
 
-async def test_a_lost_lease_stops_the_client_adapters_write() -> None:
+@pytest.mark.parametrize("operation", ["fork", "cancel", "reenqueue"])
+async def test_a_lost_lease_stops_the_client_adapters_write(operation: str) -> None:
     """The write never reaches DBOS once the lease check raises."""
     client = _Client()
 
@@ -225,7 +227,19 @@ async def test_a_lost_lease_stops_the_client_adapters_write() -> None:
 
     control = ClientRecoveryControl(client, before_write=lost)  # type: ignore[arg-type]
     with pytest.raises(RuntimeError, match="version lease lost"):
-        await control.cancel(ORIGINAL)
+        if operation == "fork":
+            await control.fork(
+                ORIGINAL,
+                SUCCESSOR,
+                1,
+                application_version="v2",
+                queue_name="stage",
+                queue_partition_key="provider-1",
+            )
+        elif operation == "cancel":
+            await control.cancel(ORIGINAL)
+        else:
+            await control.reenqueue(ORIGINAL, "worker-9")
     assert client.calls == []
 
 
@@ -695,4 +709,161 @@ async def test_an_ownerless_pending_row_is_reported_not_reenqueued(locks: FakeLo
     assert control.writes() == []
     assert [workflow_id for workflow_id, _ in outcome.failed] == ["a"]
     assert "without an executor" in outcome.failed[0][1]
+    assert locks.sessions == []
+
+
+async def test_equal_registration_times_do_not_establish_deploy_order() -> None:
+    """A tied timestamp cannot authorize recovery of either version's rows."""
+    timestamp = registered("v1")["v1"]
+    control = FakeRecoveryControl([workflow_status(ORIGINAL)])
+    holds = FakeVersionHolds()
+    outcome = await _sweep(
+        control,
+        registry=FakeRegistrations({"v1": timestamp, "v2": timestamp}),
+        holds=holds,
+    )
+    assert outcome == SweepOutcome(newer_than_target=(ORIGINAL,))
+    assert holds.events == []
+    assert control.writes() == []
+
+
+async def test_a_target_change_after_one_version_preserves_completed_recovery() -> None:
+    """A new target stops subsequent source groups without losing the earlier tally."""
+    control = FakeRecoveryControl(
+        [workflow_status(name, version=name) for name in ("v0", "v1", "v2")],
+        latest=["v3", "v3", "v4"],
+    )
+    holds = FakeVersionHolds()
+    outcome = await _sweep(
+        control,
+        own="v3",
+        registry=FakeRegistrations(registered("v0", "v1", "v2", "v3")),
+        holds=holds,
+    )
+    assert outcome == SweepOutcome(
+        forked=(("v0", recovery_successor_id("v0")),), skipped=("v1", "v2")
+    )
+    assert holds.events == ["hold:v0", "release:v0", "hold:v1", "release:v1"]
+    assert holds.held == set()
+    assert control.rows["v0"].status == "CANCELLED"
+    assert control.rows["v1"].status == control.rows["v2"].status == "PENDING"
+
+
+async def test_a_failed_row_does_not_strand_other_rows_of_its_version() -> None:
+    """The source lock stays available for remaining rows after a checkpoint read fails."""
+    control = FakeRecoveryControl([workflow_status("bad"), workflow_status("good")])
+    control.errors[("step_ids", "bad")] = OSError("checkpoint read failed")
+    holds = FakeVersionHolds()
+    outcome = await _sweep(control, holds=holds)
+    assert outcome.forked == (("good", recovery_successor_id("good")),)
+    assert len(outcome.failed) == 1
+    assert outcome.failed[0][0] == "bad"
+    assert "checkpoint read failed" in outcome.failed[0][1]
+    assert control.rows["bad"].status == "PENDING"
+    assert ("cancel", "bad") not in control.writes()
+    assert holds.events == ["hold:v1", "release:v1"]
+
+
+@pytest.mark.parametrize("version", ["v1", "v2"])
+@pytest.mark.parametrize("queue", [None, INTERNAL_QUEUE_NAME])
+async def test_stale_ticks_can_be_retired_without_a_routable_queue(
+    version: str, queue: str | None
+) -> None:
+    """Both version and executor recovery cancel stale ticks without needing routing."""
+    control = FakeRecoveryControl(
+        [
+            workflow_status(
+                "tick", version=version, queue_name=queue, schedule_name=RECOVERY_SCHEDULE_NAME
+            )
+        ]
+    )
+    outcome = await _sweep(control)
+    assert outcome == SweepOutcome(retired_ticks=("tick",))
+    assert control.writes() == [("cancel", "tick")]
+
+
+@pytest.mark.parametrize("version", ["v1", "v2"])
+@pytest.mark.parametrize("state", [None, "SUCCESS", "ERROR", "CANCELLED", "DELAYED"])
+async def test_a_tick_that_became_inactive_after_listing_is_left_alone(
+    monkeypatch: pytest.MonkeyPatch, version: str, state: WorkflowStatuses | None
+) -> None:
+    """The fresh status prevents cancellation of a completed, delayed or deleted tick."""
+    row = workflow_status("tick", version=version, schedule_name=RECOVERY_SCHEDULE_NAME)
+    control = FakeRecoveryControl([row])
+    snapshot = await control.list_pending()
+    monkeypatch.setattr(control, "list_pending", AsyncMock(return_value=snapshot))
+    if state is None:
+        del control.rows["tick"]
+    else:
+        row.status = state
+    outcome = await _sweep(control)
+    assert outcome == SweepOutcome()
+    assert control.writes() == []
+
+
+@pytest.mark.parametrize("version", ["v1", "v2"])
+async def test_a_tick_cancel_failure_is_reported_and_releases_its_locks(
+    version: str, locks: FakeLockServer
+) -> None:
+    """A failed tick retirement is never counted as recovered or left holding a lease."""
+    control = FakeRecoveryControl(
+        [workflow_status("tick", version=version, schedule_name=RECOVERY_SCHEDULE_NAME)]
+    )
+    control.errors[("cancel", "tick")] = OSError("cancel failed")
+    holds = FakeVersionHolds()
+    outcome = await _sweep(control, holds=holds, locks=locks)
+    assert len(outcome.failed) == 1
+    assert outcome.failed[0][0] == "tick"
+    assert "cancel failed" in outcome.failed[0][1]
+    assert outcome.retired_ticks == ()
+    assert outcome.recovered_count == 0
+    assert control.rows["tick"].status == "PENDING"
+    assert holds.held == set()
+    assert locks.holders == {}
+    assert all(session.closed for session in locks.sessions)
+
+
+async def test_a_live_executors_current_tick_is_not_cancelled(locks: FakeLockServer) -> None:
+    """The running sweep must not cancel its own tick on the target version."""
+    worker = locks.lease("worker-0", version="v2")
+    assert worker.try_acquire()
+    try:
+        control = FakeRecoveryControl(
+            [
+                workflow_status(
+                    "tick",
+                    executor_id="worker-0",
+                    version="v2",
+                    schedule_name=RECOVERY_SCHEDULE_NAME,
+                )
+            ]
+        )
+        outcome = await _sweep(control, locks=locks)
+        assert outcome == SweepOutcome(left_running=1)
+        assert control.writes() == []
+        assert worker.held
+    finally:
+        worker.release()
+
+
+async def test_other_schedules_ticks_still_receive_normal_recovery() -> None:
+    """Only recovery-sweep ticks are disposable; other scheduled work keeps its lineage."""
+    control = FakeRecoveryControl(
+        [workflow_status(ORIGINAL, schedule_name="history-prune", queue_name="maintenance")]
+    )
+    outcome = await _sweep(control)
+    assert outcome == SweepOutcome(forked=((ORIGINAL, SUCCESSOR),))
+    assert control.rows[SUCCESSOR].queue_name == "maintenance"
+
+
+async def test_an_empty_sweep_never_reads_the_registry_or_takes_locks(
+    locks: FakeLockServer,
+) -> None:
+    """No eligible rows means no dependency on version registry availability."""
+    registry = FakeRegistrations(error=OSError("registry unavailable"))
+    holds = FakeVersionHolds()
+    outcome = await _sweep(FakeRecoveryControl(), registry=registry, holds=holds, locks=locks)
+    assert outcome == SweepOutcome()
+    assert registry.reads == 0
+    assert holds.events == []
     assert locks.sessions == []

@@ -371,3 +371,16 @@ def test_a_valid_recovery_sweep_schedule_is_kept(
     """Five fields, or six with seconds first, as DBOS reads them."""
     monkeypatch.setenv("CURATE_D_RECOVERY_SWEEP_SCHEDULE", cron)
     assert Settings().recovery_sweep_schedule == cron
+
+
+@pytest.mark.parametrize("cron", ["59 0 23 * * *", "0 59 23 * * *"])
+def test_recovery_cron_accepts_seconds_before_minutes_and_hours(cron: str) -> None:
+    """A valid six-field expression is interpreted with seconds first, as DBOS expects."""
+    assert Settings(recovery_sweep_schedule=cron).recovery_sweep_schedule == cron
+
+
+@pytest.mark.parametrize("cron", ["60 0 0 * * *", "0 60 0 * * *", "0 0 24 * * *"])
+def test_recovery_cron_rejects_out_of_range_seconds_minutes_and_hours(cron: str) -> None:
+    """Six-field range violations fail at settings load before any worker can launch."""
+    with pytest.raises(ValidationError, match="recovery_sweep_schedule"):
+        Settings(recovery_sweep_schedule=cron)
