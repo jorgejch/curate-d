@@ -70,16 +70,32 @@ how it is made idempotent, whether it belongs in a workflow — against the `dbo
   derives the system URL from `ledger_database_url`. Test fixtures `DBOS.destroy()`,
   configure and launch; they never call `DBOS.reset_system_database`. Use unique workflow
   IDs per test instead.
-- `retention.py`, `sweep.py`, `queues.py`, `conductor.py`, `worker/main.py` and
-  `api/throughput.py` use private DBOS internals (`_workflow_commands.garbage_collect`,
-  `_sys_db.reenqueue_for_recovery`, `dbos._utils.INTERNAL_QUEUE_NAME`, `dbos._queue`,
-  `_active_workflows_set` to tell whether the drain left workflows running before the
-  executor lease is released; `dbos._error.DBOSException`,
-  `dbos._conductor.conductor.connect`, replaced at runtime, `ConductorWebsocket`'s
-  constructor, `DBOS.conductor_websocket` for shutdown, the `dbos._conductor.protocol`
-  dataclasses for refusal responses, and `dbos._dbos._get_dbos_instance`). Tests pin them;
-  re-check them on every DBOS upgrade. `dbos._conductor` is moving to the commercial
-  `dbos-enterprise` package (dbos-transact-py PR #873).
+- `retention.py`, `sweep.py`, `queues.py`, `conductor.py`, `promote.py`, `config.py`,
+  `worker/main.py` and `api/throughput.py` use private DBOS internals
+  (`_workflow_commands.garbage_collect`, `_sys_db.reenqueue_for_recovery` on the launched
+  instance and on `DBOSClient._sys_db` for the operator sweep,
+  `dbos._utils.INTERNAL_QUEUE_NAME`, `dbos._queue`, `_active_workflows_set` to tell whether
+  the drain left workflows running before the executor lease is released;
+  `dbos._error.DBOSException`, `dbos._croniter` to validate `recovery_sweep_schedule` at
+  settings load, `dbos._conductor.conductor.connect`, replaced at runtime,
+  `ConductorWebsocket`'s constructor, `DBOS.conductor_websocket` for shutdown, the
+  `dbos._conductor.protocol` dataclasses for refusal responses, and
+  `dbos._dbos._get_dbos_instance`). Tests pin them; re-check them on every DBOS upgrade.
+  `dbos._conductor` is moving to the commercial `dbos-enterprise` package
+  (dbos-transact-py PR #873).
+- The recovery sweep (`runtime/sweep.py`, scheduled by `workflows/recovery.py`) forks,
+  cancels and re-enqueues from inside one `@DBOS.step`, and those DBOS calls are not
+  checkpointed. That departs from the skill's rule against starting workflows from a step.
+  A re-run repeats the whole sweep, which is safe only because every fork is keyed by the
+  deterministic successor ID and every cancel and re-enqueue is gated on a re-read status or
+  on executor ownership; keep it that way. `harden-recovery-sweep` moves the writes out of
+  the step.
+- Version lease: every process that runs workflows (the workers, nothing else) registers its
+  version in `lease_versions` before launch and holds that version's advisory lock shared, on
+  its executor lease's session, until it exits (`runtime/version_lease.py`). The sweep forks
+  or retires a version's rows only under that lock held exclusively, and only for a version
+  registered before its target, DBOS's latest. Promoting a version is an operator command
+  (`python -m curate_d.runtime.promote`, see `docs/recovery.md`); workers never promote.
 - Conductor is read-only: the gate (`runtime/conductor.py`) passes read messages to DBOS's
   handler and refuses every write (cancel, resume, the schedule commands, delete, the forks,
   rewind, version promotion, backfill, recovery, retention, import), enqueuing and

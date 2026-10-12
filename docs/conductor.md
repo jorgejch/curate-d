@@ -168,11 +168,12 @@ executor is warned about once per connection, and the repeats log at debug.
   application version an executor ID first reported, and curate.d's IDs survive restarts.
   Workflow, step and queue listings come from the shared system database and are current;
   only the executor list's versions are not.
-- **A removed pod's work waits.** Each worker recovers its own PENDING workflows when it
-  restarts, and Conductor's `RECOVERY` is refused, so a pod that never comes back (a
-  StatefulSet scaled down after a hard kill) leaves its PENDING workflows until its identity
-  returns. Bring the identity back (scale up, let it drain, scale down) as issue #5
-  describes. A clean scale-down drains first and leaves nothing behind.
+- **A removed pod's work waits for the recovery sweep.** Each worker recovers its own PENDING
+  workflows when it restarts, and Conductor's `RECOVERY` is refused. A pod that never comes
+  back (a StatefulSet scaled down after a hard kill) therefore leaves its PENDING workflows
+  until the scheduled recovery sweep re-enqueues them, within one `recovery_sweep_schedule`
+  interval. To recover them at once, run the operator sweep ([recovery.md](recovery.md)). A
+  clean scale-down drains first and leaves nothing behind.
 - **The gate rests on private DBOS internals.** Upstream is moving `dbos._conductor` into the
   commercial `dbos-enterprise` package (dbos-transact-py PR #873). A DBOS upgrade that ships
   it fails the tests that pin those internals, and would stop the workers whatever the flag:
