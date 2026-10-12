@@ -11,7 +11,7 @@ and the test observes only what the sweep did.
 """
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
@@ -23,8 +23,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from curate_d.config import Settings
 from curate_d.runtime import sweep
-from curate_d.runtime.dbos_app import build_dbos_config
-from curate_d.runtime.lease import ExecutorLease
+from curate_d.runtime.dbos_app import APPLICATION_NAME, build_dbos_config
+from curate_d.runtime.lease import ExecutorLease, split_key, version_lease_key
 from curate_d.runtime.sweep import (
     PendingWorkflow,
     RecoveryAction,
@@ -48,11 +48,20 @@ FUTURE_VERSION = f"9.9.10-sweep-{uuid4().hex[:8]}"
 
 
 @pytest.fixture
-async def dbos(settings: Settings) -> AsyncIterator[None]:
+def live_lease(settings: Settings) -> Iterator[ExecutorLease]:
+    """Hold `LIVE_EXECUTOR`'s lease and `CURRENT_VERSION`'s version lease, as a worker does."""
+    lease = ExecutorLease.for_settings(settings, LIVE_EXECUTOR, version=CURRENT_VERSION)
+    lease.acquire(timeout=10)
+    try:
+        yield lease
+    finally:
+        lease.release()
+
+
+@pytest.fixture
+async def dbos(settings: Settings, live_lease: ExecutorLease) -> AsyncIterator[None]:
     """Launch DBOS as `LIVE_EXECUTOR`, holding its lease the way a worker does."""
     DBOS.destroy()
-    lease = ExecutorLease.for_settings(settings, LIVE_EXECUTOR)
-    lease.acquire(timeout=10)
     config = build_dbos_config(settings, executor_id=LIVE_EXECUTOR)
     # Recovery reads the process's own version, so the instance must agree with what the
     # sweep is told is current, exactly as a deployed worker would.
@@ -73,7 +82,6 @@ async def dbos(settings: Settings) -> AsyncIterator[None]:
         if rows:
             await DBOS.delete_workflows_async([row.workflow_id for row in rows])
         DBOS.destroy()
-        lease.release()
 
 
 async def _sweep(current_version: str = CURRENT_VERSION) -> SweepOutcome:
@@ -330,6 +338,7 @@ async def test_fork_preserves_routing_and_retires_source(
 async def test_concurrent_sweeps_publish_one_successor(
     dbos: None, ledger_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The version lease serialises them: the second skips what the first is forking."""
     original = f"sweep-concurrent-{uuid4()}"
     await _seed_pending(
         ledger_engine,
@@ -337,23 +346,45 @@ async def test_concurrent_sweeps_publish_one_successor(
         executor_id=RETIRED_EXECUTOR,
         version=SUPERSEDED_VERSION,
     )
-    barrier = asyncio.Barrier(2)
+    second_done = asyncio.Event()
     start_step = sweep._fork_start_step
 
     async def overlap(workflow_id: str) -> int:
+        """Hold the first sweep mid-fork, under its version lease, until the second ends."""
         value = await start_step(workflow_id)
-        await barrier.wait()
+        await second_done.wait()
         return value
 
     monkeypatch.setattr(sweep, "_fork_start_step", overlap)
-    first, second = await asyncio.gather(*(_sweep() for _ in range(2)))
+    first_task = asyncio.create_task(_sweep())
+    while not await _version_held_exclusively(ledger_engine, SUPERSEDED_VERSION):
+        await asyncio.sleep(0.05)
+    second = await _sweep()
+    second_done.set()
+    first = await first_task
     assert first.failed == second.failed == ()
-    assert len(first.forked) + len(second.forked) == 1
-    assert len(first.retired) + len(second.retired) == 1
+    assert first.forked == ((original, recovery_successor_id(original)),)
+    assert original in {workflow_id for workflow_id, _ in second.skipped}
+    assert SUPERSEDED_VERSION in second.running_versions
     assert (await _fork_of(ledger_engine, original))["workflow_uuid"] == recovery_successor_id(
         original
     )
     assert (await _row(ledger_engine, original))["status"] == "CANCELLED"
+
+
+async def _version_held_exclusively(engine: AsyncEngine, version: str) -> bool:
+    """Return whether a recovery holds `version`'s lease, per pg_locks."""
+    high, low = split_key(version_lease_key(APPLICATION_NAME, version))
+    async with engine.connect() as connection:
+        held = await connection.scalar(
+            text(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND granted"
+                " AND objsubid = 1 AND mode = 'ExclusiveLock'"
+                " AND classid = CAST(:high AS bigint)::oid AND objid = CAST(:low AS bigint)::oid)"
+            ),
+            {"high": high, "low": low},
+        )
+        return bool(held)
 
 
 async def test_failure_before_fork_commit_leaves_original_retryable(
@@ -381,6 +412,7 @@ async def test_failure_before_fork_commit_leaves_original_retryable(
 @pytest.mark.parametrize("retry_version", [CURRENT_VERSION, SUPERSEDED_VERSION, FUTURE_VERSION])
 async def test_crash_after_fork_is_repaired_without_another_sibling(
     dbos: None,
+    live_lease: ExecutorLease,
     ledger_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
     retry_version: str,
@@ -406,7 +438,12 @@ async def test_crash_after_fork_is_repaired_without_another_sibling(
     # A new deployment/rollback can move the leaf, but cannot fork the root again.
     assert (await _fork_of(ledger_engine, original))["workflow_uuid"] == successor
     if retry_version != CURRENT_VERSION:
-        assert result.forked == ((successor, recovery_successor_id(successor)),)
+        # The successor's version still has a live worker: it is not moved under it.
+        assert successor in {workflow_id for workflow_id, _ in result.skipped}
+        assert result.running_versions == (CURRENT_VERSION,)
+        live_lease.release()
+        moved = await _sweep(retry_version)
+        assert moved.forked == ((successor, recovery_successor_id(successor)),)
 
 
 @pytest.mark.parametrize("version", [CURRENT_VERSION, None])
@@ -504,3 +541,85 @@ async def test_the_sweep_reenqueues_under_a_free_lease_and_holds_it_meanwhile(
         assert await asyncio.to_thread(restarting.try_acquire), "the sweep kept the lease"
     finally:
         restarting.release()
+
+
+async def test_a_scoped_sweep_recovers_only_the_named_executor(
+    dbos: None, ledger_engine: AsyncEngine
+) -> None:
+    """The operator's recover <id> leaves another dead executor's rows to its own recovery."""
+    target, other = f"sweep-gone-{uuid4().hex[:8]}", f"sweep-gone-{uuid4().hex[:8]}"
+    mine, theirs = f"sweep-scoped-{uuid4()}", f"sweep-scoped-{uuid4()}"
+    await _seed_pending(
+        ledger_engine, workflow_id=mine, executor_id=target, version=CURRENT_VERSION
+    )
+    await _seed_pending(
+        ledger_engine, workflow_id=theirs, executor_id=other, version=CURRENT_VERSION
+    )
+    outcome = await run_recovery_sweep(
+        Settings(), executor_id=target, current_version=CURRENT_VERSION
+    )
+    assert outcome.reenqueued == (mine,)
+    assert (await _row(ledger_engine, mine))["status"] == "ENQUEUED"
+    assert (await _row(ledger_engine, theirs))["status"] == "PENDING"
+
+
+async def test_a_scoped_sweep_of_a_live_executor_changes_nothing(
+    dbos: None, ledger_engine: AsyncEngine
+) -> None:
+    """Refused outright: a live executor recovers its own work."""
+    workflow_id = f"sweep-scoped-live-{uuid4()}"
+    await _seed_pending(
+        ledger_engine, workflow_id=workflow_id, executor_id=LIVE_EXECUTOR, version=CURRENT_VERSION
+    )
+    before = await _row(ledger_engine, workflow_id)
+    outcome = await run_recovery_sweep(
+        Settings(), executor_id=LIVE_EXECUTOR, current_version=CURRENT_VERSION
+    )
+    assert outcome.refused is not None and "alive" in outcome.refused
+    assert await _row(ledger_engine, workflow_id) == before
+
+
+async def test_a_version_a_worker_still_holds_is_not_forked_until_it_goes(
+    dbos: None, ledger_engine: AsyncEngine, settings: Settings
+) -> None:
+    """Blue-green: the old workers drain first; their version's work is forked after."""
+    workflow_id = f"sweep-old-running-{uuid4()}"
+    await _seed_pending(
+        ledger_engine,
+        workflow_id=workflow_id,
+        executor_id=RETIRED_EXECUTOR,
+        version=SUPERSEDED_VERSION,
+    )
+    old_worker = ExecutorLease.for_settings(
+        settings, f"sweep-old-{uuid4().hex[:8]}", version=SUPERSEDED_VERSION
+    )
+    old_worker.acquire(timeout=10)
+    try:
+        held = await _sweep()
+        assert workflow_id in {skipped for skipped, _ in held.skipped}
+        assert SUPERSEDED_VERSION in held.running_versions
+        assert (await _row(ledger_engine, workflow_id))["status"] == "PENDING"
+    finally:
+        old_worker.release()
+    freed = await _sweep()
+    assert (workflow_id, recovery_successor_id(workflow_id)) in freed.forked
+
+
+async def test_a_live_executor_predating_the_version_lease_blocks_its_version(
+    dbos: None, ledger_engine: AsyncEngine, settings: Settings
+) -> None:
+    """A build without the version lease still running its PENDING work keeps it unforked."""
+    legacy_id = f"sweep-legacy-{uuid4().hex[:8]}"
+    workflow_id = f"sweep-legacy-{uuid4()}"
+    await _seed_pending(
+        ledger_engine, workflow_id=workflow_id, executor_id=legacy_id, version=SUPERSEDED_VERSION
+    )
+    legacy = ExecutorLease.for_settings(settings, legacy_id)
+    legacy.acquire(timeout=10)
+    try:
+        outcome = await _sweep()
+        reasons = dict(outcome.skipped)
+        assert "without a version lease" in reasons[workflow_id]
+        assert (await _row(ledger_engine, workflow_id))["status"] == "PENDING"
+    finally:
+        legacy.release()

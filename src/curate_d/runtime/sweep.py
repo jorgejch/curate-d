@@ -14,33 +14,39 @@ instead of creating another sibling from an ancestor.
 
 Liveness is the executor lease (lease.py), not a list supplied by the caller: an
 executor is dead only if the sweep can take its lease, and the sweep holds that lease
-while re-enqueueing the executor's rows, so the executor cannot start and run startup
-recovery on them mid-sweep. This relies on every executor holding its lease, which
-workers do from before launch; a process that runs DBOS without one is indistinguishable
-from a dead executor.
+until it finishes, so the executor cannot start and run startup recovery on its rows
+mid-sweep. This relies on every executor holding its lease, which workers do from before
+launch; a process that runs DBOS without one is indistinguishable from a dead executor.
 
-Sweeps require a version whose predecessors are retired. They must not be run during
-mixed-version deployments: cancelling an original does not forcibly stop a step still
-executing in another process, and a predecessor that predates the lease holds none.
+A version's work is forked only while no worker runs that version: the sweep takes the
+version lease exclusively (refused while any worker of it holds it shared) and holds it
+across that version's forks. A build that predates the version lease holds none, so a
+version also counts as running while a live executor holding no version lease still owns
+PENDING work on it. A live executor that holds a version lease runs that version, so its
+PENDING rows on an older one (left by its own restart onto a new build) do not block the
+fork. A running version's rows are skipped and reported, never forked: cancelling an
+original does not stop a step still executing in another process.
+
+A sweep scoped to one executor recovers only that executor's rows, and is refused
+outright while the executor holds its lease: a live executor recovers its own work.
 """
 
 import asyncio
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from hashlib import sha256
-from sqlite3 import IntegrityError as SQLiteIntegrityError
 
 from dbos import DBOS, SetWorkflowID
 from dbos._dbos import _get_dbos_instance
 from dbos._utils import INTERNAL_QUEUE_NAME
-from psycopg.errors import UniqueViolation
 from sqlalchemy.exc import IntegrityError
 
 from curate_d.config import Settings
 from curate_d.observability.logging import get_logger
-from curate_d.runtime.dbos_app import APPLICATION_VERSION
-from curate_d.runtime.lease import ExecutorLease
+from curate_d.runtime import dbos_app
+from curate_d.runtime.lease import ExecutorLease, VersionLease
+from curate_d.runtime.lineage import confirmed_successor, is_workflow_id_conflict
 
 logger = get_logger(__name__)
 
@@ -96,9 +102,16 @@ class SweepOutcome:
     """Pending workflows left alone because their executor's lease is held."""
     failed: tuple[tuple[str, str], ...] = ()
     """Pairs of (workflow identifier, failure reason)."""
+    skipped: tuple[tuple[str, str], ...] = ()
+    """Pairs of (workflow identifier, reason) left for a later sweep: their version runs."""
+    running_versions: tuple[str, ...] = ()
+    """Versions whose work was not forked because a worker still runs them."""
+    refused: str | None = None
+    """Why a scoped sweep did nothing at all; None when it ran."""
 
     @property
     def recovered_count(self) -> int:
+        """Return how many workflows were re-enqueued or forked."""
         return len(self.reenqueued) + len(self.forked)
 
 
@@ -205,22 +218,10 @@ def recovery_successor_id(workflow_id: str) -> str:
     return f"recovery:{sha256(workflow_id.encode()).hexdigest()}"
 
 
-def _is_workflow_id_conflict(error: IntegrityError) -> bool:
-    cause = error.orig
-    if isinstance(cause, UniqueViolation):
-        return cause.diag.constraint_name == "workflow_status_pkey"
-    return isinstance(cause, SQLiteIntegrityError) and str(cause) == (
-        "UNIQUE constraint failed: workflow_status.workflow_uuid"
-    )
-
-
 async def _confirmed_successor(original: str, successor: str) -> bool:
+    """Return whether `successor` exists as a fork of `original`; raise if it is unrelated."""
     status = await DBOS.get_workflow_status_async(successor)
-    if status is None:
-        return False
-    if status.forked_from != original:
-        raise ValueError(f"recovery ID {successor!r} belongs to an unrelated workflow")
-    return True
+    return confirmed_successor(status, original, successor)
 
 
 async def _recover_version(workflow: PendingWorkflow, version: str) -> tuple[str, bool]:
@@ -260,7 +261,7 @@ async def _recover_version(workflow: PendingWorkflow, version: str) -> tuple[str
             except IntegrityError as error:
                 # Only the workflow primary-key conflict means another sweep won.
                 # Other constraints must remain failures, even if a successor exists.
-                if not _is_workflow_id_conflict(error):
+                if not is_workflow_id_conflict(error):
                     raise
                 if not await _confirmed_successor(original, successor):
                     raise
@@ -271,6 +272,7 @@ async def _recover_version(workflow: PendingWorkflow, version: str) -> tuple[str
 
 
 type LeaseFactory = Callable[[str], ExecutorLease]
+type VersionLeaseFactory = Callable[[str], VersionLease]
 
 
 async def _reenqueue(workflow: PendingWorkflow, executor_id: str) -> bool:
@@ -283,40 +285,74 @@ async def _reenqueue(workflow: PendingWorkflow, executor_id: str) -> bool:
     )
 
 
-async def run_recovery_sweep(
-    settings: Settings,
-    *,
-    current_version: str | None = None,
-    lease_factory: LeaseFactory | None = None,
-) -> SweepOutcome:
-    """Recover pending and queued work that no live worker will claim.
+class _Claims:
+    """The executor leases one sweep has tried, held or refused, until it finishes.
 
-    Args:
-        settings: Resolved configuration; names the database holding executor leases.
-        current_version: The version live workers run. Defaults to this build's.
-        lease_factory: Builds the lease for one executor identity. Defaults to a lease on
-            the configured DBOS system database.
-
-    Returns:
-        What the sweep did, including per-workflow failures. One workflow that cannot be
-        recovered does not abort the rest; a sweep that gave up on the first bad row
-        would leave the remaining orphans stranded for another interval.
+    Each identity is tried once: a dead executor's lease, once taken, stays held until
+    `release_all`, so it cannot start and recover rows the sweep is working on; a live
+    one's answer stands for the rest of the sweep.
     """
-    version = current_version or APPLICATION_VERSION
-    leases = lease_factory or (
-        lambda executor_id: ExecutorLease.for_settings(
-            settings, executor_id, purpose="recovery sweep"
+
+    def __init__(self, factory: LeaseFactory) -> None:
+        """Bind the factory building one executor's lease."""
+        self._factory = factory
+        self._leases: dict[str, ExecutorLease] = {}
+        self._dead: dict[str, bool] = {}
+
+    async def is_dead(self, executor_id: str) -> bool:
+        """Return whether the sweep holds `executor_id`'s lease, taking it if it is free.
+
+        Raises:
+            Exception: liveness could not be checked; it is never assumed dead.
+        """
+        if executor_id in self._dead:
+            return self._dead[executor_id]
+        lease = self._leases.get(executor_id)
+        if lease is None:
+            lease = self._leases[executor_id] = self._factory(executor_id)
+        dead = await asyncio.to_thread(lease.try_acquire)
+        self._dead[executor_id] = dead
+        return dead
+
+    async def has_version_lease(self, executor_id: str) -> bool:
+        """Return whether live `executor_id`'s lease session also holds a version lease."""
+        return await asyncio.to_thread(self._leases[executor_id].holder_has_version_lease)
+
+    async def release_all(self) -> None:
+        """Release every lease taken and close every session opened."""
+        for lease in self._leases.values():
+            await asyncio.to_thread(lease.release)
+
+
+@dataclass
+class _Results:
+    """What a sweep did so far."""
+
+    reenqueued: list[str] = field(default_factory=list)
+    forked: list[tuple[str, str]] = field(default_factory=list)
+    retired: list[str] = field(default_factory=list)
+    failed: list[tuple[str, str]] = field(default_factory=list)
+    skipped: list[tuple[str, str]] = field(default_factory=list)
+    running_versions: list[str] = field(default_factory=list)
+    left_running: int = 0
+
+    def outcome(self) -> SweepOutcome:
+        """Return the results as a `SweepOutcome`."""
+        return SweepOutcome(
+            reenqueued=tuple(self.reenqueued),
+            forked=tuple(self.forked),
+            retired=tuple(self.retired),
+            left_running=self.left_running,
+            failed=tuple(self.failed),
+            skipped=tuple(self.skipped),
+            running_versions=tuple(self.running_versions),
         )
-    )
-    pending = await list_pending_workflows()
-    plan = plan_recovery(pending, current_version=version)
 
-    reenqueued: list[str] = []
-    forked: list[tuple[str, str]] = []
-    failed: list[tuple[str, str]] = []
-    retired: list[str] = []
-    left_running = 0
 
+async def _reenqueue_orphans(
+    plan: Sequence[StrandedWorkflow], claims: _Claims, results: _Results
+) -> None:
+    """Re-enqueue every planned PENDING row whose executor's lease the sweep can hold."""
     # Target only planned rows. Bulk executor recovery would also re-enqueue an
     # ancestor awaiting retirement if an operator rolled back to its old version.
     by_executor: dict[str | None, list[PendingWorkflow]] = {}
@@ -326,88 +362,219 @@ async def run_recovery_sweep(
 
     for executor_id, workflows in by_executor.items():
         if executor_id is None:
-            for workflow in workflows:
-                failed.append(
-                    (
-                        workflow.workflow_id,
-                        "re-enqueueing failed: DBOS cannot conditionally re-enqueue a row "
-                        "without an executor",
-                    )
+            results.failed.extend(
+                (
+                    workflow.workflow_id,
+                    "re-enqueueing failed: DBOS cannot conditionally re-enqueue a row "
+                    "without an executor",
                 )
+                for workflow in workflows
+            )
             continue
-        lease = leases(executor_id)
         try:
+            dead = await claims.is_dead(executor_id)
+        except Exception as error:  # Unknown liveness is never treated as dead.
+            results.failed.extend(
+                (workflow.workflow_id, f"checking executor {executor_id!r} failed: {error}")
+                for workflow in workflows
+            )
+            logger.error(
+                "recovery_sweep.liveness_check_failed", executor=executor_id, error=str(error)
+            )
+            continue
+        if not dead:
+            results.left_running += len(workflows)
+            logger.info(
+                "recovery_sweep.executor_live", executor=executor_id, pending=len(workflows)
+            )
+            continue
+        for workflow in workflows:
             try:
-                claimed = await asyncio.to_thread(lease.try_acquire)
-            except Exception as error:  # Unknown liveness is never treated as dead.
-                failed.extend(
-                    (workflow.workflow_id, f"checking executor {executor_id!r} failed: {error}")
-                    for workflow in workflows
-                )
-                logger.error(
-                    "recovery_sweep.liveness_check_failed",
+                changed = await _reenqueue(workflow, executor_id)
+                if changed:
+                    results.reenqueued.append(workflow.workflow_id)
+                logger.info(
+                    "recovery_sweep.reenqueued",
+                    workflow_id=workflow.workflow_id,
                     executor=executor_id,
+                    changed=changed,
+                )
+            except Exception as error:  # Reported per workflow, never swallowed.
+                results.failed.append((workflow.workflow_id, f"re-enqueueing failed: {error}"))
+                logger.error(
+                    "recovery_sweep.reenqueue_failed",
+                    workflow_id=workflow.workflow_id,
                     error=str(error),
                 )
+
+
+async def _running_reason(
+    version: str,
+    pending: Sequence[PendingWorkflow],
+    claims: _Claims,
+    lease: VersionLease,
+) -> str | None:
+    """Return why `version` counts as running, or None with its version lease now held.
+
+    A live executor holding no version lease predates it, so its PENDING rows on
+    `version` may be executing there; one holding a version lease runs that version
+    instead, which the version lease itself answers for.
+    """
+    owners = sorted(
+        {
+            workflow.executor_id
+            for workflow in pending
+            if workflow.application_version == version
+            and workflow.status == PENDING
+            and workflow.executor_id is not None
+        }
+    )
+    for owner in owners:
+        try:
+            if await claims.is_dead(owner) or await claims.has_version_lease(owner):
                 continue
-            if not claimed:
-                left_running += len(workflows)
-                logger.info(
-                    "recovery_sweep.executor_live", executor=executor_id, pending=len(workflows)
+        except Exception as error:  # Unknown liveness is never treated as dead.
+            return (
+                f"liveness of executor {owner!r}, which owns PENDING work on it, is "
+                f"unknown: {error}"
+            )
+        return (
+            f"executor {owner!r} is alive without a version lease and still owns PENDING work on it"
+        )
+    try:
+        taken = await asyncio.to_thread(lease.try_acquire)
+    except Exception as error:  # An unchecked version is treated as running.
+        return f"its version lease could not be checked: {error}"
+    return None if taken else "its version lease is held: a worker runs it, or a recovery forks it"
+
+
+async def _recover_versions(
+    plan: Sequence[StrandedWorkflow],
+    pending: Sequence[PendingWorkflow],
+    version: str,
+    claims: _Claims,
+    version_leases: VersionLeaseFactory,
+    results: _Results,
+) -> None:
+    """Fork or retire planned rows, one source version at a time, under its version lease."""
+    by_version: dict[str | None, list[PendingWorkflow]] = {}
+    for entry in plan:
+        if entry.action in {RecoveryAction.FORK, RecoveryAction.RETIRE}:
+            by_version.setdefault(entry.workflow.application_version, []).append(entry.workflow)
+
+    for source_version, workflows in by_version.items():
+        # Retiring an ancestor on the current version, or on none, cancels a row whose
+        # successor runs already; there is no other version to wait out.
+        lease = None
+        if source_version is not None and source_version != version:
+            lease = version_leases(source_version)
+            reason = await _running_reason(source_version, pending, claims, lease)
+            if reason is not None:
+                results.running_versions.append(source_version)
+                results.skipped.extend(
+                    (workflow.workflow_id, f"version {source_version!r} is running: {reason}")
+                    for workflow in workflows
+                )
+                logger.warning(
+                    "recovery_sweep.version_running",
+                    version=source_version,
+                    reason=reason,
+                    skipped=len(workflows),
                 )
                 continue
-            # The lease stays held until every row is re-enqueued, so the executor cannot
-            # start and run its own startup recovery on them in between.
-            for workflow in workflows:
-                try:
-                    changed = await _reenqueue(workflow, executor_id)
-                    if changed:
-                        reenqueued.append(workflow.workflow_id)
-                    logger.info(
-                        "recovery_sweep.reenqueued",
-                        workflow_id=workflow.workflow_id,
-                        executor=executor_id,
-                        changed=changed,
-                    )
-                except Exception as error:  # Reported per workflow, never swallowed.
-                    failed.append((workflow.workflow_id, f"re-enqueueing failed: {error}"))
-                    logger.error(
-                        "recovery_sweep.reenqueue_failed",
-                        workflow_id=workflow.workflow_id,
-                        error=str(error),
-                    )
-        finally:
-            await asyncio.to_thread(lease.release)
-
-    for entry in plan:
-        if entry.action not in {RecoveryAction.FORK, RecoveryAction.RETIRE}:
-            continue
-        original = entry.workflow.workflow_id
         try:
-            successor, created = await _recover_version(entry.workflow, version)
-            if created:
-                forked.append((original, successor))
-            else:
-                retired.append(original)
-            logger.info(
-                "recovery_sweep.forked" if created else "recovery_sweep.retired",
-                workflow_id=original,
-                forked_workflow_id=successor,
-                from_version=entry.workflow.application_version,
-                to_version=version,
-            )
-        except Exception as error:  # One bad row must not strand the rest.
-            reason = (
-                f"recovering workflow {original!r} from version "
-                f"{entry.workflow.application_version!r} onto {version!r} failed: {error}"
-            )
-            failed.append((original, reason))
-            logger.error("recovery_sweep.fork_failed", workflow_id=original, error=str(error))
+            for workflow in workflows:
+                await _recover_one(workflow, version, results)
+        finally:
+            if lease is not None:
+                await asyncio.to_thread(lease.release)
 
-    return SweepOutcome(
-        reenqueued=tuple(reenqueued),
-        forked=tuple(forked),
-        retired=tuple(retired),
-        left_running=left_running,
-        failed=tuple(failed),
+
+async def _recover_one(workflow: PendingWorkflow, version: str, results: _Results) -> None:
+    """Fork or retire one row, recording a failure rather than raising it."""
+    original = workflow.workflow_id
+    try:
+        successor, created = await _recover_version(workflow, version)
+        if created:
+            results.forked.append((original, successor))
+        else:
+            results.retired.append(original)
+        logger.info(
+            "recovery_sweep.forked" if created else "recovery_sweep.retired",
+            workflow_id=original,
+            forked_workflow_id=successor,
+            from_version=workflow.application_version,
+            to_version=version,
+        )
+    except Exception as error:  # One bad row must not strand the rest.
+        reason = (
+            f"recovering workflow {original!r} from version "
+            f"{workflow.application_version!r} onto {version!r} failed: {error}"
+        )
+        results.failed.append((original, reason))
+        logger.error("recovery_sweep.fork_failed", workflow_id=original, error=str(error))
+
+
+async def run_recovery_sweep(
+    settings: Settings,
+    *,
+    executor_id: str | None = None,
+    current_version: str | None = None,
+    lease_factory: LeaseFactory | None = None,
+    version_lease_factory: VersionLeaseFactory | None = None,
+) -> SweepOutcome:
+    """Recover pending and queued work that no live worker will claim.
+
+    Args:
+        settings: Resolved configuration; names the database holding executor leases.
+        executor_id: Recover only this executor's rows, and nothing while it holds its
+            lease. Every executor's when None.
+        current_version: The version live workers run. Defaults to this build's.
+        lease_factory: Builds the lease for one executor identity. Defaults to a lease on
+            the configured DBOS system database.
+        version_lease_factory: Builds the lease for one application version. Defaults to
+            a lease on the configured DBOS system database.
+
+    Returns:
+        What the sweep did, including per-workflow failures and skips. One workflow that
+        cannot be recovered does not abort the rest; a sweep that gave up on the first bad
+        row would leave the remaining orphans stranded for another interval.
+    """
+    version = current_version or dbos_app.APPLICATION_VERSION
+    claims = _Claims(
+        lease_factory
+        or (
+            lambda executor: ExecutorLease.for_settings(
+                settings, executor, purpose="recovery sweep"
+            )
+        )
     )
+    version_leases = version_lease_factory or (
+        lambda source: VersionLease.for_settings(settings, source)
+    )
+    results = _Results()
+    try:
+        pending = await list_pending_workflows()
+        scope: Sequence[PendingWorkflow] = pending
+        if executor_id is not None:
+            refusal = await _refusal(executor_id, claims)
+            if refusal is not None:
+                logger.warning("recovery_sweep.refused", executor=executor_id, reason=refusal)
+                return SweepOutcome(refused=refusal)
+            scope = tuple(workflow for workflow in pending if workflow.executor_id == executor_id)
+        plan = plan_recovery(scope, current_version=version)
+        await _reenqueue_orphans(plan, claims, results)
+        await _recover_versions(plan, pending, version, claims, version_leases, results)
+    finally:
+        await claims.release_all()
+    return results.outcome()
+
+
+async def _refusal(executor_id: str, claims: _Claims) -> str | None:
+    """Return why a sweep scoped to `executor_id` must not run, or None with its lease held."""
+    try:
+        if await claims.is_dead(executor_id):
+            return None
+    except Exception as error:  # Unknown liveness is never treated as dead.
+        return f"liveness of executor {executor_id} could not be checked: {error}"
+    return f"executor {executor_id} is alive (lease held); it recovers its own work"
