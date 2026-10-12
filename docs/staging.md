@@ -164,9 +164,11 @@ admission, the upload and the registration together. It is not yet split into th
 parts.
 
 A `staging.reader_lock_wait` names the key the reader asked for, not the key the writer
-claimed. Entry locks are a four-byte hash of the key, so a reader can wait behind a writer
-that claimed only a colliding key, or an orphan under the reader's own live key. A long
-wait on a key no worker was touching is that case, not a fault.
+claimed. A reclaiming writer holds every entry lock it claims until its transaction ends,
+and it claims a live key whenever it deletes an orphan attempt under that key. Entry locks
+are also a four-byte hash of the key, so a writer that claimed only a colliding key holds
+the reader's lock too. A long `registered: true` wait on a key no worker evicted is one of
+those two cases, the coupling #1 tracks, and ends with the writer's transaction.
 
 The queries read one pod's JSON lines over a chosen window. Pick the window with
 `--since`, add `-c <container>` for a pod that runs a sidecar, and skip non-JSON lines

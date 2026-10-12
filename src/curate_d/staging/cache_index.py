@@ -287,11 +287,11 @@ class PostgresStagingCacheIndex:
 
         The block holds a pooled connection and an open transaction for as long as the
         caller keeps it, and can wait on the shared lock for as long as a reclaiming
-        writer's transaction lasts: the writer need only have claimed `key`, an orphan
-        under it or a key whose entry lock collides with it, and a key it evicted yields
-        None once the wait ends. Callers keep the block to the remote read: work on
-        bytes that already landed locally needs no protection from eviction and must not
-        be done inside it.
+        writer's transaction lasts: the writer need only have claimed `key`, to evict it
+        or to delete an orphan attempt under it, or a key whose entry lock collides with
+        it. A key it evicted yields None once the wait ends. Callers keep the block to
+        the remote read: work on bytes that already landed locally needs no protection
+        from eviction and must not be done inside it.
 
         Raises:
             StagingObjectStoreError: The lock or the read did not complete.
