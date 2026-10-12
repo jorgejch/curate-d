@@ -317,8 +317,8 @@ Index(
 )
 
 # At most one operator-command entry per Conductor request. Historical: Conductor is
-# read-only now and nothing writes these entries, but migration 0018 created the index from
-# these two expressions and the metadata still describes the schema it built.
+# read-only now and nothing writes these entries, but the baseline migration builds the index
+# from the same two expressions, spelled out there, and the metadata still describes it.
 COMMAND_REQUEST_ID: Final = literal_column("(details ->> 'request_id')", Text())
 COMMAND_ENTRIES: Final = text(f"entry_type = '{AuditEntryType.WORKFLOW_COMMAND_ISSUED.value}'")
 audit_entries.append_constraint(
@@ -720,42 +720,10 @@ provider_connections = Table(
     ),
 )
 
-# Enforced in the database rather than the application: a bug, a migration, or a person
-# with psql must all be unable to rewrite history.
-APPEND_ONLY_FUNCTION = """
-CREATE OR REPLACE FUNCTION curate_d_reject_audit_mutation() RETURNS trigger AS $$
-BEGIN
-    RAISE EXCEPTION
-        'audit_entries is append-only; % rejected', TG_OP
-        USING ERRCODE = 'restrict_violation';
-END;
-$$ LANGUAGE plpgsql;
-"""
-
-APPEND_ONLY_TRIGGER = """
-CREATE TRIGGER audit_entries_append_only
-BEFORE UPDATE OR DELETE ON audit_entries
-FOR EACH ROW EXECUTE FUNCTION curate_d_reject_audit_mutation();
-"""
-
-# TRUNCATE bypasses row-level triggers, so it needs its own statement-level one.
-APPEND_ONLY_TRUNCATE_TRIGGER = """
-CREATE TRIGGER audit_entries_no_truncate
-BEFORE TRUNCATE ON audit_entries
-FOR EACH STATEMENT EXECUTE FUNCTION curate_d_reject_audit_mutation();
-"""
-
-DROP_APPEND_ONLY = """
-DROP TRIGGER IF EXISTS audit_entries_no_truncate ON audit_entries;
-DROP TRIGGER IF EXISTS audit_entries_append_only ON audit_entries;
-DROP FUNCTION IF EXISTS curate_d_reject_audit_mutation();
-"""
+# audit_entries' append-only triggers are not metadata: the baseline migration creates them,
+# and nothing else does.
 
 __all__ = [
-    "APPEND_ONLY_FUNCTION",
-    "APPEND_ONLY_TRIGGER",
-    "APPEND_ONLY_TRUNCATE_TRIGGER",
-    "DROP_APPEND_ONLY",
     "NAMING_CONVENTION",
     "audit_entries",
     "classification_holds",

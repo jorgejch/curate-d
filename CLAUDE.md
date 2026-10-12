@@ -29,7 +29,7 @@ responsible for...").
   or computed properties. Plain fields already covered by the class docstring or field
   descriptions don't each need their own line.
 - Alembic migrations (`migrations/versions/*.py`): the module docstring states what the
-  migration does (see `0001_source_objects.py`). `upgrade()`/`downgrade()` each get a
+  migration does (see `0001_baseline.py`). `upgrade()`/`downgrade()` each get a
   one-line docstring naming the table/column/index they act on; they don't repeat the
   module docstring's reasoning.
 - Test functions (`test_*`): a single concise one-line summary of what the test shows,
@@ -97,7 +97,7 @@ how it is made idempotent, whether it belongs in a workflow — against the `dbo
   `tests/unit/runtime/test_schedule_authority.py` pins them; re-check them on every DBOS
   upgrade. Don't move those writes back onto `DBOS.apply_schedules` or
   `DBOS.delete_schedule`: they commit on their own connections, outside the lock.
-- Migrations that read `dbos.*` tables (0005, 0007, 0008, 0009) need the DBOS system
+- The baseline migration's workflow views read `dbos.*` tables and need the DBOS system
   schema, so `migrations/env.py` brings it up to date before Alembic's own migrations run.
 - `rewind_workflow` re-executes steps from `start_step` after deleting their checkpoints, and
   a re-executed step appends new audit entries. That is intended: the trail keeps the
