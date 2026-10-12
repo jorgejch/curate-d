@@ -38,6 +38,7 @@ from curate_d.staging.errors import (
     StagedEntryMissingError,
     StagedEntrySupersededError,
     StagingCapacityExhaustedError,
+    StagingCapacityNeverFitsError,
     StagingIntegrityError,
 )
 from curate_d.staging.keys import StagingKey, require_within_root
@@ -135,7 +136,7 @@ class LocalScratchBudget:
         """
         with self._guard:
             if needed_bytes > self._max_bytes:
-                raise StagingCapacityExhaustedError(
+                raise StagingCapacityNeverFitsError(
                     f"a {needed_bytes}-byte snapshot never fits local scratch, which is "
                     f"bounded at {self._max_bytes} bytes; this job needs a larger bound "
                     f"rather than a retry"

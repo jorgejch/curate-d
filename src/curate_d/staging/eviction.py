@@ -19,7 +19,11 @@ from curate_d.staging.coordination import (
     reserved_bytes,
     volume_lock,
 )
-from curate_d.staging.errors import StagingCapacityExhaustedError, StagingKeyError
+from curate_d.staging.errors import (
+    StagingCapacityExhaustedError,
+    StagingCapacityNeverFitsError,
+    StagingKeyError,
+)
 from curate_d.staging.keys import StagingKey, entry_path, parse_staging_key
 from curate_d.staging.leases import LEASES_DIRNAME, Clock, LeaseRegistry
 
@@ -119,7 +123,7 @@ class StagingEvictor:
         if needed_bytes < 0:
             raise ValueError("needed_bytes must be nonnegative")
         if needed_bytes > self._max_bytes:
-            raise StagingCapacityExhaustedError(
+            raise StagingCapacityNeverFitsError(
                 f"staging cannot hold {needed_bytes} bytes: the total bound is "
                 f"{self._max_bytes} bytes, so this entry will never fit"
             )

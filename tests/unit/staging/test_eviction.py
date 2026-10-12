@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from curate_d.staging.errors import StagingCapacityExhaustedError
+from curate_d.staging.errors import StagingCapacityExhaustedError, StagingCapacityNeverFitsError
 from curate_d.staging.eviction import StagingEvictor
 from curate_d.staging.keys import entry_path
 from curate_d.staging.leases import LeaseRegistry
@@ -106,16 +106,18 @@ def test_exhaustion_by_entries_in_use_is_an_explicit_resource_error(
 
     with (
         leases.hold(key_for(1)),
-        pytest.raises(StagingCapacityExhaustedError, match="in use"),
+        pytest.raises(StagingCapacityExhaustedError, match="in use") as refused,
     ):
         evictor.ensure_capacity(50)
+    # Full for now, not forever: a caller may wait and retry.
+    assert not isinstance(refused.value, StagingCapacityNeverFitsError)
 
 
 def test_an_entry_larger_than_the_whole_bound_is_refused_immediately(
     evictor: StagingEvictor,
 ) -> None:
     """No amount of eviction makes this fit, so it must not evict anything trying."""
-    with pytest.raises(StagingCapacityExhaustedError, match="will never fit"):
+    with pytest.raises(StagingCapacityNeverFitsError, match="will never fit"):
         evictor.ensure_capacity(MAX_BYTES + 1)
 
 

@@ -40,6 +40,7 @@ from curate_d.clock import utc_now
 from curate_d.staging.cache_index import staging_key_of
 from curate_d.staging.errors import (
     StagingCapacityExhaustedError,
+    StagingCapacityNeverFitsError,
     StagingError,
     StagingObjectStoreError,
 )
@@ -371,7 +372,7 @@ class StagingOccupancy:
         if declared_max_bytes < 0:
             raise ValueError("declared_max_bytes must be nonnegative")
         if declared_max_bytes > self._max_bytes:
-            raise StagingCapacityExhaustedError(
+            raise StagingCapacityNeverFitsError(
                 f"staging cannot hold {declared_max_bytes} bytes: the active bound is "
                 f"{self._max_bytes} bytes, so this content will never fit"
             )

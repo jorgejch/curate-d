@@ -24,6 +24,7 @@ from curate_d.staging.errors import (
     StagedContentUnreadableError,
     StagedEntryMissingError,
     StagingCapacityExhaustedError,
+    StagingCapacityNeverFitsError,
     StagingIntegrityError,
 )
 from curate_d.staging.keys import StagingKey
@@ -498,9 +499,10 @@ async def test_a_second_reader_is_refused_while_the_first_is_still_downloading(
     streaming = asyncio.create_task(read_first())
     await store.started.wait()
     try:
-        with pytest.raises(StagingCapacityExhaustedError, match="have not closed"):
+        with pytest.raises(StagingCapacityExhaustedError, match="have not closed") as refused:
             async with reader.open(second):
                 pass
+        assert not isinstance(refused.value, StagingCapacityNeverFitsError)
     finally:
         store.gate.set()
 
@@ -515,7 +517,7 @@ async def test_an_object_larger_than_the_bound_never_fits(
     key = stage(index, store, b"far too large for this pod")
     reader = LocalSnapshotReader(store, index, scratch_root=scratch, budget=LocalScratchBudget(4))
 
-    with pytest.raises(StagingCapacityExhaustedError, match="never fits"):
+    with pytest.raises(StagingCapacityNeverFitsError, match="never fits"):
         async with reader.open(key):
             pass
 
