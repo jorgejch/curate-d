@@ -64,6 +64,22 @@ def test_a_policy_derives_the_expected_destinations(
     assert _policy().desired_destinations(facts) == expected
 
 
+def test_selections_name_every_matching_rule_in_policy_order() -> None:
+    """Two rules targeting one destination both appear; a rule that does not match does not."""
+    finance = Facts(media_kind=MediaKind.DOCUMENT, category="Documents", subcategory="Finance")
+    selections = _policy().selections(finance)
+    assert selections == {"archive": ("everything", "finance-twice"), "backup": ("finance-twice",)}
+    assert list(selections) == sorted(selections)
+    assert "photos-twice" not in {rule for rules in selections.values() for rule in rules}
+
+
+def test_selections_agree_with_the_desired_destinations() -> None:
+    """The destinations are the selections' keys."""
+    photo = Facts(media_kind=MediaKind.PHOTO, category="Photos")
+    assert tuple(_policy().selections(photo)) == _policy().desired_destinations(photo)
+    assert SEED_POLICY.selections(photo) == {}
+
+
 def test_the_seed_policy_places_nothing() -> None:
     """Nothing moves until a person says where things go."""
     assert SEED_POLICY.desired_destinations(Facts(media_kind=MediaKind.PHOTO)) == ()

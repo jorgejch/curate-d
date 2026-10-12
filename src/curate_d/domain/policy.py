@@ -124,11 +124,24 @@ class PlacementPolicy(DomainModel):
         return next((d for d in self.destinations if d.name == name), None)
 
     def desired_destinations(self, facts: Facts) -> tuple[str, ...]:
-        """Every destination a matching rule asks for, in a stable order."""
-        wanted = {
-            name for rule in self.rules if _matches(rule.when, facts) for name in rule.destinations
-        }
-        return tuple(sorted(wanted))
+        """Return every destination a matching rule asks for, in a stable order."""
+        return tuple(self.selections(facts))
+
+    def selections(self, facts: Facts) -> dict[str, tuple[str, ...]]:
+        """Return each destination a matching rule asks for, with the rules that do.
+
+        Returns:
+            Destination names in sorted order, each mapped to the names of the matching
+            rules that target it, in policy order.
+        """
+        selected: dict[str, list[str]] = {}
+        for rule in self.rules:
+            if _matches(rule.when, facts):
+                for name in rule.destinations:
+                    rules = selected.setdefault(name, [])
+                    if rule.name not in rules:
+                        rules.append(rule.name)
+        return {name: tuple(selected[name]) for name in sorted(selected)}
 
     def retention_for(self, facts: Facts) -> RetentionRule | None:
         """The first retention rule that applies, or None: retain by default."""
