@@ -26,7 +26,7 @@ from curate_d.runtime import sweep
 from curate_d.runtime.dbos_app import build_dbos_config
 from curate_d.runtime.lease import ExecutorLease
 from curate_d.runtime.sweep import (
-    PendingWorkflow,
+    DBOSRecoveryControl,
     RecoveryAction,
     SweepOutcome,
     plan_recovery,
@@ -76,9 +76,11 @@ async def dbos(settings: Settings) -> AsyncIterator[None]:
         lease.release()
 
 
-async def _sweep(current_version: str = CURRENT_VERSION) -> SweepOutcome:
-    """Run the sweep against the configured database, as a deployment would."""
-    return await run_recovery_sweep(Settings(), current_version=current_version)
+async def _sweep(own_version: str = CURRENT_VERSION) -> SweepOutcome:
+    """Run the sweep against the configured database, as a sweeper on `own_version` would."""
+    return await run_recovery_sweep(
+        Settings(), control=DBOSRecoveryControl(), own_version=own_version
+    )
 
 
 async def _seed_pending(
@@ -279,9 +281,8 @@ async def test_the_planner_agrees_with_what_the_database_reports(
         version=SUPERSEDED_VERSION,
     )
 
-    from curate_d.runtime.sweep import list_pending_workflows
-
-    pending = [w for w in await list_pending_workflows() if w.workflow_id == workflow_id]
+    listed = await DBOSRecoveryControl().list_pending()
+    pending = [w for w in listed if w.workflow_id == workflow_id]
     assert pending, "the seeded workflow was not listed as pending"
     assert pending[0].executor_id == RETIRED_EXECUTOR
     assert pending[0].application_version == SUPERSEDED_VERSION
@@ -340,8 +341,8 @@ async def test_concurrent_sweeps_publish_one_successor(
     barrier = asyncio.Barrier(2)
     start_step = sweep._fork_start_step
 
-    async def overlap(workflow_id: str) -> int:
-        value = await start_step(workflow_id)
+    async def overlap(control: sweep.RecoveryControl, workflow_id: str) -> int:
+        value = await start_step(control, workflow_id)
         await barrier.wait()
         return value
 
@@ -488,14 +489,14 @@ async def test_the_sweep_reenqueues_under_a_free_lease_and_holds_it_meanwhile(
     )
     restarting = ExecutorLease.for_settings(settings, executor)
     claimed_mid_sweep: list[bool] = []
-    reenqueue = sweep._reenqueue
+    reenqueue = DBOSRecoveryControl.reenqueue
 
-    async def observe(workflow: PendingWorkflow, executor_id: str) -> bool:
+    async def observe(control: DBOSRecoveryControl, workflow_id: str, executor_id: str) -> bool:
         if executor_id == executor:
             claimed_mid_sweep.append(await asyncio.to_thread(restarting.try_acquire))
-        return await reenqueue(workflow, executor_id)
+        return await reenqueue(control, workflow_id, executor_id)
 
-    monkeypatch.setattr(sweep, "_reenqueue", observe)
+    monkeypatch.setattr(DBOSRecoveryControl, "reenqueue", observe)
     try:
         outcome = await _sweep()
         assert workflow_id in outcome.reenqueued
