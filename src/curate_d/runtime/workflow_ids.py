@@ -25,6 +25,10 @@ FULL_RESCAN_PREFIX = "rescan"
 DRY_RUN_PREFIX = "dry-run"
 RECONCILE_PREFIX = "reconcile"
 DESTINATION_CHECK_PREFIX = "check"
+RECOVER_EXECUTOR_PREFIX = "recover-executor"
+RECOVER_ALL_PREFIX = "recover-all"
+OPERATOR_FORK_PREFIX = "operator-fork"
+OPERATOR_TRIGGER_PREFIX = "operator-trigger"
 
 _SEPARATOR = ":"
 _LOCATOR_TAG_DIGITS = 12
@@ -118,3 +122,23 @@ def reconcile_workflow_id(run: str, part: int) -> str:
 def destination_check_workflow_id(destination_name: str, cycle: str) -> str:
     """Return the identity of one destination's check in one checking cycle."""
     return _join(DESTINATION_CHECK_PREFIX, destination_name, cycle)
+
+
+def recover_executor_workflow_id(executor_id: str, request_id: str) -> str:
+    """Return the identity of one operator request to recover one executor's work."""
+    return _join(RECOVER_EXECUTOR_PREFIX, executor_id, request_id)
+
+
+def recover_all_workflow_id(request_id: str) -> str:
+    """Return the identity of one operator request to recover every executor's work."""
+    return _join(RECOVER_ALL_PREFIX, request_id)
+
+
+def operator_fork_workflow_id(request_id: str) -> str:
+    """Return the successor identity of one operator fork; a repeated request collapses."""
+    return _join(OPERATOR_FORK_PREFIX, request_id)
+
+
+def operator_trigger_workflow_id(schedule_name: str, request_id: str) -> str:
+    """Return the identity of one operator trigger of a schedule; a repeat collapses."""
+    return _join(OPERATOR_TRIGGER_PREFIX, schedule_name, request_id)

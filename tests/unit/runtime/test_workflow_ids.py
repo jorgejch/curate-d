@@ -1,14 +1,20 @@
 """Workflow identifier derivation."""
 
+from collections.abc import Callable
+
 import pytest
 
 from curate_d.domain import HashAlgorithm, StrongFingerprint
 from curate_d.runtime.workflow_ids import (
     classification_workflow_id,
     full_rescan_workflow_id,
+    operator_fork_workflow_id,
+    operator_trigger_workflow_id,
     placement_attempt_workflow_id,
     placement_workflow_id,
     reconcile_workflow_id,
+    recover_all_workflow_id,
+    recover_executor_workflow_id,
     scan_workflow_id,
 )
 
@@ -95,3 +101,28 @@ def test_reconciliation_parts_are_distinct_and_repeatable() -> None:
     """A run hands over part by part; a repeated part collapses."""
     assert reconcile_workflow_id("sweep-1", 0) == reconcile_workflow_id("sweep-1", 0)
     assert reconcile_workflow_id("sweep-1", 0) != reconcile_workflow_id("sweep-1", 1)
+
+
+def test_operator_command_ids_are_deterministic_per_request() -> None:
+    """A retried request names the same workflow; another request names another."""
+    assert recover_executor_workflow_id("io-1", "r1") == "recover-executor:io-1:r1"
+    assert recover_executor_workflow_id("io-1", "r1") != recover_executor_workflow_id("io-1", "r2")
+    assert recover_all_workflow_id("r1") == "recover-all:r1"
+    assert operator_fork_workflow_id("r1") == "operator-fork:r1"
+    assert operator_trigger_workflow_id("prune", "r1") == "operator-trigger:prune:r1"
+    assert operator_trigger_workflow_id("prune", "r1") != operator_trigger_workflow_id("scan", "r1")
+
+
+@pytest.mark.parametrize(
+    "derive",
+    [
+        lambda: recover_executor_workflow_id("io:1", "r1"),
+        lambda: recover_all_workflow_id("r:1"),
+        lambda: operator_fork_workflow_id("r:1"),
+        lambda: operator_trigger_workflow_id("a:b", "r1"),
+    ],
+)
+def test_operator_command_ids_reject_the_separator(derive: Callable[[], str]) -> None:
+    """A part carrying the separator could make two requests collide."""
+    with pytest.raises(ValueError, match="contains"):
+        derive()

@@ -17,6 +17,7 @@ from curate_d.api.audit import AuditBackend, LedgerAudit
 from curate_d.api.configuration import ConfigurationBackend, LedgerConfiguration
 from curate_d.api.connections import ConnectionsBackend, ledger_connections
 from curate_d.api.dry_runs import DryRunsBackend, LedgerDryRuns
+from curate_d.api.executors import ExecutorsBackend, LedgerExecutors
 from curate_d.api.jobs import JobsBackend, LedgerJobs
 from curate_d.api.reclassification import through
 from curate_d.api.review import LedgerReview, ReviewBackend
@@ -36,6 +37,7 @@ class Backends:
     audit: AuditBackend
     dry_runs: DryRunsBackend
     throughput: ThroughputBackend
+    executors: ExecutorsBackend
 
 
 type BackendsFactory = Callable[[Settings, AsyncEngine], AbstractAsyncContextManager[Backends]]
@@ -81,6 +83,11 @@ def throughput(request: Request) -> ThroughputBackend:
     return of(request).throughput
 
 
+def executors(request: Request) -> ExecutorsBackend:
+    """Return the executor operations backend."""
+    return of(request).executors
+
+
 @asynccontextmanager
 async def ledger_backends(
     settings: Settings, engine: AsyncEngine
@@ -97,4 +104,9 @@ async def ledger_backends(
             audit=LedgerAudit(engine),
             dry_runs=LedgerDryRuns(engine, workflows),
             throughput=DbosThroughput(workflows),
+            executors=LedgerExecutors(
+                engine,
+                workflows,
+                recovery_wait_seconds=settings.executor_recovery_wait_seconds,
+            ),
         )

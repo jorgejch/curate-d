@@ -301,6 +301,13 @@ class Settings(BaseSettings):
         "one day's worth of newly aged records, short enough not to hold the maintenance "
         "queue's one slot for long.",
     )
+    executor_recovery_wait_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        le=3600,
+        description="How long the API waits for an operator's recovery to finish before "
+        "answering 202 with the workflow to poll. The recovery runs on, whatever the wait.",
+    )
     conductor_enabled: bool = Field(
         default=False,
         description="Whether workers connect to DBOS Conductor. Separate from the key so the "

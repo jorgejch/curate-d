@@ -10,8 +10,8 @@ traffic come here", and does depend on the database, because an API that cannot 
 ledger has nothing useful to say.
 
 Every other area — connections, configuration, observability, review queue, audit, dry
-runs, throughput — is a router over a backend from `backends.py`, and every backend error
-is answered through `errors.py`.
+runs, throughput, executors — is a router over a backend from `backends.py`, and every
+backend error is answered through `errors.py`.
 """
 
 from collections.abc import AsyncGenerator, Callable
@@ -29,6 +29,7 @@ from curate_d.api import (
     connections,
     dry_runs,
     errors,
+    executors,
     jobs,
     review,
     throughput,
@@ -105,6 +106,7 @@ def create_app(
     app.include_router(audit.router(backends.audit))
     app.include_router(dry_runs.router(backends.dry_runs))
     app.include_router(throughput.router(backends.throughput))
+    app.include_router(executors.router(backends.executors))
 
     @app.get("/health/live", response_model=Liveness)
     async def live() -> Liveness:

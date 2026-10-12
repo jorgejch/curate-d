@@ -30,12 +30,17 @@ class RejectedError(ValueError):
     """The request was understood and refused; nothing changed."""
 
 
+class ConflictError(RuntimeError):
+    """The request conflicts with the current state of what it names; nothing changed."""
+
+
 class UnavailableError(RuntimeError):
     """What the request needs is not configured or reachable in this deployment."""
 
 
 NOT_FOUND: Final = status.HTTP_404_NOT_FOUND
 REJECTED: Final = status.HTTP_422_UNPROCESSABLE_CONTENT
+CONFLICT: Final = status.HTTP_409_CONFLICT
 UNAVAILABLE: Final = status.HTTP_503_SERVICE_UNAVAILABLE
 
 type Responses = dict[int | str, dict[str, object]]
@@ -63,4 +68,5 @@ def install(app: FastAPI) -> None:
     """Answer each backend error with its status code and a `Problem`."""
     app.add_exception_handler(NotFoundError, _answer(NOT_FOUND))
     app.add_exception_handler(RejectedError, _answer(REJECTED))
+    app.add_exception_handler(ConflictError, _answer(CONFLICT))
     app.add_exception_handler(UnavailableError, _answer(UNAVAILABLE))

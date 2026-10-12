@@ -37,6 +37,7 @@ from curate_d.domain import (
 from curate_d.placement.dry_run import DryRunItem, DryRunRequest
 from curate_d.rendering.templates import SEED_TEMPLATES
 from curate_d.runtime.queues import QUEUE_SPECS, SPECS_BY_NAME, QueueName
+from tests.unit.api.fake_executors import FakeExecutors
 
 _SEEDS: dict[ConfigurationKind, BaseModel] = {
     ConfigurationKind.TAXONOMY: SEED_TAXONOMY,
@@ -287,6 +288,7 @@ def backends() -> Backends:
         audit=FakeAudit(),
         dry_runs=FakeDryRuns(),
         throughput=FakeThroughput(),
+        executors=FakeExecutors(),
     )
 
 

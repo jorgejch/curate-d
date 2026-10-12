@@ -12,6 +12,7 @@ from curate_d.workflows import (
     classify,
     connections,
     dry_run,
+    executors,
     grouping,
     ingest,
     placement,
@@ -22,7 +23,7 @@ from curate_d.workflows import (
 )
 
 # Imported for their DBOS registrations; nothing here calls them directly.
-_REGISTERED = (dry_run, ingest, placement)
+_REGISTERED = (dry_run, executors, ingest, placement)
 
 
 def schedules_for(profile: WorkerProfile, settings: Settings) -> list[ScheduleInput]:
