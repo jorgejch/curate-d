@@ -30,6 +30,9 @@ class ReviewReason(StrEnum):
     RENDER_FAILED = "render_failed"
     """The facts lack something the path template requires."""
 
+    RESOURCE_LIMIT = "resource_limit"
+    """Content exceeded a CPU worker limit, so a tier could not read it."""
+
 
 class ReviewStatus(StrEnum):
     """Where an item stands."""

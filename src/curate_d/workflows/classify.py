@@ -6,7 +6,8 @@ checks for an existing classification, which it reuses without running any tier.
 deterministic and local tiers run over a verified snapshot; if they settle the content its
 facts are recorded, and if they escalate, the prepared request goes to `classify_remote`
 on the I/O profile's `classify-llm` queue, where the remote model is called beside the
-credentials only that profile holds.
+credentials only that profile holds. Content a CPU worker limit kept unread, which the
+remote model would see nothing of, goes to review as `resource_limit` instead.
 
 The remote call is governed by a monthly spend cap. A reservation is taken before each
 call; a refused reservation holds the content for the next period instead of
@@ -151,6 +152,7 @@ async def _prepare_step(
             threshold=settings.classification_confidence_threshold,
             local_timezone=settings.local_timezone,
             remote_available=settings.openrouter_model is not None,
+            max_pixels=settings.cpu_decode_max_pixels,
         )
 
     staging = services.require_staging()

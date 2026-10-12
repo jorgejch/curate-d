@@ -6,9 +6,13 @@ from uuid import uuid4
 
 import httpx2
 import pytest
+from openai import AsyncOpenAI
 from pydantic import SecretStr
 
+from curate_d.classification import remote
 from curate_d.classification.remote import (
+    DEFAULT_MAX_OUTPUT_TOKENS,
+    OpenRouterClassifier,
     RemoteOutcome,
     RemoteRequest,
     RemoteResult,
@@ -32,11 +36,19 @@ _MODEL = "anthropic/claude-haiku-4-5"
 class _OpenRouter:
     """Answers chat completions with a fixed message content."""
 
-    def __init__(self, content: object, *, status: int = 200, model: str = _MODEL) -> None:
+    def __init__(
+        self,
+        content: object,
+        *,
+        status: int = 200,
+        model: str = _MODEL,
+        finish_reason: str = "stop",
+    ) -> None:
         """Answer every call with `content` as the message."""
         self.content = content
         self.status = status
         self.model = model
+        self.finish_reason = finish_reason
         self.requests: list[dict[str, object]] = []
 
     def __call__(self, request: httpx2.Request) -> httpx2.Response:
@@ -55,7 +67,7 @@ class _OpenRouter:
                 "choices": [
                     {
                         "index": 0,
-                        "finish_reason": "stop",
+                        "finish_reason": self.finish_reason,
                         "message": {"role": "assistant", "content": message},
                     }
                 ],
@@ -181,3 +193,39 @@ def test_the_schema_lists_every_taxonomy_value() -> None:
     schema = response_schema(SEED_TAXONOMY)
     facts = schema["properties"]["facts"]  # type: ignore[index]
     assert set(facts["properties"]["subcategory"]["enum"]) >= {"Finance", "Camera", None}
+
+
+async def test_the_answer_is_bounded_in_tokens() -> None:
+    """Every call names an output ceiling, the default unless one is given."""
+    openrouter = _OpenRouter(_answer())
+    await _call(openrouter)
+    assert openrouter.requests[0]["max_tokens"] == DEFAULT_MAX_OUTPUT_TOKENS
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(openrouter)) as http:
+        client = build_client(SecretStr("sk-test"), http=http)
+        await classify_remote(client, _MODEL, _request(), SEED_TAXONOMY, _BASE, max_tokens=200)
+    assert openrouter.requests[1]["max_tokens"] == 200
+
+
+async def test_an_answer_cut_off_at_the_token_ceiling_is_malformed() -> None:
+    """Even an answer that parses is unusable once the model was stopped mid-way."""
+    result = await _call(_OpenRouter(_answer(), finish_reason="length"))
+    assert result.outcome is RemoteOutcome.MALFORMED
+    assert result.detail == f"output truncated at max_tokens ({DEFAULT_MAX_OUTPUT_TOKENS})"
+    assert result.cost_usd == Decimal("0.00042")
+
+
+async def test_the_classifier_passes_its_configured_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`remote_max_output_tokens` reaches the request through the classifier."""
+    openrouter = _OpenRouter(_answer())
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(openrouter)) as http:
+
+        def stubbed(api_key: SecretStr) -> AsyncOpenAI:
+            """Build a client over the stub."""
+            return build_client(api_key, http=http)
+
+        monkeypatch.setattr(remote, "build_client", stubbed)
+        classifier = OpenRouterClassifier(SecretStr("sk-test"), max_output_tokens=321)
+        await classifier.classify(_MODEL, _request(), SEED_TAXONOMY, _BASE)
+    assert openrouter.requests[0]["max_tokens"] == 321

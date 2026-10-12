@@ -352,3 +352,42 @@ def test_non_http_conductor_proxy_url_is_rejected(
     monkeypatch.setenv("CURATE_D_CONDUCTOR_PROXY_URL", proxy)
     with pytest.raises(ValidationError, match="conductor_proxy_url"):
         Settings()
+
+
+def test_cpu_worker_limits_have_their_documented_defaults() -> None:
+    """32 MP per decode, no per-file ceiling, 1024 output tokens per remote call."""
+    from curate_d.classification.remote import DEFAULT_MAX_OUTPUT_TOKENS
+    from curate_d.content.decode import DEFAULT_MAX_PIXELS
+
+    settings = Settings()
+    assert settings.cpu_decode_max_pixels == DEFAULT_MAX_PIXELS == 32_000_000
+    assert settings.ingest_max_bytes is None
+    assert settings.remote_max_output_tokens == DEFAULT_MAX_OUTPUT_TOKENS == 1024
+
+
+def test_cpu_worker_limits_are_read_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each limit is a setting, so the owner can tune it without a release."""
+    monkeypatch.setenv("CURATE_D_CPU_DECODE_MAX_PIXELS", "24000000")
+    monkeypatch.setenv("CURATE_D_INGEST_MAX_BYTES", "4294967296")
+    monkeypatch.setenv("CURATE_D_REMOTE_MAX_OUTPUT_TOKENS", "512")
+    settings = Settings()
+    assert settings.cpu_decode_max_pixels == 24_000_000
+    assert settings.ingest_max_bytes == 4 * 1024**3
+    assert settings.remote_max_output_tokens == 512
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("CURATE_D_CPU_DECODE_MAX_PIXELS", "0"),
+        ("CURATE_D_INGEST_MAX_BYTES", "0"),
+        ("CURATE_D_REMOTE_MAX_OUTPUT_TOKENS", "63"),
+    ],
+)
+def test_cpu_worker_limits_that_admit_nothing_are_rejected(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    """A limit of zero, or an output too short for any answer, is a configuration error."""
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValidationError):
+        Settings()

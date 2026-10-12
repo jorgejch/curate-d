@@ -523,7 +523,9 @@ def prepare_services(
             else None
         )
         remote = (
-            OpenRouterClassifier(settings.openrouter_api_key)
+            OpenRouterClassifier(
+                settings.openrouter_api_key, max_output_tokens=settings.remote_max_output_tokens
+            )
             if settings.openrouter_api_key is not None and profile is WorkerProfile.IO
             else None
         )
