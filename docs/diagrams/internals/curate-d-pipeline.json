@@ -627,7 +627,7 @@
       "col": 4,
       "type": "backend",
       "label": "run_recovery_sweep",
-      "sublabel": "library \u00b7 not wired",
+      "sublabel": "scheduled \u00b7 operator",
       "width": 135,
       "sources": [
         {
@@ -884,7 +884,7 @@
       "items": [
         "A worker takes its lease before DBOS.launch() runs startup recovery, and exits 75 if the lease is lost",
         "run_recovery_sweep re-enqueues a dead executor's work while holding its lease, and forks work pinned to a retired version",
-        "The sweep exists as a library function only: no schedule or entry point calls it at this revision",
+        "The recovery-sweep schedule runs it on the maintenance queue, and python -m curate_d.runtime.operator_sweep runs it on demand",
         "prune_history deletes completed workflow records and orphaned datasource checkpoints; audit entries are never pruned"
       ]
     },

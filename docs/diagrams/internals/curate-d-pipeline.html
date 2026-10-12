@@ -5317,15 +5317,15 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <text data-detail="fine" x="896.3" y="831.9" class="t-backend" font-size="7" text-anchor="middle">retention tick</text>
         </g>
 
-        <g id="node-sweep" data-node-id="sweep" data-node-label="run_recovery_sweep" tabindex="0" role="button" aria-label="Focus run_recovery_sweep, library · not wired, Worker runtime" aria-pressed="false" data-node-kind="backend" data-node-sublabel="library · not wired" data-node-context="Worker runtime">
-          <title>run_recovery_sweep · library · not wired · Worker runtime</title>
+        <g id="node-sweep" data-node-id="sweep" data-node-label="run_recovery_sweep" tabindex="0" role="button" aria-label="Focus run_recovery_sweep, scheduled · operator, Worker runtime" aria-pressed="false" data-node-kind="backend" data-node-sublabel="scheduled · operator" data-node-context="Worker runtime">
+          <title>run_recovery_sweep · scheduled · operator · Worker runtime</title>
           <rect x="828.8" y="866" width="135" height="52" rx="6" class="c-mask"/>
           <rect x="828.8" y="866" width="135" height="52" rx="6" class="c-backend" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(834.8 872) scale(0.6875)">
             <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
           </g>
           <text data-node-label="" data-detail-anchor="" x="896.3" y="898" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">run_recovery_sweep</text>
-          <text data-detail="context" x="896.3" y="910.3" class="t-muted" font-size="8" text-anchor="middle">library · not wired</text>
+          <text data-detail="context" x="896.3" y="910.3" class="t-muted" font-size="8" text-anchor="middle">scheduled · operator</text>
         </g>
 
         <!-- Edge labels -->
@@ -5708,7 +5708,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <ul>
           <li>A worker takes its lease before DBOS.launch() runs startup recovery, and exits 75 if the lease is lost</li>
           <li>run_recovery_sweep re-enqueues a dead executor&#39;s work while holding its lease, and forks work pinned to a retired version</li>
-          <li>The sweep exists as a library function only: no schedule or entry point calls it at this revision</li>
+          <li>The recovery-sweep schedule runs it on the maintenance queue, and python -m curate_d.runtime.operator_sweep runs it on demand</li>
           <li>prune_history deletes completed workflow records and orphaned datasource checkpoints; audit entries are never pruned</li>
         </ul>
       </div>
