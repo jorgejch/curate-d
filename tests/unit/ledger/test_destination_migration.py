@@ -1,7 +1,8 @@
-"""Migration 0020's frozen identity derivation and its choice of policy version.
+"""Migration 0020's frozen identity derivation, policy check and choice of policy version.
 
-The migration carries its own copy of the derivation, so that its result never changes
-with the application; these tests hold the copy to the application's at this revision.
+The migration carries its own copy of the derivation and of the destination check, so
+that its result never changes with the application; these tests hold the copies to the
+application's at this revision.
 """
 
 import importlib.util
@@ -11,7 +12,12 @@ from types import ModuleType
 
 import pytest
 
-from curate_d.domain import derive_destination_id, normalize_root
+from curate_d.domain import (
+    DestinationConfig,
+    check_destinations,
+    derive_destination_id,
+    normalize_root,
+)
 
 _MIGRATION = (
     Path(__file__).resolve().parents[3] / "migrations" / "versions" / "0020_destination_identity.py"
@@ -100,3 +106,40 @@ def test_a_start_before_any_version_or_an_unknown_name_is_unresolved(
     versions = [(_T0, {"lib": ("pcloud", "a", "/Library")})]
     assert migration.resolve(versions, "lib", _T0 - timedelta(seconds=1)) is None
     assert migration.resolve(versions, "nowhere", _T0 + timedelta(days=1)) is None
+
+
+@pytest.mark.parametrize(
+    "specs",
+    [
+        (("a", "1", "/Library"), ("b", "2", "/Library")),
+        (("a", "1", "/Library"), ("b", "1", "/Archive")),
+        (("a", "1", "/Library"), ("b", "1", "/Library2")),
+        (("a", "1", "/Library"), ("b", "1", "/Library/")),
+        (("a", "1", "/Library"), ("b", "1", "/Library/Photos")),
+        (("a", "1", "/"), ("b", "1", "/Anything")),
+        (("a", "1", "/Library"), ("b", "2", "/"), ("c", "2", "/Library")),
+    ],
+)
+def test_the_frozen_policy_check_refuses_what_the_domain_refuses(
+    migration: ModuleType, specs: tuple[tuple[str, str, str], ...]
+) -> None:
+    """The upgrade refuses an active policy exactly when the application would not load it."""
+    documents = [
+        {"name": name, "provider": "pcloud", "account": account, "root_path": root}
+        for name, account, root in specs
+    ]
+    try:
+        check_destinations([DestinationConfig.model_validate(d, strict=False) for d in documents])
+    except ValueError:
+        refused = True
+    else:
+        refused = False
+    assert bool(migration.policy_conflicts(documents)) is refused
+
+
+def test_a_root_that_does_not_normalize_is_a_conflict(migration: ModuleType) -> None:
+    """An active policy with a root the application refuses is reported, not skipped."""
+    [conflict] = migration.policy_conflicts(
+        [{"name": "a", "provider": "pcloud", "account": "1", "root_path": "/a//b"}]
+    )
+    assert "'a'" in conflict

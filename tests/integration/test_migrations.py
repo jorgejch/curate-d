@@ -554,3 +554,131 @@ async def test_the_downgrade_refuses_two_placements_under_one_name(empty_databas
     reported = _alembic_fails(empty_database, "downgrade", BEFORE_DESTINATION_IDENTITY)
 
     assert "cannot be restored" in reported
+
+
+def _document(*destinations: tuple[str, str, str]) -> str:
+    """Return a policy document with these (name, account, root) destinations, as JSON."""
+    return json.dumps(
+        {
+            "destinations": [
+                {
+                    "name": name,
+                    "provider": "pcloud",
+                    "account": account,
+                    "root_path": root,
+                    "profile": "pcloud",
+                }
+                for name, account, root in destinations
+            ],
+            "rules": [],
+            "retention": [],
+        }
+    )
+
+
+async def _seed_policies(database_url: str, *documents: str) -> None:
+    """Store these policy documents as versions 1, 2, ..., the last one active."""
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.begin() as connection:
+            for version, document in enumerate(documents, start=1):
+                await connection.execute(
+                    text(
+                        "INSERT INTO configurations (kind, version, document, active, "
+                        "created_at, created_by) VALUES ('policy', :version, "
+                        "CAST(:document AS jsonb), :active, :at, 'test')"
+                    ),
+                    {
+                        "version": version,
+                        "document": document,
+                        "active": version == len(documents),
+                        "at": _T0 + timedelta(days=version - 1),
+                    },
+                )
+    finally:
+        await engine.dispose()
+
+
+async def test_two_names_for_one_place_stop_the_upgrade(empty_database: str) -> None:
+    """Placements a past policy made under two spellings of one root clash on one identity:
+    the upgrade names them instead of failing on a constraint, and nothing changes."""
+    _alembic(empty_database, "upgrade", BEFORE_DESTINATION_IDENTITY)
+    await _seed_policies(
+        empty_database,
+        _document(("a", "acct-a", "/Library"), ("b", "acct-a", "/Library/")),
+        _document(("a", "acct-a", "/Library")),
+    )
+    content_id, first, second = uuid4(), uuid4(), uuid4()
+    engine = create_async_engine(empty_database)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO content_objects (id, fingerprint_algorithm, fingerprint_digest, "
+                    "size_bytes, media_type) VALUES (:id, 'sha256', :digest, 1, 'image/jpeg')"
+                ),
+                {"id": content_id, "digest": "f" * 64},
+            )
+            for placement_id, name in ((first, "a"), (second, "b")):
+                await connection.execute(
+                    text(
+                        "INSERT INTO placements (id, content_object_id, destination_name, "
+                        "locator, template_version, created_at) VALUES (:id, :content, :name, "
+                        "'/Library/x.jpg', 'seed-1', :created)"
+                    ),
+                    {
+                        "id": placement_id,
+                        "content": content_id,
+                        "name": name,
+                        "created": _T0 + timedelta(hours=1),
+                    },
+                )
+    finally:
+        await engine.dispose()
+
+    reported = _alembic_fails(empty_database, "upgrade", DESTINATION_IDENTITY)
+
+    assert "SharedIdentityError" in reported
+    assert str(first) in reported and str(second) in reported
+    _, head = await _views_and_head(empty_database)
+    assert head == BEFORE_DESTINATION_IDENTITY
+
+
+@pytest.mark.parametrize(
+    "destinations",
+    [
+        (("a", "acct-a", "/Library"), ("b", "acct-a", "/Library/")),
+        (("a", "acct-a", "/Library"), ("b", "acct-a", "/Library/Photos")),
+        (("a", "acct-a", "/Library//Photos"),),
+    ],
+    ids=["two-names-one-place", "nested-roots", "unnormalized-root"],
+)
+async def test_an_active_policy_the_application_would_refuse_stops_the_upgrade(
+    empty_database: str, destinations: tuple[tuple[str, str, str], ...]
+) -> None:
+    """The upgrade fails before changing anything rather than leave a policy that no longer
+    loads in force; an earlier version with the same flaw is no obstacle."""
+    _alembic(empty_database, "upgrade", BEFORE_DESTINATION_IDENTITY)
+    await _seed_policies(empty_database, _document(*destinations))
+
+    reported = _alembic_fails(empty_database, "upgrade", DESTINATION_IDENTITY)
+
+    assert "UnloadablePolicyError" in reported
+    assert "active policy version 1" in reported
+    _, head = await _views_and_head(empty_database)
+    assert head == BEFORE_DESTINATION_IDENTITY
+
+
+async def test_a_flawed_policy_no_longer_in_force_is_no_obstacle(empty_database: str) -> None:
+    """Only the active policy must load; an earlier one with nested roots upgrades fine."""
+    _alembic(empty_database, "upgrade", BEFORE_DESTINATION_IDENTITY)
+    await _seed_policies(
+        empty_database,
+        _document(("a", "acct-a", "/Library"), ("b", "acct-a", "/Library/Photos")),
+        _document(("a", "acct-a", "/Library")),
+    )
+
+    _alembic(empty_database, "upgrade", DESTINATION_IDENTITY)
+
+    _, head = await _views_and_head(empty_database)
+    assert head == DESTINATION_IDENTITY

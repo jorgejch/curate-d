@@ -11,8 +11,14 @@ started: the latest policy version activated at or before its latest `placement_
 audit entry, or its creation when there is none. A name missing from that version is
 looked up in the versions before it, for an attempt enqueued just before a change. The
 upgrade fails, naming the placements, when any cannot be resolved; it never guesses a
-location. Placement identifiers are left as they were: audit entries refer to them and are
-never rewritten.
+location. It also fails, naming them, when two placements would land on one identity with
+one content object or one locator: a policy version that gave one place two names, or
+spelled one root two ways. Placement identifiers are left as they were: audit entries
+refer to them and are never rewritten.
+
+The upgrade refuses an active policy the application would no longer load: one whose
+destinations give one place two names, nest one root inside another in one account, or
+have a root that does not normalize. Activate a corrected policy first.
 
 Rekeys destination_checks on destination_id. The table holds only each destination's
 latest check, so its rows are dropped; the next scheduled check refills it. Adds a
@@ -30,6 +36,7 @@ Revises: 0019_command_completed_audit
 Create Date: 2026-10-11
 """
 
+from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from uuid import UUID, uuid5
@@ -68,6 +75,14 @@ class UnresolvedPlacementsError(RuntimeError):
     """Placements whose destination identity no policy version records."""
 
 
+class SharedIdentityError(RuntimeError):
+    """Placements the backfill would put on one identity with one content or locator."""
+
+
+class UnloadablePolicyError(RuntimeError):
+    """An active policy whose destinations the application now refuses."""
+
+
 def normalize_root(root_path: str) -> str:
     """Return a destination root in canonical form, as curate_d.domain.ids did at 0020.
 
@@ -93,8 +108,31 @@ def derive_destination_id(provider: str, account: str, root_path: str) -> UUID:
 type Identity = tuple[str, str, str]
 
 
+def _identity(destination: Mapping[str, object]) -> Identity:
+    """Return a policy destination's identity, its root in canonical form.
+
+    Raises:
+        ValueError: the root does not normalize.
+    """
+    return (
+        str(destination["provider"]),
+        str(destination["account"]),
+        normalize_root(str(destination["root_path"])),
+    )
+
+
+def _listed(document: object) -> list[Mapping[str, object]]:
+    """Return a policy document's destinations."""
+    listed = document.get("destinations", []) if isinstance(document, Mapping) else []
+    return [d for d in listed if isinstance(d, Mapping)]
+
+
 def _policies(bind: sa.Connection) -> list[tuple[datetime, dict[str, Identity]]]:
-    """Return each policy version's activation time and destinations by name, oldest first."""
+    """Return each policy version's activation time and destinations by name, oldest first.
+
+    A destination whose root does not normalize is left out, so a placement under it is
+    reported unresolved rather than given a guessed identity.
+    """
     rows = bind.execute(
         sa.text(
             "SELECT created_at, document FROM configurations WHERE kind = 'policy' ORDER BY version"
@@ -103,15 +141,59 @@ def _policies(bind: sa.Connection) -> list[tuple[datetime, dict[str, Identity]]]
     versions: list[tuple[datetime, dict[str, Identity]]] = []
     for created_at, document in rows:
         destinations: dict[str, Identity] = {}
-        listed = document.get("destinations", []) if isinstance(document, Mapping) else []
-        for destination in listed:
-            destinations[str(destination["name"])] = (
-                str(destination["provider"]),
-                str(destination["account"]),
-                normalize_root(str(destination["root_path"])),
-            )
+        for destination in _listed(document):
+            try:
+                destinations[str(destination["name"])] = _identity(destination)
+            except ValueError:
+                continue
         versions.append((created_at, destinations))
     return versions
+
+
+def contains(outer: Identity, inner: Identity) -> bool:
+    """Return whether `inner` is `outer` or lies inside it, as the application decided at 0020."""
+    if outer[:2] != inner[:2]:
+        return False
+    return outer[2] == "/" or inner[2] == outer[2] or inner[2].startswith(outer[2] + "/")
+
+
+def policy_conflicts(destinations: Sequence[Mapping[str, object]]) -> list[str]:
+    """Return why the application would refuse these destinations, as it decided at 0020.
+
+    Empty when it would load them: every root normalizes, and no two names share a place
+    or nest one root inside another in one account.
+    """
+    conflicts: list[str] = []
+    identities: list[tuple[str, Identity]] = []
+    for destination in destinations:
+        try:
+            identities.append((str(destination["name"]), _identity(destination)))
+        except ValueError as error:
+            conflicts.append(f"{destination.get('name')!r}: {error}")
+    for index, (first, at_first) in enumerate(identities):
+        for second, at_second in identities[index + 1 :]:
+            if contains(at_first, at_second) or contains(at_second, at_first):
+                conflicts.append(f"{first!r} and {second!r} share files ({at_first}, {at_second})")
+    return conflicts
+
+
+def _refuse_unloadable_active_policy(bind: sa.Connection) -> None:
+    """Fail when the active policy is one the application would no longer load.
+
+    Raises:
+        UnloadablePolicyError: its destinations share a place or a root does not normalize.
+    """
+    row = bind.execute(
+        sa.text("SELECT version, document FROM configurations WHERE kind = 'policy' AND active")
+    ).one_or_none()
+    if row is None:
+        return
+    conflicts = policy_conflicts(_listed(row[1]))
+    if conflicts:
+        raise UnloadablePolicyError(
+            f"active policy version {row[0]} would no longer load: {'; '.join(conflicts)}; "
+            "activate a corrected policy before upgrading; nothing was changed"
+        )
 
 
 def resolve(
@@ -132,11 +214,13 @@ def _backfill(bind: sa.Connection) -> None:
     Raises:
         UnresolvedPlacementsError: a placement's name is in no policy version in force by
             the time it was started.
+        SharedIdentityError: two placements would share an identity and a content object
+            or a locator.
     """
     versions = _policies(bind)
     placements = bind.execute(
         sa.text(
-            "SELECT p.id, p.destination_name, COALESCE("
+            "SELECT p.id, p.content_object_id, p.locator, p.destination_name, COALESCE("
             "  (SELECT max(a.occurred_at) FROM audit_entries a"
             "   WHERE a.placement_id = p.id AND a.entry_type = 'placement_started'),"
             "  p.created_at) AS started "
@@ -146,7 +230,8 @@ def _backfill(bind: sa.Connection) -> None:
     identities: dict[UUID, Identity] = {}
     assignments: list[dict[str, object]] = []
     unresolved: list[str] = []
-    for placement_id, name, started in placements:
+    claimed: dict[tuple[UUID, str], list[str]] = defaultdict(list)
+    for placement_id, content_object_id, locator, name, started in placements:
         identity = resolve(versions, name, started)
         if identity is None:
             unresolved.append(f"{placement_id} ({name})")
@@ -154,11 +239,25 @@ def _backfill(bind: sa.Connection) -> None:
         destination_id = derive_destination_id(*identity)
         identities[destination_id] = identity
         assignments.append({"placement_id": placement_id, "destination_id": destination_id})
+        label = f"{placement_id} ({name})"
+        claimed[(destination_id, f"content {content_object_id}")].append(label)
+        claimed[(destination_id, f"locator {locator}")].append(label)
     if unresolved:
         raise UnresolvedPlacementsError(
             f"{len(unresolved)} placements name a destination no policy version in force "
             f"when they were started defines, e.g. {', '.join(unresolved[:_REPORTED])}; "
             "nothing was changed"
+        )
+    shared = [
+        f"{what} at {identities[destination_id]}: {', '.join(labels)}"
+        for (destination_id, what), labels in claimed.items()
+        if len(labels) > 1
+    ]
+    if shared:
+        raise SharedIdentityError(
+            f"{len(shared)} clashes: placements under different names resolve to one place "
+            f"with one content object or locator, e.g. {'; '.join(shared[:_REPORTED])}; "
+            "remove the duplicates first; nothing was changed"
         )
     if identities:
         bind.execute(
@@ -182,6 +281,7 @@ def _backfill(bind: sa.Connection) -> None:
 
 def upgrade() -> None:
     """Create destinations; key placements, destination_checks and dry_run_items on it."""
+    _refuse_unloadable_active_policy(op.get_bind())
     op.create_table(
         "destinations",
         sa.Column(
