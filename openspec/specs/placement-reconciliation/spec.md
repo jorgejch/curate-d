@@ -28,6 +28,15 @@ The system SHALL periodically evaluate, for every content object, the difference
 - **THEN** duplicate work is not performed
 - **AND** the ledger records a single set of placements
 
+#### Scenario: Destination name pointed at another account
+- **WHEN** the policy keeps a destination's name but points it at another account or root path
+- **THEN** the next evaluation creates work to place content at the new account or root path, at the locators it renders there
+- **AND** placements made at the previous account or root path are left intact and do not satisfy the new destination
+
+#### Scenario: Destination renamed
+- **WHEN** the policy renames a destination without changing its provider, account or root path
+- **THEN** its existing placements satisfy it and no work is created
+
 ### Requirement: Destination loss repair
 
 The system SHALL detect when a previously registered placement is no longer present at its destination and SHALL re-establish it.
@@ -36,6 +45,11 @@ The system SHALL detect when a previously registered placement is no longer pres
 - **WHEN** a registered placement is found absent at its destination
 - **THEN** the placement is marked absent
 - **AND** work is created to re-establish it
+
+#### Scenario: Placements at a destination's previous account
+- **WHEN** a destination is checked after its name was pointed at another account or root path
+- **THEN** only placements made at the account and root path it now has are looked for there
+- **AND** placements made at the previous account or root path are neither marked absent nor copied again because of that check
 
 #### Scenario: Destination unreachable
 - **WHEN** a destination cannot be reached during evaluation
