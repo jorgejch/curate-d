@@ -86,17 +86,20 @@ how it is made idempotent, whether it belongs in a workflow — against the `dbo
   auditing nothing. Conductor sends a write to every connected executor under fresh request
   IDs and cannot route one to our stable executor IDs after a rollout; see the
   `add-optional-dbos-conductor` design. Don't reopen a write path through Conductor.
-- Schedule reconciliation runs in one system-database transaction that holds the
-  schedule authority (`pg_advisory_xact_lock`), so losing the backend loses the lock and
-  every pending write together. DBOS has no public way to write schedules on a caller's
-  connection, so `runtime/schedule_authority.py` uses `_sys_db.engine`, `upsert_schedule`,
-  `list_schedules`, `delete_schedule` (with `conn`), `SystemSchema.application_versions`,
-  `SystemDatabase._name_filter`, and a copy of `DBOS.apply_schedules`'s row builder
-  (`stored_form`, which also needs `_sys_db.get_queue`, `_sys_db.serializer`, `_registry`,
-  `dbos._registrations`, `dbos._croniter`, `dbos._error` and `dbos._utils`).
-  `tests/unit/runtime/test_schedule_authority.py` pins them; re-check them on every DBOS
-  upgrade. Don't move those writes back onto `DBOS.apply_schedules` or
-  `DBOS.delete_schedule`: they commit on their own connections, outside the lock.
+- Workers never write schedules, departing from the skill's "`apply_schedules` on every
+  restart": schedule rows are shared by every worker and version, so one deployment-time
+  command owns them. `python -m curate_d.schedules reconcile`, run by the deploy job after
+  the workers roll out, applies the declarations with `DBOSClient.apply_schedules` and
+  retires this application's undeclared rows with `DBOSClient.delete_schedule`, all public
+  API. The client checks neither workflow registration nor queues, so the scheduled
+  workflows carry explicit `name=` constants pinned by tests, and the command waits for
+  the queues itself.
+- Stale deployments are fenced (`runtime/schedule_fence.py`): the command builds its
+  `DBOSClient` on its own engine (public `system_database_engine`), and a SQLAlchemy
+  `begin` listener on that engine takes `pg_advisory_xact_lock` and reads
+  `dbos.application_versions` in each write transaction, refusing it unless the command's
+  version is DBOS's latest. The read is schema coupling, as in the migrations below;
+  `tests/integration/test_schedule_deploy.py` pins it. Re-check it on every DBOS upgrade.
 - Migrations that read `dbos.*` tables (0005, 0007, 0008, 0009) need the DBOS system
   schema, so `migrations/env.py` brings it up to date before Alembic's own migrations run.
 - `rewind_workflow` re-executes steps from `start_step` after deleting their checkpoints, and
@@ -107,6 +110,7 @@ how it is made idempotent, whether it belongs in a workflow — against the `dbo
 - Nothing in curate.d rewinds a workflow, and the Conductor gate refuses `REWIND_WORKFLOW`,
   so the two points above concern a rewind run by hand; record who ran it, from which step
   and why in the audit trail.
-- New periodic work uses persisted schedules: declare them in `schedules_for`
-  (`workflows/registry.py`); `worker/main.py`'s `apply_schedules` writes them after launch
-  through the schedule authority. `@DBOS.scheduled` no longer exists.
+- New periodic work uses persisted schedules: declare them in `declared_schedules`
+  (`workflows/registry.py`) with the workflow's registered name;
+  `python -m curate_d.schedules reconcile`, run by the deploy job after the workers roll
+  out, writes them. `@DBOS.scheduled` no longer exists.

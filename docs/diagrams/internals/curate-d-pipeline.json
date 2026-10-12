@@ -56,7 +56,7 @@
           "prune",
           "sweep"
         ],
-        "note": "Lease before launch; schedules written under one advisory lock; prune and sweep act on the dbos schema."
+        "note": "Lease before launch; schedules written by the deploy command behind a version fence; prune and sweep act on the dbos schema."
       }
     ],
     "legend": {
@@ -549,27 +549,27 @@
       "lane": "rt",
       "col": 2,
       "type": "security",
-      "label": "apply_schedules",
-      "sublabel": "xact lock \u00b7 I/O only",
+      "label": "schedules reconcile",
+      "sublabel": "deploy job \u00b7 version fence",
       "width": 130,
       "sources": [
         {
-          "path": "src/curate_d/worker/main.py",
-          "line": 597,
-          "end_line": 645,
-          "label": "apply_schedules"
+          "path": "src/curate_d/schedules/deployment.py",
+          "line": 1,
+          "end_line": 22,
+          "label": "deploy-time reconcile"
         },
         {
-          "path": "src/curate_d/runtime/schedule_authority.py",
+          "path": "src/curate_d/runtime/schedule_fence.py",
           "line": 1,
-          "end_line": 12,
-          "label": "pg_advisory_xact_lock authority"
+          "end_line": 28,
+          "label": "pg_advisory_xact_lock + latest-version fence"
         },
         {
           "path": "src/curate_d/workflows/registry.py",
-          "line": 28,
-          "end_line": 47,
-          "label": "schedules_for"
+          "line": 30,
+          "end_line": 48,
+          "label": "declared_schedules"
         }
       ]
     },
@@ -797,7 +797,7 @@
       "id": "startup-sched",
       "from": "startup",
       "to": "sched",
-      "label": "after launch"
+      "label": "after rollout"
     },
     {
       "id": "sched-write",
@@ -874,7 +874,7 @@
       "title": "Persisted schedules (maintenance queue)",
       "items": [
         "connections-refresh, scan-all, full-rescan-all, classification-holds, group-events, reconcile, check-destinations, prune-workflow-history",
-        "Only the I/O profile applies them, and only a worker on the latest application version; undeclared schedules are deleted",
+        "Written only by the deploy job's `python -m curate_d.schedules reconcile`, as DBOS's latest version; this application's undeclared schedules are deleted",
         "check-destinations lists each destination, marks lost copies ABSENT and reconciles that content"
       ]
     },

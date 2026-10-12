@@ -79,17 +79,65 @@ A dev image is built with its own tag as `CURATE_D_BUILD_REVISION`, so it runs a
 DBOS application version `<packaged version>+dev.<timestamp>.<sha>`; a release image has
 none and runs as the bare packaged version the tag guard checked. Every build is
 therefore a distinct version, and DBOS's latest version is the newest build. That is
-what decides which workers may apply and delete persisted schedules: an older build
-restarting mid-rollout is never the latest, so it cannot remove a schedule a newer one
-added. The cost is DBOS's version pinning applied per dev build: work a previous dev
-build left queued or in flight is not taken up by the new one until the recovery sweep
-moves it, as after a release.
+what decides which deployment may write persisted schedules (see
+[Persisted schedules](#persisted-schedules)): an older build's command, run late or
+retried, is never the latest, so it cannot remove a schedule a newer one added. The cost
+is DBOS's version pinning applied per dev build: work a previous dev build left queued or
+in flight is not taken up by the new one until the recovery sweep moves it, as after a
+release.
 
 Rolling application code back cannot lose files: the ledger is additive and placements
 never modify source content, so the worst outcome is placements the older version does
 not act on, which reconciliation resolves once rolled forward. Schema changes must stay
 backward-compatible within a release series so a pod on the old version can still read
 the new schema mid-rollout.
+
+## Persisted schedules
+
+Workers never write DBOS schedules: restarting or scaling them leaves every schedule row
+as it was. The deploy job does, once per rollout, with the same image and environment as
+the workers:
+
+```bash
+python -m curate_d.schedules reconcile   # after the workers of this version are up
+python -m curate_d.schedules show        # what reconcile would change; writes nothing
+python -m curate_d.schedules promote     # rollback: make this version latest, then reconcile
+```
+
+`reconcile` waits (`--wait-seconds`, 300 by default) until its version is DBOS's latest
+and the queues its schedules name are registered, both of which the workers do at
+launch. It then applies every schedule the build declares in one transaction, keeping
+each row's id, pause status and last firing, and deletes, one transaction each, the
+schedules this application owns that the build no longer declares. Rows with no owner
+are logged and left; other applications' rows are never touched. Each write runs behind
+a fence that commits it only while the command's version is still the latest, under the
+lock older workers took to reconcile, so a command from a superseded deployment writes
+nothing more once a newer version's workers have registered.
+
+**Rollout order.** Roll the workers out, then run `reconcile`. Running it first only
+makes it wait. Until it runs, the schedules stay as the previous deployment left them:
+nothing is deleted, and new or changed schedules are not live yet.
+
+**Rollback.** Roll the workers back, then run `promote` from the restored image. DBOS
+keeps a relaunched version's original registration time, so the restored version is not
+the latest again until promoted, and DBOS keeps firing schedules on the newer one.
+
+**Partial failure and retries.** The apply is atomic; each deletion is separate. A
+command that fails part-way leaves the new definitions applied and some retired rows in
+place. Running it again converges, and so does a second command racing the first: every
+step is idempotent. The job may retry freely.
+
+| Exit status | Meaning | Action |
+| --- | --- | --- |
+| 0 | Reconciled | |
+| 1 | Unexpected failure, a lost connection included | Retry |
+| 2 | Another writer held the schedule lock past `--lock-timeout-seconds` (120) | The log names its backend; retry once it ends |
+| 3 | The version was not registered within the wait | Check that this version's workers started |
+| 4 | Another version is the latest | A newer deployment owns the schedules: nothing to do (`--allow-superseded` exits 0 instead); after a rollback, run `promote` |
+| 5 | A schedule's queue was not registered within the wait | Check the workers' startup logs |
+
+The local stack runs `reconcile` as the one-shot `schedules` service on every
+`make stack-up`; `make schedules` runs it again.
 
 ## Content staging on RustFS
 

@@ -64,7 +64,7 @@
       "type": "backend",
       "label": "I/O worker",
       "sublabel": "scan · stage · transfer · verify",
-      "tag": "applies schedules",
+      "tag": "runs schedules",
       "pos": [600, 260],
       "size": [200, 64],
       "sources": [
@@ -110,7 +110,7 @@
       "sources": [
         { "path": "src/curate_d/runtime/dbos_app.py", "line": 1, "end_line": 8, "label": "system tables in ledger" },
         { "path": "src/curate_d/runtime/lease.py", "line": 1, "end_line": 33, "label": "executor lease · pooler" },
-        { "path": "src/curate_d/runtime/schedule_authority.py", "line": 1, "end_line": 12, "label": "schedule authority" }
+        { "path": "src/curate_d/runtime/schedule_fence.py", "line": 1, "end_line": 28, "label": "schedule fence" }
       ]
     },
     {

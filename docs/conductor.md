@@ -14,7 +14,7 @@ it. The requirements are in the
 
 DBOS is never given `conductor_key`: DBOS 3.2 would then replace the stable executor ID with a
 random UUID and skip startup recovery. Instead, after a worker holds its executor lease, has
-launched DBOS and has applied its schedules, `runtime/conductor.py` opens the connection
+launched DBOS and has registered its queues, `runtime/conductor.py` opens the connection
 itself under its environment's application name (`curate-d-<environment>`, from
 `CURATE_D_ENVIRONMENT`), through a gate that classifies every command
 (see [Commands](#commands)). `DBOS.destroy()` closes it on shutdown.
