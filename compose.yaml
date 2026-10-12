@@ -168,6 +168,25 @@ services:
       rustfs-init:
         condition: service_completed_successfully
 
+  # The deploy job's schedule step: workers never write schedules, so this applies the
+  # build's declarations and retires dropped ones (python -m curate_d.schedules). It waits
+  # for this version's workers to register the version and queues, then exits; `up --wait`
+  # waits for it, and `make schedules` runs it again.
+  schedules:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: curate-d:dev
+    command: ["python", "-m", "curate_d.schedules", "reconcile"]
+    environment:
+      <<: *app-environment
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      worker-io:
+        condition: service_started
+
   # rclone's remote-control API, sidecar to worker-io only: the CPU profile decodes
   # untrusted file content and must never be able to reach a process holding provider
   # credentials. Deliberately absent from the application image (docker/Dockerfile).

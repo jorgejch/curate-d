@@ -3,7 +3,7 @@
 # pass with the same flags.
 
 .PHONY: help install lint format typecheck test coverage test-integration check staging-init \
-	lifecycle-check stack-up stack-down stack-reset migrate image
+	lifecycle-check stack-up stack-down stack-reset migrate schedules image
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -66,6 +66,10 @@ lifecycle-check: ## Observe RustFS lifecycle expiry and abort (rows 30/31) in se
 
 migrate: ## Apply migrations to the configured database
 	uv run alembic upgrade head
+
+# The deploy job's schedule step, against the running stack: a no-op when nothing changed.
+schedules: ## Reconcile persisted DBOS schedules with this build's declarations
+	docker compose run --rm schedules
 
 image: ## Build the container image
 	docker build -f docker/Dockerfile -t curate-d:dev .
