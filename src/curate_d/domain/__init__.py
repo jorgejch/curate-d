@@ -47,6 +47,7 @@ from curate_d.domain.placement import (
     DryRunOutcome,
     Placement,
     PlacementState,
+    PolicySource,
     VerificationLevel,
 )
 from curate_d.domain.policy import (
@@ -109,6 +110,7 @@ __all__ = [
     "PlacementPolicy",
     "PlacementRule",
     "PlacementState",
+    "PolicySource",
     "Provider",
     "ProviderConnection",
     "RejectedValue",

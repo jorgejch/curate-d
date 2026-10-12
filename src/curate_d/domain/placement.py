@@ -125,3 +125,14 @@ class DryRunOutcome(StrEnum):
     ALREADY_PRESENT = "already_present"
     RENDER_FAILED = "render_failed"
     UNCLASSIFIED = "unclassified"
+
+
+class PolicySource(StrEnum):
+    """Where a dry run's placement rules came from."""
+
+    ACTIVE = "active"
+    """The policy in force when the run started."""
+    DRAFT = "draft"
+    """A draft policy submitted with the run and stored nowhere else."""
+    DESTINATIONS = "destinations"
+    """No rules: every object was evaluated against the destinations the run named."""
