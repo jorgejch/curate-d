@@ -15,12 +15,14 @@ from dbos import DBOS
 from dbos._dbos import _get_dbos_instance
 
 from curate_d.config import Settings
-from curate_d.runtime.dbos_app import configure
+from curate_d.runtime import dbos_app
+from curate_d.runtime.dbos_app import APPLICATION_NAME, configure
 from curate_d.runtime.identity import EXECUTOR_ID_ENV, POD_NAME_ENV, ExecutorIdentityError
 from curate_d.runtime.lease import (
     ExecutorLease,
     ExecutorLeaseLostError,
     ExecutorLeaseUnavailableError,
+    version_lease_key,
 )
 from curate_d.runtime.profiles import WorkerProfile
 from curate_d.worker import main as worker_main
@@ -71,9 +73,11 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, object]]:
     monkeypatch.setattr(worker_main, "resolve_executor_id", lambda: "worker-io-0")
     server = FakeLockServer()
 
-    def lease_for(settings: Settings, executor_id: str) -> ExecutorLease:
+    def lease_for(
+        settings: Settings, executor_id: str, *, version: str | None = None
+    ) -> ExecutorLease:
         recorded.append(("lease", executor_id))
-        return server.lease(executor_id)
+        return server.lease(executor_id, version=version)
 
     monkeypatch.setattr(ExecutorLease, "for_settings", lease_for)
     return recorded
@@ -169,6 +173,14 @@ def test_the_lease_is_held_before_launch_runs_startup_recovery(
     names = [name for name, _ in calls]
     assert names.index("lease") < names.index("configure") < names.index("launch")
     assert ("lease", "worker-io-0") in calls
+
+
+def test_the_worker_lease_holds_its_application_version() -> None:
+    """Recovery reads a version as running from the workers' shared version lease."""
+    lease = worker_main.worker_lease(Settings(), "worker-io-0")
+    assert lease.version == dbos_app.APPLICATION_VERSION
+    assert lease.version_key == version_lease_key(APPLICATION_NAME, dbos_app.APPLICATION_VERSION)
+    assert not lease.held, "building the lease must not connect"
 
 
 def test_a_worker_without_an_identity_refuses_to_start(

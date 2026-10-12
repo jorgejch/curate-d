@@ -14,6 +14,15 @@ recovery), holds it on a dedicated connection outside any SQLAlchemy pool for th
 of the process, and exits if it is lost. The recovery sweep uses the same lock as its
 liveness test: an executor is dead only if the sweep can take its lease.
 
+A worker also holds a shared lock on its application version's key on the same session
+(``version_lease_key``): the version lease. Recovery takes that key exclusively
+(`VersionLease`) before it forks a version's work onto the current one, so it can tell
+whether any worker still runs that version, and no worker of that version can start while
+the forks are made. Builds that predate the version lease hold none, so the first
+deployment carrying it cannot see its predecessor's workers through it; the sweep also
+counts a version as running while a live executor without a version lease still owns
+PENDING work on it (sweep.py).
+
 The single-``bigint`` form occupies a different lock space (``objsubid = 1``) from the
 two-``int4`` locks staging uses (``objsubid = 2``), so the two can never collide.
 
@@ -52,8 +61,14 @@ from curate_d.runtime.dbos_app import APPLICATION_NAME, system_database_url
 logger = get_logger(__name__)
 
 # Versioned so a change of derivation can never alias an old key held by a process
-# still running the previous build.
+# still running the previous build. One domain per kind of key, so an executor named
+# like a version can never share a key with it.
 _KEY_DOMAIN: Final = b"curate-d/executor-lease/v1"
+_VERSION_KEY_DOMAIN: Final = b"curate-d/version-lease/v1"
+
+# pg_locks' mode for each kind of session-level advisory lock.
+EXCLUSIVE_MODE: Final = "ExclusiveLock"
+SHARED_MODE: Final = "ShareLock"
 
 # libpq settings on the lease connection. Idle probes start after 10s and give up after
 # three unanswered 5s intervals; tcp_user_timeout bounds a probe whose bytes the server
@@ -77,6 +92,10 @@ MAX_BACKOFF_SECONDS: Final = 15.0
 # PostgreSQL truncates application_name here; truncating first keeps the identity visible.
 _APPLICATION_NAME_LIMIT: Final = 63
 
+# What a worker's lease session is called in pg_stat_activity, before its identity; the
+# executor read model finds held leases by it.
+EXECUTOR_LEASE_PURPOSE: Final = "executor lease"
+
 
 class ExecutorLeaseUnavailableError(RuntimeError):
     """The lease could not be taken before the deadline or before shutdown was requested."""
@@ -86,14 +105,39 @@ class ExecutorLeaseLostError(RuntimeError):
     """A held lease was lost; the process may no longer act as its executor identity."""
 
 
+def _derive_key(domain: bytes, application_name: str, name: str) -> int:
+    """Return the signed 64-bit advisory-lock key for `name` within `domain`."""
+    material = b"\0".join((domain, application_name.encode(), name.encode()))
+    return int.from_bytes(sha256(material).digest()[:8], "big", signed=True)
+
+
 def lease_key(application_name: str, executor_id: str) -> int:
     """Return the signed 64-bit advisory-lock key for one executor identity.
 
     Stable across processes and releases of the same derivation, and distinct per
     (application name, executor identity) pair up to a 64-bit hash collision.
     """
-    material = b"\0".join((_KEY_DOMAIN, application_name.encode(), executor_id.encode()))
-    return int.from_bytes(sha256(material).digest()[:8], "big", signed=True)
+    return _derive_key(_KEY_DOMAIN, application_name, executor_id)
+
+
+def version_lease_key(application_name: str, version: str) -> int:
+    """Return the signed 64-bit advisory-lock key for one application version.
+
+    Derived as `lease_key` is, under a domain of its own, so the two key spaces never alias.
+    """
+    return _derive_key(_VERSION_KEY_DOMAIN, application_name, version)
+
+
+def split_key(key: int) -> tuple[int, int]:
+    """Return the unsigned (classid, objid) halves pg_locks reports for a bigint key."""
+    unsigned = key & 0xFFFF_FFFF_FFFF_FFFF
+    return unsigned >> 32, unsigned & 0xFFFF_FFFF
+
+
+def join_key(classid: int, objid: int) -> int:
+    """Return the signed bigint key that pg_locks reports as (classid, objid)."""
+    unsigned = (classid << 32) | objid
+    return unsigned - (1 << 64) if unsigned >= 1 << 63 else unsigned
 
 
 class LeaseSession(Protocol):
@@ -103,16 +147,28 @@ class LeaseSession(Protocol):
         """Take the session lock on `key` without waiting; return whether it was taken."""
         ...
 
-    def holds(self, key: int) -> bool:
-        """Return whether this session still holds the lock on `key`."""
+    def try_lock_shared(self, key: int) -> bool:
+        """Take a shared session lock on `key` without waiting; return whether it was taken."""
+        ...
+
+    def holds(self, key: int, *, shared: bool = False) -> bool:
+        """Return whether this session still holds the lock on `key`, in the mode given."""
         ...
 
     def unlock(self, key: int) -> None:
         """Release this session's lock on `key`."""
         ...
 
+    def unlock_shared(self, key: int) -> None:
+        """Release this session's shared lock on `key`."""
+        ...
+
     def holder(self, key: int) -> str | None:
         """Describe the session currently holding `key`, if it is visible."""
+        ...
+
+    def holder_shares(self, key: int) -> bool:
+        """Return whether the session holding `key` also holds a shared lock: a version lease."""
         ...
 
     def close(self) -> None:
@@ -123,7 +179,9 @@ class LeaseSession(Protocol):
 type SessionFactory = Callable[[], LeaseSession]
 
 _TRY_LOCK: Final = "SELECT pg_try_advisory_lock(%(key)s)"
+_TRY_LOCK_SHARED: Final = "SELECT pg_try_advisory_lock_shared(%(key)s)"
 _UNLOCK: Final = "SELECT pg_advisory_unlock(%(key)s)"
+_UNLOCK_SHARED: Final = "SELECT pg_advisory_unlock_shared(%(key)s)"
 # pg_locks reports a bigint advisory key as classid = high 32 bits, objid = low 32 bits.
 _HOLDS: Final = """
     SELECT EXISTS (
@@ -131,7 +189,7 @@ _HOLDS: Final = """
         WHERE locktype = 'advisory' AND granted AND objsubid = 1
           AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
           AND classid = %(high)s::bigint::oid AND objid = %(low)s::bigint::oid
-          AND pid = pg_backend_pid()
+          AND mode = %(mode)s AND pid = pg_backend_pid()
     )
 """
 _HOLDER: Final = """
@@ -141,12 +199,24 @@ _HOLDER: Final = """
       AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
       AND l.classid = %(high)s::bigint::oid AND l.objid = %(low)s::bigint::oid
 """
+# Shared bigint advisory locks are version leases: nothing else in curate.d takes one.
+_HOLDER_SHARES: Final = """
+    SELECT EXISTS (
+        SELECT 1 FROM pg_locks AS held JOIN pg_locks AS shared ON shared.pid = held.pid
+        WHERE held.locktype = 'advisory' AND held.granted AND held.objsubid = 1
+          AND held.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+          AND held.classid = %(high)s::bigint::oid AND held.objid = %(low)s::bigint::oid
+          AND held.mode = 'ExclusiveLock'
+          AND shared.locktype = 'advisory' AND shared.granted AND shared.objsubid = 1
+          AND shared.database = held.database AND shared.mode = 'ShareLock'
+    )
+"""
 
 
-def _key_halves(key: int) -> dict[str, int]:
+def _key_halves(key: int) -> dict[str, object]:
     """Split a signed 64-bit key into the unsigned halves pg_locks reports."""
-    unsigned = key & 0xFFFF_FFFF_FFFF_FFFF
-    return {"high": unsigned >> 32, "low": unsigned & 0xFFFF_FFFF}
+    high, low = split_key(key)
+    return {"high": high, "low": low}
 
 
 class PostgresLeaseSession:
@@ -155,7 +225,7 @@ class PostgresLeaseSession:
     def __init__(self, connection: psycopg.Connection[TupleRow]) -> None:
         self._connection = connection
 
-    def _scalar(self, query: LiteralString, params: dict[str, int]) -> object:
+    def _scalar(self, query: LiteralString, params: dict[str, object]) -> object:
         """Run `query` and return the first column of its single row."""
         row = self._connection.execute(query, params).fetchone()
         return None if row is None else row[0]
@@ -164,13 +234,22 @@ class PostgresLeaseSession:
         """Take the session lock on `key` without waiting; return whether it was taken."""
         return self._scalar(_TRY_LOCK, {"key": key}) is True
 
-    def holds(self, key: int) -> bool:
+    def try_lock_shared(self, key: int) -> bool:
+        """Take a shared session lock on `key` without waiting; return whether it was taken."""
+        return self._scalar(_TRY_LOCK_SHARED, {"key": key}) is True
+
+    def holds(self, key: int, *, shared: bool = False) -> bool:
         """Return whether this session still holds the lock on `key`, per pg_locks."""
-        return self._scalar(_HOLDS, _key_halves(key)) is True
+        mode = SHARED_MODE if shared else EXCLUSIVE_MODE
+        return self._scalar(_HOLDS, {**_key_halves(key), "mode": mode}) is True
 
     def unlock(self, key: int) -> None:
         """Release this session's lock on `key`."""
         self._scalar(_UNLOCK, {"key": key})
+
+    def unlock_shared(self, key: int) -> None:
+        """Release this session's shared lock on `key`."""
+        self._scalar(_UNLOCK_SHARED, {"key": key})
 
     def holder(self, key: int) -> str | None:
         """Describe the session holding `key` as pid, application, address and start."""
@@ -179,6 +258,10 @@ class PostgresLeaseSession:
             return None
         pid, application, address, started = row
         return f"pid {pid} ({application or 'unknown'} from {address or 'local'}, since {started})"
+
+    def holder_shares(self, key: int) -> bool:
+        """Return whether the session holding `key` also holds a shared lock: a version lease."""
+        return self._scalar(_HOLDER_SHARES, _key_halves(key)) is True
 
     def close(self) -> None:
         """Close the connection, which ends the session and releases its locks."""
@@ -221,7 +304,7 @@ def _close_quietly(session: LeaseSession) -> None:
 
 
 class ExecutorLease:
-    """The session-level advisory lock on one executor identity.
+    """The session-level advisory lock on one executor identity, and its version lease.
 
     Thread-safe: the monitor thread and the owner share the session under one lock.
     """
@@ -233,6 +316,7 @@ class ExecutorLease:
         connect: SessionFactory,
         application_name: str = APPLICATION_NAME,
         probe_interval: float = PROBE_INTERVAL_SECONDS,
+        version: str | None = None,
     ) -> None:
         """Bind a lease to an identity without connecting.
 
@@ -241,20 +325,31 @@ class ExecutorLease:
             connect: Opens a new dedicated session; called again after a broken one.
             application_name: The DBOS application name, part of the lock key.
             probe_interval: Seconds between checks of a monitored lease.
+            version: The application version this process runs. When set, the lease
+                also holds that version's lease shared, on the same session; a worker
+                sets it, a recovery's momentary claim on a dead executor does not.
         """
         self.executor_id = executor_id
+        self.version = version
         self._probe_interval = probe_interval
         self.key = lease_key(application_name, executor_id)
+        self.version_key = None if version is None else version_lease_key(application_name, version)
         self._connect = connect
         self._session: LeaseSession | None = None
         self._held = False
+        self._version_refused = False
         self._guard = threading.Lock()
         self._monitor: threading.Thread | None = None
         self._stop_monitoring = threading.Event()
 
     @classmethod
     def for_settings(
-        cls, settings: Settings, executor_id: str, *, purpose: str = "executor lease"
+        cls,
+        settings: Settings,
+        executor_id: str,
+        *,
+        purpose: str = EXECUTOR_LEASE_PURPOSE,
+        version: str | None = None,
     ) -> Self:
         """Return a lease on the configured DBOS system database.
 
@@ -263,10 +358,16 @@ class ExecutorLease:
             executor_id: The identity to lease.
             purpose: Shown in pg_stat_activity, so an operator can tell a worker's lease
                 from a sweep's momentary claim.
+            version: The application version the process runs, leased shared with the
+                identity; None takes no version lease.
         """
         conninfo = lease_conninfo(settings)
         name = f"{APPLICATION_NAME} {purpose} {executor_id}"
-        return cls(executor_id, connect=lambda: connect_session(conninfo, application_name=name))
+        return cls(
+            executor_id,
+            connect=lambda: connect_session(conninfo, application_name=name),
+            version=version,
+        )
 
     @property
     def held(self) -> bool:
@@ -275,6 +376,10 @@ class ExecutorLease:
 
     def try_acquire(self) -> bool:
         """Make one attempt to take the lease, connecting first if needed.
+
+        The identity's lock is taken first, then the version lease shared on the same
+        session. A version lease refused (a recovery is forking that version's work)
+        gives the identity back, so the whole attempt is refused.
 
         A refused attempt keeps the session open so the holder can be described and the
         next attempt need not reconnect; `release` closes it.
@@ -288,12 +393,20 @@ class ExecutorLease:
                 return True
             if self._session is None:
                 self._session = self._connect()
+            session = self._session
+            self._version_refused = False
             try:
-                self._held = self._session.try_lock(self.key)
+                if not session.try_lock(self.key):
+                    return False
+                if self.version_key is not None and not session.try_lock_shared(self.version_key):
+                    session.unlock(self.key)
+                    self._version_refused = True
+                    return False
+                self._held = True
             except BaseException:
                 self._discard_session()
                 raise
-            return self._held
+            return True
 
     def acquire(
         self,
@@ -325,11 +438,17 @@ class ExecutorLease:
             try:
                 if self.try_acquire():
                     logger.info(
-                        "executor_lease.acquired", executor_id=self.executor_id, attempts=attempt
+                        "executor_lease.acquired",
+                        executor_id=self.executor_id,
+                        version=self.version,
+                        attempts=attempt,
                     )
                     return
-                holder = self._describe_holder()
-                obstacle = f"held by {holder}" if holder else "held by another session"
+                if self._version_refused:
+                    obstacle = f"blocked: version {self.version!r} is being recovered"
+                else:
+                    holder = self._describe_holder()
+                    obstacle = f"held by {holder}" if holder else "held by another session"
             except psycopg.Error as error:
                 obstacle = f"database unreachable ({type(error).__name__})"
             remaining = deadline - time.monotonic()
@@ -377,6 +496,25 @@ class ExecutorLease:
         self._monitor = thread
         thread.start()
 
+    def holder_has_version_lease(self) -> bool:
+        """Return whether the session holding this identity also holds a version lease.
+
+        Tells a live executor of a build that predates the version lease (False) from one
+        whose version can be read from its lease. Called after a refused `try_acquire`,
+        on that attempt's session.
+
+        Raises:
+            psycopg.Error: The check could not be made; the session is discarded.
+        """
+        with self._guard:
+            if self._session is None:
+                self._session = self._connect()
+            try:
+                return self._session.holder_shares(self.key)
+            except BaseException:
+                self._discard_session()
+                raise
+
     def release(self) -> None:
         """Stop monitoring, unlock and close the session. Idempotent."""
         self._stop_monitoring.set()
@@ -386,6 +524,8 @@ class ExecutorLease:
         if session is not None:
             if held:
                 try:
+                    if self.version_key is not None:
+                        session.unlock_shared(self.version_key)
                     session.unlock(self.key)
                 except Exception as error:  # Closing the session releases it regardless.
                     logger.warning(
@@ -429,6 +569,10 @@ class ExecutorLease:
             try:
                 if session is None or not session.holds(self.key):
                     failure = "the session no longer holds the lock"
+                elif self.version_key is not None and not session.holds(
+                    self.version_key, shared=True
+                ):
+                    failure = "the session no longer holds the version lease"
             except Exception as error:  # Any failure to vouch for the lease is a loss.
                 failure = f"the lease connection failed ({type(error).__name__})"
             if failure is None:
@@ -444,3 +588,68 @@ class ExecutorLease:
         self._held = False
         if session is not None:
             _close_quietly(session)
+
+
+class VersionLease:
+    """The exclusive advisory lock on one application version.
+
+    Recovery holds it while it forks that version's work onto the current one: taking it
+    proves no worker of that version holds its shared version lease, and holding it keeps
+    any from starting until the forks are made.
+    """
+
+    def __init__(
+        self, version: str, *, connect: SessionFactory, application_name: str = APPLICATION_NAME
+    ) -> None:
+        """Bind a lease to a version without connecting."""
+        self.version = version
+        self.key = version_lease_key(application_name, version)
+        self._connect = connect
+        self._session: LeaseSession | None = None
+
+    @classmethod
+    def for_settings(cls, settings: Settings, version: str) -> Self:
+        """Return the version's lease on the configured DBOS system database."""
+        conninfo = lease_conninfo(settings)
+        name = f"{APPLICATION_NAME} version recovery {version}"
+        return cls(version, connect=lambda: connect_session(conninfo, application_name=name))
+
+    @property
+    def held(self) -> bool:
+        """Return whether this object holds the version exclusively."""
+        return self._session is not None
+
+    def try_acquire(self) -> bool:
+        """Take the version exclusively without waiting; return whether it was taken.
+
+        A refused attempt closes its session: nothing is held, and nothing waits.
+
+        Raises:
+            psycopg.Error: The session could not be opened or the attempt failed.
+        """
+        if self._session is not None:
+            return True
+        session = self._connect()
+        try:
+            taken = session.try_lock(self.key)
+        except BaseException:
+            _close_quietly(session)
+            raise
+        if not taken:
+            _close_quietly(session)
+            return False
+        self._session = session
+        return True
+
+    def release(self) -> None:
+        """Unlock and close the session. Idempotent."""
+        session, self._session = self._session, None
+        if session is None:
+            return
+        try:
+            session.unlock(self.key)
+        except Exception as error:  # Closing the session releases it regardless.
+            logger.warning(
+                "version_lease.unlock_failed", version=self.version, error_type=type(error).__name__
+            )
+        _close_quietly(session)

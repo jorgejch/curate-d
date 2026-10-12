@@ -13,12 +13,17 @@ import pytest
 
 from curate_d.config import Settings
 from curate_d.runtime import lease as lease_module
+from curate_d.runtime.dbos_app import APPLICATION_NAME
 from curate_d.runtime.lease import (
     ExecutorLease,
     ExecutorLeaseUnavailableError,
+    VersionLease,
     connect_session,
+    join_key,
     lease_conninfo,
     lease_key,
+    split_key,
+    version_lease_key,
 )
 from tests.unit.runtime.fake_lease import FakeLockServer, FakeSession
 
@@ -247,3 +252,146 @@ def test_a_lease_for_settings_names_its_purpose(monkeypatch: pytest.MonkeyPatch)
     assert lease.try_acquire()
     assert names == ["curate-d recovery sweep worker-io-0"]
     assert lease.key == lease_key("curate-d", "worker-io-0")
+
+
+def test_the_version_key_never_aliases_the_executor_key() -> None:
+    """An executor named like a version must not share its lock."""
+    assert version_lease_key("curate-d", "0.1.0") != lease_key("curate-d", "0.1.0")
+    assert version_lease_key("curate-d", "0.1.0") == version_lease_key("curate-d", "0.1.0")
+    assert version_lease_key("curate-d", "0.1.0") != version_lease_key("curate-d", "0.1.1")
+
+
+@pytest.mark.parametrize("key", [0, 1, -1, 2**63 - 1, -(2**63), 6783618544537927710])
+def test_a_key_survives_the_pg_locks_split(key: int) -> None:
+    """The read model rebuilds keys from pg_locks' (classid, objid) halves."""
+    assert join_key(*split_key(key)) == key
+
+
+def test_a_versioned_lease_holds_the_version_shared_after_the_identity() -> None:
+    """Two workers of one version share it; each holds its own identity."""
+    server = FakeLockServer()
+    first = server.lease("worker-io-0", version="0.2.0")
+    second = server.lease("worker-io-1", version="0.2.0")
+    assert first.try_acquire() and second.try_acquire()
+    version = version_lease_key(APPLICATION_NAME, "0.2.0")
+    assert server.holders[first.key] is server.sessions[0]
+    assert server.sharers[version] == {server.sessions[0], server.sessions[1]}
+
+
+def test_a_refused_version_lease_gives_the_identity_back() -> None:
+    """While recovery forks a version's work, no worker of it may start."""
+    server = FakeLockServer()
+    recovery = server.version_lease("0.2.0")
+    assert recovery.try_acquire()
+    lease = server.lease("worker-io-0", version="0.2.0")
+    assert not lease.try_acquire()
+    assert lease.key not in server.holders, "the identity stayed locked behind a refusal"
+    recovery.release()
+    assert lease.try_acquire()
+
+
+def test_a_waiting_worker_names_the_version_recovery_as_its_obstacle() -> None:
+    """The deadline error says why the lease was refused."""
+    server = FakeLockServer()
+    assert server.version_lease("0.2.0").try_acquire()
+    with pytest.raises(
+        ExecutorLeaseUnavailableError, match=r"version '0\.2\.0' is being recovered"
+    ):
+        server.lease("worker-io-0", version="0.2.0").acquire(timeout=0.02, initial_backoff=0.005)
+
+
+def test_the_version_lease_is_exclusive_against_shared_holders() -> None:
+    """Recovery is refused while any worker of the version holds it, and only then."""
+    server = FakeLockServer()
+    workers = [server.lease(f"worker-io-{n}", version="0.2.0") for n in range(2)]
+    assert all(worker.try_acquire() for worker in workers)
+    recovery = server.version_lease("0.2.0")
+    assert not recovery.try_acquire()
+    assert not recovery.held
+    assert server.sessions[-1].closed, "a refused version lease kept its session"
+    workers[0].release()
+    assert not recovery.try_acquire()
+    workers[1].release()
+    assert recovery.try_acquire()
+    assert server.holders.get(recovery.key) is not None
+    recovery.release()
+    recovery.release()
+    assert server.holders == {}
+
+
+def test_release_unlocks_both_the_identity_and_the_version() -> None:
+    """A clean release frees the version for recovery at once."""
+    server = FakeLockServer()
+    lease = server.lease("worker-io-0", version="0.2.0")
+    lease.acquire()
+    lease.release()
+    assert server.holders == {}
+    assert server.sharers == {}
+
+
+def test_a_lost_version_lease_is_reported_as_lost() -> None:
+    """The probe vouches for both locks; either one gone is a lost lease."""
+    server = FakeLockServer()
+    lease = server.lease("worker-io-0", version="0.2.0")
+    lease.acquire()
+    lost = threading.Event()
+    lease.monitor(lost.set)
+    server.sharers.clear()
+    assert lost.wait(2), "a lost version lease went unnoticed"
+    assert not lease.held
+    lease.release()
+
+
+def test_a_lease_without_a_version_takes_no_version_lock() -> None:
+    """A recovery's claim on a dead executor says nothing about versions."""
+    server = FakeLockServer()
+    assert server.lease("worker-io-0").try_acquire()
+    assert server.sharers == {}
+
+
+def test_a_live_holder_is_told_apart_by_its_version_lease() -> None:
+    """A build that predates the version lease holds none; recovery treats it with care."""
+    server = FakeLockServer()
+    assert server.lease("new-0", version="0.2.0").try_acquire()
+    assert server.lease("old-0").try_acquire()
+    probe_new, probe_old = server.lease("new-0"), server.lease("old-0")
+    assert not probe_new.try_acquire() and not probe_old.try_acquire()
+    assert probe_new.holder_has_version_lease()
+    assert not probe_old.holder_has_version_lease()
+
+
+def test_a_failed_version_lease_check_discards_the_session() -> None:
+    """A broken session is not reused for the next check."""
+    server = FakeLockServer()
+    probe = server.lease("worker-io-0")
+    assert probe.try_acquire()
+    server.sessions[0].closed = True
+    with pytest.raises(psycopg.OperationalError):
+        probe.holder_has_version_lease()
+    assert not probe.held
+
+
+def test_a_version_lease_for_settings_names_its_purpose(monkeypatch: pytest.MonkeyPatch) -> None:
+    """pg_stat_activity shows which version is being recovered."""
+    names: list[str] = []
+    server = FakeLockServer()
+
+    def connect(conninfo: str, *, application_name: str) -> FakeSession:
+        names.append(application_name)
+        return server.connect()
+
+    monkeypatch.setattr(lease_module, "connect_session", connect)
+    lease = VersionLease.for_settings(Settings(), "0.2.0")
+    assert lease.try_acquire()
+    assert names == ["curate-d version recovery 0.2.0"]
+    assert lease.key == version_lease_key("curate-d", "0.2.0")
+
+
+def test_a_failed_version_lease_attempt_closes_its_session() -> None:
+    """Nothing is left open when the attempt itself fails."""
+    server = FakeLockServer()
+    lease = server.version_lease("0.2.0")
+    server.refuse_connections = 1
+    with pytest.raises(psycopg.OperationalError):
+        lease.try_acquire()
+    assert not lease.held

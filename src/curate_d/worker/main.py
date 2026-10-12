@@ -37,6 +37,7 @@ from curate_d.placement.remotes import ConnectedRemotes, RcloneAccess
 from curate_d.providers.access import ConnectedAccounts
 from curate_d.providers.crypto import CredentialCipher
 from curate_d.providers.pacing import Pacer, Quota
+from curate_d.runtime import dbos_app
 from curate_d.runtime.conductor import start_conductor
 from curate_d.runtime.datasource import create_ledger_datasource
 from curate_d.runtime.dbos_app import configure
@@ -109,6 +110,14 @@ class StagingLifecycle(Protocol):
 
 type StagingFactory = Callable[[Settings, WorkerProfile], StagingLifecycle]
 type LeaseFactory = Callable[[Settings, str], ExecutorLease]
+
+
+def worker_lease(settings: Settings, executor_id: str) -> ExecutorLease:
+    """Return the worker's executor lease, which also holds its version's lease shared.
+
+    The version lease is what tells recovery this version still runs (lease.py).
+    """
+    return ExecutorLease.for_settings(settings, executor_id, version=dbos_app.APPLICATION_VERSION)
 
 
 def require_staging_role(profile: WorkerProfile, settings: Settings) -> StagingRole:
@@ -735,7 +744,7 @@ def run(
     try:
         # Before launch, because launch runs startup recovery for this identity: a second
         # live process doing that would claim the first one's in-flight workflows.
-        lease = (lease_factory or ExecutorLease.for_settings)(settings, executor_id)
+        lease = (lease_factory or worker_lease)(settings, executor_id)
         lease.acquire(stop=shutdown)
         lease.monitor(on_lease_lost)
         prepare_services(settings, profile, staging)

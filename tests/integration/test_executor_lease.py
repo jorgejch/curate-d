@@ -18,9 +18,11 @@ from curate_d.runtime.dbos_app import APPLICATION_NAME
 from curate_d.runtime.lease import (
     ExecutorLease,
     ExecutorLeaseUnavailableError,
+    VersionLease,
     connect_session,
     lease_conninfo,
     lease_key,
+    version_lease_key,
 )
 
 pytestmark = pytest.mark.integration
@@ -157,3 +159,90 @@ def test_a_terminated_lease_session_is_reported_lost_and_frees_the_identity(
     assert not lease.held
     successor = _lease(settings, executor_id, leases)
     assert successor.try_acquire()
+
+
+def _version() -> str:
+    """Return a version no other test or deployment leases."""
+    return f"9.9.9-lease-{uuid4().hex[:8]}"
+
+
+def test_workers_of_one_version_share_its_lease(
+    settings: Settings, leases: list[ExecutorLease]
+) -> None:
+    """Both hold it shared on their own lease sessions, as pg_locks reports."""
+    version = _version()
+    first = ExecutorLease.for_settings(settings, _identity(negative=False), version=version)
+    second = ExecutorLease.for_settings(settings, _identity(negative=True), version=version)
+    leases.extend((first, second))
+    assert first.try_acquire() and second.try_acquire()
+    probe = connect_session(lease_conninfo(settings), application_name="lease-test probe")
+    try:
+        assert probe.holder_shares(first.key) and probe.holder_shares(second.key)
+    finally:
+        probe.close()
+
+
+def test_recovery_takes_a_version_only_once_no_worker_holds_it(
+    settings: Settings, leases: list[ExecutorLease]
+) -> None:
+    """Exclusive against every shared holder, and granted once the last one releases."""
+    version = _version()
+    workers = [
+        ExecutorLease.for_settings(settings, _identity(negative=sign), version=version)
+        for sign in (False, True)
+    ]
+    leases.extend(workers)
+    assert all(worker.try_acquire() for worker in workers)
+    recovery = VersionLease.for_settings(settings, version)
+    try:
+        assert not recovery.try_acquire()
+        workers[0].release()
+        assert not recovery.try_acquire()
+        workers[1].release()
+        assert recovery.try_acquire()
+    finally:
+        recovery.release()
+
+
+def test_a_worker_waits_while_its_version_is_being_recovered(
+    settings: Settings, leases: list[ExecutorLease]
+) -> None:
+    """A worker of the version cannot start mid-fork; it starts once recovery lets go."""
+    version = _version()
+    recovery = VersionLease.for_settings(settings, version)
+    assert recovery.try_acquire()
+    worker = ExecutorLease.for_settings(settings, _identity(negative=False), version=version)
+    leases.append(worker)
+    try:
+        with pytest.raises(ExecutorLeaseUnavailableError, match="being recovered"):
+            worker.acquire(timeout=0.3, initial_backoff=0.1)
+        assert not worker.held
+        releaser = threading.Timer(0.3, recovery.release)
+        releaser.start()
+        try:
+            worker.acquire(timeout=10, initial_backoff=0.05, max_backoff=0.1)
+        finally:
+            releaser.join()
+        assert worker.held
+    finally:
+        recovery.release()
+
+
+def test_a_worker_lease_reads_back_both_locks(
+    settings: Settings, leases: list[ExecutorLease]
+) -> None:
+    """The monitor's checks find the identity exclusive and the version shared."""
+    version = _version()
+    executor_id = _identity(negative=True)
+    conninfo = lease_conninfo(settings)
+    session = connect_session(conninfo, application_name="lease-test both")
+    try:
+        key = lease_key(APPLICATION_NAME, executor_id)
+        shared = version_lease_key(APPLICATION_NAME, version)
+        assert session.try_lock(key) and session.try_lock_shared(shared)
+        assert session.holds(key) and not session.holds(key, shared=True)
+        assert session.holds(shared, shared=True) and not session.holds(shared)
+        session.unlock_shared(shared)
+        assert not session.holds(shared, shared=True)
+    finally:
+        session.close()

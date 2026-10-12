@@ -4,7 +4,7 @@ import threading
 
 import psycopg
 
-from curate_d.runtime.lease import ExecutorLease
+from curate_d.runtime.lease import ExecutorLease, VersionLease
 
 
 class FakeLockServer:
@@ -12,6 +12,9 @@ class FakeLockServer:
 
     def __init__(self, events: list[str] | None = None) -> None:
         self.holders: dict[int, FakeSession] = {}
+        """Exclusive holders by key."""
+        self.sharers: dict[int, set[FakeSession]] = {}
+        """Shared holders by key."""
         self.events = events if events is not None else []
         self.sessions: list[FakeSession] = []
         self.refuse_connections = 0
@@ -31,13 +34,22 @@ class FakeLockServer:
         self.sessions.append(session)
         return session
 
-    def lease(self, executor_id: str, *, probe_interval: float = 0.01) -> ExecutorLease:
+    def lease(
+        self, executor_id: str, *, probe_interval: float = 0.01, version: str | None = None
+    ) -> ExecutorLease:
         """Return a real lease whose sessions this server provides."""
-        return ExecutorLease(executor_id, connect=self.connect, probe_interval=probe_interval)
+        return ExecutorLease(
+            executor_id, connect=self.connect, probe_interval=probe_interval, version=version
+        )
 
-    def factory(self, _settings: object, executor_id: str) -> ExecutorLease:
+    def version_lease(self, version: str) -> VersionLease:
+        """Return a real version lease whose sessions this server provides."""
+        return VersionLease(version, connect=self.connect)
+
+    def factory(self, _settings: object, executor_id: str, **options: object) -> ExecutorLease:
         """Match the worker's lease factory signature."""
-        return self.lease(executor_id)
+        version = options.get("version")
+        return self.lease(executor_id, version=version if isinstance(version, str) else None)
 
 
 class FakeSession:
@@ -51,21 +63,39 @@ class FakeSession:
         if self.closed:
             raise psycopg.OperationalError("the connection is closed")
 
+    def _refused(self) -> bool:
+        """Consume one forced refusal, if any are left. Call with the mutex held."""
+        if self.server.refuse_locks > 0:
+            self.server.refuse_locks -= 1
+            return True
+        return False
+
     def try_lock(self, key: int) -> bool:
         self._check()
         with self.server._mutex:
-            if self.server.refuse_locks > 0:
-                self.server.refuse_locks -= 1
+            if self._refused():
+                return False
+            if self.server.sharers.get(key, set()) - {self}:
                 return False
             holder = self.server.holders.setdefault(key, self)
         if holder is self:
             self.server.events.append("lease-acquired")
         return holder is self
 
-    def holds(self, key: int) -> bool:
+    def try_lock_shared(self, key: int) -> bool:
+        self._check()
+        with self.server._mutex:
+            if self.server.holders.get(key, self) is not self:
+                return False
+            self.server.sharers.setdefault(key, set()).add(self)
+        return True
+
+    def holds(self, key: int, *, shared: bool = False) -> bool:
         self._check()
         if self.server.fail_probes:
             raise psycopg.OperationalError("server closed the connection unexpectedly")
+        if shared:
+            return self in self.server.sharers.get(key, set())
         return self.server.holders.get(key) is self
 
     def unlock(self, key: int) -> None:
@@ -75,12 +105,30 @@ class FakeSession:
                 del self.server.holders[key]
                 self.server.events.append("lease-released")
 
+    def unlock_shared(self, key: int) -> None:
+        self._check()
+        with self.server._mutex:
+            self.server.sharers.get(key, set()).discard(self)
+            if not self.server.sharers.get(key, True):
+                del self.server.sharers[key]
+
     def holder(self, key: int) -> str | None:
         self._check()
         return "pid 42 (fake)" if key in self.server.holders else None
+
+    def holder_shares(self, key: int) -> bool:
+        self._check()
+        holder = self.server.holders.get(key)
+        return holder is not None and any(
+            holder in sharers for sharers in self.server.sharers.values()
+        )
 
     def close(self) -> None:
         with self.server._mutex:
             for key in [key for key, holder in self.server.holders.items() if holder is self]:
                 del self.server.holders[key]
+            for key in list(self.server.sharers):
+                self.server.sharers[key].discard(self)
+                if not self.server.sharers[key]:
+                    del self.server.sharers[key]
         self.closed = True

@@ -317,7 +317,9 @@ def startup_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     monkeypatch.setattr(worker, "_install_shutdown_handler", lambda stop: None)
     locks = FakeLockServer(events=calls)
     monkeypatch.setattr(
-        ExecutorLease, "for_settings", lambda settings, executor_id: locks.lease(executor_id)
+        ExecutorLease,
+        "for_settings",
+        lambda settings, executor_id, *, version=None: locks.lease(executor_id, version=version),
     )
     return calls
 
