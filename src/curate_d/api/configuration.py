@@ -3,7 +3,9 @@
 A change is a new version made active in one transaction, so an invalid document never
 replaces the one in force. Documents arrive as JSON and are parsed the way stored ones
 are, leniently in type and strictly in shape, before the endpoint sees them; a document
-the parser refuses is answered 422 with each problem located.
+the parser refuses is answered 422 with each problem located. A dry run's draft policy
+or template set goes through the same validation (`check_submission`) without being
+stored.
 
 A new taxonomy version asks the workers to classify again what it would now accept.
 Nothing here touches placements. A new template version changes where reconciliation
@@ -26,6 +28,7 @@ from curate_d.configuration.store import (
     ConfigurationRepository,
     ConfigurationVersion,
     DocumentValidator,
+    check_document,
 )
 from curate_d.domain import ConfigurationKind, PlacementPolicy, Taxonomy
 from curate_d.placement.policy import active_policy
@@ -53,6 +56,24 @@ def _lax(parser: DocumentValidator) -> BeforeValidator:
 SubmittedTaxonomy = Annotated[Taxonomy, _lax(parse_taxonomy)]
 SubmittedTemplates = Annotated[TemplateSet, _lax(parse_templates)]
 SubmittedPolicy = Annotated[PlacementPolicy, _lax(parse_policy)]
+
+
+def check_submission(kind: ConfigurationKind, document: BaseModel) -> BaseModel:
+    """Validate a submitted document as activating it would, storing nothing.
+
+    Activation and a dry run's drafts both pass through here, so a draft a dry run
+    accepts is one `PUT /configuration/{kind}` would accept too.
+
+    Returns:
+        The document as parsed from its stored (JSON) form.
+
+    Raises:
+        RejectedError: the document is invalid for `kind`.
+    """
+    try:
+        return check_document(kind, document.model_dump(mode="json"), _PARSERS[kind])
+    except ConfigurationError as error:
+        raise RejectedError(str(error)) from None
 
 
 class TaxonomyConfiguration(BaseModel):
@@ -209,6 +230,7 @@ class LedgerConfiguration:
         Raises:
             RejectedError: the document is invalid; the version in force is unchanged.
         """
+        check_submission(kind, document)
         try:
             async with self._engine.begin() as connection:
                 version = await ConfigurationRepository(connection).activate(
