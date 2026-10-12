@@ -15,6 +15,7 @@ from dbos import DBOS
 from dbos._dbos import _get_dbos_instance
 
 from curate_d.config import Settings
+from curate_d.runtime import dbos_app
 from curate_d.runtime.dbos_app import configure
 from curate_d.runtime.identity import EXECUTOR_ID_ENV, POD_NAME_ENV, ExecutorIdentityError
 from curate_d.runtime.lease import (
@@ -23,8 +24,19 @@ from curate_d.runtime.lease import (
     ExecutorLeaseUnavailableError,
 )
 from curate_d.runtime.profiles import WorkerProfile
+from curate_d.runtime.version_lease import VersionRegistryError
 from curate_d.worker import main as worker_main
 from tests.unit.runtime.fake_lease import FakeLockServer
+
+
+@pytest.fixture(autouse=True)
+def _registrations(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record version registrations instead of writing them to a database."""
+    registered: list[str] = []
+    monkeypatch.setattr(
+        worker_main, "register_version", lambda settings, version: registered.append(version)
+    )
+    return registered
 
 
 @pytest.fixture
@@ -69,11 +81,18 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, object]]:
         lambda settings, profile: recorded.append(("start_conductor", profile)),
     )
     monkeypatch.setattr(worker_main, "resolve_executor_id", lambda: "worker-io-0")
+    monkeypatch.setattr(
+        worker_main,
+        "register_version",
+        lambda settings, version: recorded.append(("register_version", version)),
+    )
     server = FakeLockServer()
 
-    def lease_for(settings: Settings, executor_id: str) -> ExecutorLease:
-        recorded.append(("lease", executor_id))
-        return server.lease(executor_id)
+    def lease_for(
+        settings: Settings, executor_id: str, *, version: str | None = None
+    ) -> ExecutorLease:
+        recorded.append(("lease", (executor_id, version)))
+        return server.lease(executor_id, version=version)
 
     monkeypatch.setattr(ExecutorLease, "for_settings", lease_for)
     return recorded
@@ -104,6 +123,7 @@ def test_the_full_startup_sequence(calls: list[tuple[str, object]], profile: Wor
     """Take the lease, create services, configure, listen, launch, register, schedule, report."""
     worker_main.run(Settings(), profile, block=False)
     assert [name for name, _ in calls] == [
+        "register_version",
         "lease",
         "prepare_services",
         "configure",
@@ -168,7 +188,7 @@ def test_the_lease_is_held_before_launch_runs_startup_recovery(
     worker_main.run(Settings(), WorkerProfile.IO, block=False)
     names = [name for name, _ in calls]
     assert names.index("lease") < names.index("configure") < names.index("launch")
-    assert ("lease", "worker-io-0") in calls
+    assert ("lease", ("worker-io-0", dbos_app.APPLICATION_VERSION)) in calls
 
 
 def test_a_worker_without_an_identity_refuses_to_start(
@@ -239,7 +259,13 @@ def test_a_clean_shutdown_releases_the_lease_after_the_drain(
         stop=stop,
         lease_factory=locks.factory,
     )
-    assert locks.events == ["lease-acquired", "drain", "lease-released"]
+    assert locks.events == [
+        "lease-acquired",
+        "version-shared-acquired",
+        "drain",
+        "version-shared-released",
+        "lease-released",
+    ]
 
 
 def test_an_unfinished_drain_keeps_the_lease_until_exit(
@@ -313,3 +339,62 @@ def test_the_drain_reports_workflows_left_running(monkeypatch: pytest.MonkeyPatc
     configure(Settings())
     assert worker_main._drain_dbos(0) is True
     assert worker_main._drain_dbos(0) is True, "no instance at all means nothing is running"
+
+
+def test_the_version_is_registered_before_the_lease(
+    calls: list[tuple[str, object]], _registrations: list[str]
+) -> None:
+    """An unregistered version is one the sweep must leave alone, so register first."""
+    worker_main.run(Settings(), WorkerProfile.IO, block=False)
+    names = [name for name, _ in calls]
+    assert names.index("register_version") < names.index("lease") < names.index("launch")
+    assert ("register_version", dbos_app.APPLICATION_VERSION) in calls
+
+
+def test_a_failed_registration_never_takes_the_lease_or_launches(
+    calls: list[tuple[str, object]], monkeypatch: pytest.MonkeyPatch, locks: FakeLockServer
+) -> None:
+    """A worker that cannot register exits before its lease and DBOS."""
+
+    def refuse(settings: Settings, version: str) -> None:
+        raise VersionRegistryError(f"registering version {version!r} failed")
+
+    monkeypatch.setattr(worker_main, "register_version", refuse)
+    with pytest.raises(VersionRegistryError):
+        worker_main.run(
+            Settings(staging_s3_endpoint_url=None),
+            WorkerProfile.IO,
+            block=False,
+            lease_factory=locks.factory,
+        )
+    assert "launch" not in [name for name, _ in calls]
+    assert locks.sessions == []
+
+
+def test_an_unfinished_drain_keeps_the_version_key_too(
+    calls: list[tuple[str, object]], monkeypatch: pytest.MonkeyPatch, locks: FakeLockServer
+) -> None:
+    """Workflows still running mean the version is still live; the sweep must see it."""
+    monkeypatch.setattr(worker_main, "_drain_dbos", lambda timeout_seconds: False)
+    stop = threading.Event()
+    stop.set()
+    worker_main.run(
+        Settings(staging_s3_endpoint_url=None),
+        WorkerProfile.IO,
+        stop=stop,
+        lease_factory=locks.factory,
+    )
+    assert "version-shared-released" not in locks.events
+    assert any(locks.shared.values()), "the version key was released with workflows running"
+
+
+def test_a_worker_never_promotes_its_version(
+    calls: list[tuple[str, object]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only an operator promotes; a worker cannot tell a rollback from a stalled rollout."""
+    promoted: list[str] = []
+    monkeypatch.setattr(
+        DBOS, "set_latest_application_version", lambda version, **kwargs: promoted.append(version)
+    )
+    worker_main.run(Settings(), WorkerProfile.IO, block=False)
+    assert promoted == []

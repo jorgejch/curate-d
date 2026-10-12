@@ -37,6 +37,7 @@ from curate_d.placement.remotes import ConnectedRemotes, RcloneAccess
 from curate_d.providers.access import ConnectedAccounts
 from curate_d.providers.crypto import CredentialCipher
 from curate_d.providers.pacing import Pacer, Quota
+from curate_d.runtime import dbos_app
 from curate_d.runtime.conductor import start_conductor
 from curate_d.runtime.datasource import create_ledger_datasource
 from curate_d.runtime.dbos_app import configure
@@ -50,6 +51,7 @@ from curate_d.runtime.schedule_authority import (
     schedule_authority,
 )
 from curate_d.runtime.services import Services, StagingAccess, install
+from curate_d.runtime.version_lease import register_version
 from curate_d.staging.errors import StagingError, StagingNotReadyError, StagingRoleMismatchError
 from curate_d.staging.factories import (
     StagingReaderBackend,
@@ -108,7 +110,16 @@ class StagingLifecycle(Protocol):
 
 
 type StagingFactory = Callable[[Settings, WorkerProfile], StagingLifecycle]
-type LeaseFactory = Callable[[Settings, str], ExecutorLease]
+
+
+class LeaseFactory(Protocol):
+    """Builds a worker's lease on its executor identity and its version."""
+
+    def __call__(
+        self, settings: Settings, executor_id: str, /, *, version: str | None = None
+    ) -> ExecutorLease:
+        """Return the lease, not yet acquired."""
+        ...
 
 
 def require_staging_role(profile: WorkerProfile, settings: Settings) -> StagingRole:
@@ -618,9 +629,10 @@ def apply_schedules(profile: WorkerProfile, settings: Settings) -> None:
     cannot apply or delete after a newer version has registered and applied its own.
     Outcomes are logged after the commit, so a logged deletion happened.
 
-    `DBOS.set_latest_application_version` only changes which version is latest; it
-    applies nothing. After a rollback, promote the restored version before its workers
-    start, or restart them afterwards.
+    Promotion only changes which version is latest; it applies nothing. After a rollback,
+    promote the restored version with `python -m curate_d.runtime.promote <version>`
+    before its workers start, or restart them afterwards. Workers never promote
+    themselves: one cannot tell a rollback from newer replicas crash-looping mid-rollout.
 
     Raises:
         ScheduleAuthorityUnavailableError: Another worker held the lock past the timeout.
@@ -697,13 +709,16 @@ def run(
             blocks.
         staging_factory: Builds the staging supervisor, substituted by tests that must
             not open an event loop.
-        lease_factory: Builds the executor lease; a lease on the configured DBOS system
-            database when omitted. Substituted by tests that must not connect.
+        lease_factory: Builds the executor and version lease; a lease on the configured
+            DBOS system database when omitted. Substituted by tests that must not connect.
 
     Raises:
         ExecutorIdentityError: No stable executor identity is configured.
-        ExecutorLeaseUnavailableError: Another live process holds this identity's lease
-            and did not release it in time. DBOS is never launched.
+        VersionRegistryError: This build's version could not be registered in
+            `lease_versions`. DBOS is never launched.
+        ExecutorLeaseUnavailableError: Another live process holds this identity's lease,
+            or a recovery sweep holds this version exclusively, past the acquire budget.
+            DBOS is never launched.
         ExecutorLeaseLostError: The lease was lost while serving. DBOS was shut down
             without waiting for in-flight workflows; the caller must exit at once.
         StagingNotReadyError: Staging is configured but unreachable. No queue is
@@ -733,9 +748,17 @@ def run(
     launched = False
     drained = False
     try:
+        # Registered first: the recovery sweep treats an unregistered version as one that
+        # predates the version lease, and leaves its rows alone.
+        version = dbos_app.APPLICATION_VERSION
+        register_version(settings, version)
         # Before launch, because launch runs startup recovery for this identity: a second
-        # live process doing that would claim the first one's in-flight workflows.
-        lease = (lease_factory or ExecutorLease.for_settings)(settings, executor_id)
+        # live process doing that would claim the first one's in-flight workflows. The
+        # version key, held shared beside it, tells the sweep this version is live; it is
+        # kept with the executor key until exit, even when the drain does not finish.
+        lease = (lease_factory or ExecutorLease.for_settings)(
+            settings, executor_id, version=version
+        )
         lease.acquire(stop=shutdown)
         lease.monitor(on_lease_lost)
         prepare_services(settings, profile, staging)

@@ -315,9 +315,12 @@ def startup_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     monkeypatch.setattr(worker, "apply_schedules", lambda profile, settings: None)
     monkeypatch.setattr(DBOS, "destroy", lambda **kw: calls.append("drain"))
     monkeypatch.setattr(worker, "_install_shutdown_handler", lambda stop: None)
+    monkeypatch.setattr(worker, "register_version", lambda settings, version: None)
     locks = FakeLockServer(events=calls)
     monkeypatch.setattr(
-        ExecutorLease, "for_settings", lambda settings, executor_id: locks.lease(executor_id)
+        ExecutorLease,
+        "for_settings",
+        lambda settings, executor_id, *, version=None: locks.lease(executor_id),
     )
     return calls
 
