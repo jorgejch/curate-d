@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Annotated, Final, Self
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from dbos._croniter import croniter  # type: ignore[attr-defined]
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -301,6 +302,12 @@ class Settings(BaseSettings):
         "one day's worth of newly aged records, short enough not to hold the maintenance "
         "queue's one slot for long.",
     )
+    recovery_sweep_schedule: str = Field(
+        default="*/10 * * * *",
+        description="Cron schedule of the recovery sweep, which forks work stranded on a "
+        "retired version and re-enqueues work of executors that never return. Five fields, "
+        "or six with seconds first, as DBOS reads them.",
+    )
     conductor_enabled: bool = Field(
         default=False,
         description="Whether workers connect to DBOS Conductor. Separate from the key so the "
@@ -407,6 +414,19 @@ class Settings(BaseSettings):
         "until each handle closes, so this bounds the pod's scratch use across readers "
         "rather than trusting the node's disk to be large enough.",
     )
+
+    @field_validator("recovery_sweep_schedule")
+    @classmethod
+    def _recovery_sweep_schedule_is_a_cron(cls, value: str) -> str:
+        """Reject a cron DBOS would refuse, before the lease and the launch.
+
+        The check is the one DBOS's schedule row builder applies (`stored_form`): failing
+        here stops a worker at settings load, where `apply_schedules` would instead fail
+        after launch and crash-loop every I/O worker.
+        """
+        if not croniter.is_valid(value, second_at_beginning=True):
+            raise ValueError(f"recovery_sweep_schedule {value!r} is not a valid cron expression")
+        return value
 
     @field_validator("conductor_key", mode="before")
     @classmethod

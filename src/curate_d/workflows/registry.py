@@ -16,6 +16,7 @@ from curate_d.workflows import (
     ingest,
     placement,
     reconcile,
+    recovery,
     rescan,
     retention,
     scan,
@@ -30,8 +31,8 @@ def schedules_for(profile: WorkerProfile, settings: Settings) -> list[ScheduleIn
 
     Only the I/O profile applies any: every scheduled pass here either calls a provider
     or enqueues work for the profile that does, and applying the same definitions from
-    two profiles would only race to write identical rows. The history prune needs only
-    the database and runs there with the rest.
+    two profiles would only race to write identical rows. The history prune and the
+    recovery sweep need only the database and run there with the rest.
     """
     if profile is WorkerProfile.IO:
         return [
@@ -43,6 +44,7 @@ def schedules_for(profile: WorkerProfile, settings: Settings) -> list[ScheduleIn
             reconcile.schedule(settings),
             reconcile.check_schedule(settings),
             retention.schedule(settings),
+            recovery.schedule(settings),
         ]
     return []
 

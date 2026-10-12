@@ -352,3 +352,22 @@ def test_non_http_conductor_proxy_url_is_rejected(
     monkeypatch.setenv("CURATE_D_CONDUCTOR_PROXY_URL", proxy)
     with pytest.raises(ValidationError, match="conductor_proxy_url"):
         Settings()
+
+
+@pytest.mark.parametrize("cron", ["every ten minutes", "*/10 * * *", "61 * * * *", ""])
+def test_an_invalid_recovery_sweep_schedule_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, cron: str
+) -> None:
+    """A cron DBOS would refuse fails at settings load, naming the setting."""
+    monkeypatch.setenv("CURATE_D_RECOVERY_SWEEP_SCHEDULE", cron)
+    with pytest.raises(ValidationError, match="recovery_sweep_schedule"):
+        Settings()
+
+
+@pytest.mark.parametrize("cron", ["*/10 * * * *", "*/30 * * * * *", "0 3 * * 1"])
+def test_a_valid_recovery_sweep_schedule_is_kept(
+    monkeypatch: pytest.MonkeyPatch, cron: str
+) -> None:
+    """Five fields, or six with seconds first, as DBOS reads them."""
+    monkeypatch.setenv("CURATE_D_RECOVERY_SWEEP_SCHEDULE", cron)
+    assert Settings().recovery_sweep_schedule == cron
