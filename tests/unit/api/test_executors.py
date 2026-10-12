@@ -64,6 +64,11 @@ def http(fake: FakeExecutors) -> Iterator[TestClient]:
         yield test_client
 
 
+def _stranded(fake: FakeExecutors, executor_id: str = "io-1") -> None:
+    """Leave a PENDING row owned by `executor_id`, so there is something to recover."""
+    fake.workflows.add(workflow_status(f"left-by-{executor_id}", executor_id=executor_id))
+
+
 def _command(request_id: UUID | None = None, **fields: object) -> dict[str, object]:
     """Return a command body with a request ID."""
     return {"request_id": str(request_id or uuid4()), **fields}
@@ -185,6 +190,7 @@ def test_recovering_a_live_executor_is_refused_before_anything_is_enqueued(
 
 def test_a_finished_recovery_answers_with_its_report(http: TestClient, fake: FakeExecutors) -> None:
     """Enqueued on the maintenance queue under the request's ID, on the latest version."""
+    _stranded(fake)
     fake.workflows.versions = [version("v2")]
     fake.workflows.recovery_outcome = {"reenqueued": ("a",), "forked": (("b", "c"),)}
     request_id = uuid4()
@@ -210,6 +216,7 @@ def test_a_repeated_recovery_returns_the_first_report_even_once_the_executor_liv
     http: TestClient, fake: FakeExecutors
 ) -> None:
     """The request ID names the workflow; a retry waits on it rather than re-checking."""
+    _stranded(fake)
     fake.workflows.recovery_outcome = {"reenqueued": ("a",)}
     request_id = uuid4()
     first = http.post("/executors/io-1/recover", json=_command(request_id))
@@ -223,6 +230,7 @@ def test_a_recovery_still_running_answers_202_with_the_workflow_to_poll(
     http: TestClient, fake: FakeExecutors
 ) -> None:
     """The API stops waiting; the recovery does not."""
+    _stranded(fake)
     response = http.post("/executors/io-1/recover", json=_command())
     assert response.status_code == 202
     workflow_id = response.json()["workflow_id"]
@@ -236,6 +244,7 @@ def test_a_recovery_still_running_answers_202_with_the_workflow_to_poll(
 
 def test_a_recovery_refused_by_the_sweep_answers_409(http: TestClient, fake: FakeExecutors) -> None:
     """The lease was taken between the API's check and the sweep's."""
+    _stranded(fake)
     fake.workflows.recovery_outcome = {"refused": "executor io-1 is alive (lease held)"}
     response = http.post("/executors/io-1/recover", json=_command())
     assert response.status_code == 409
@@ -272,6 +281,29 @@ def test_only_recoveries_are_read_as_recoveries(http: TestClient, fake: FakeExec
     fake.workflows.add(workflow_status("other", status="SUCCESS", output={"x": 1}))
     assert http.get("/executors/recoveries/other").status_code == 404
     assert http.get("/executors/recoveries/missing").status_code == 404
+
+
+def test_recovering_an_unknown_executor_is_404_and_enqueues_nothing(
+    http: TestClient, fake: FakeExecutors
+) -> None:
+    """No lease and no work: a mistyped identity is reported, not answered with an empty report."""
+    _stranded(fake, "io-1")
+    fake.workflows.add(workflow_status("done", status="SUCCESS", executor_id="io-l"))
+    with capture_logs() as events:
+        response = http.post("/executors/io-l/recover", json=_command())
+    assert response.status_code == 404
+    assert fake.workflows.calls == []
+    completed = [event for event in events if event["event"] == "operator_command.completed"]
+    assert str(completed[0]["result"]).startswith("refused:")
+
+
+def test_an_executor_owning_only_queued_work_can_be_recovered(
+    http: TestClient, fake: FakeExecutors
+) -> None:
+    """ENQUEUED rows it owns make it known, as the executor view lists it."""
+    fake.workflows.add(workflow_status("q", status="ENQUEUED", executor_id="io-2"))
+    fake.workflows.recovery_outcome = {"reenqueued": ()}
+    assert http.post("/executors/io-2/recover", json=_command()).status_code == 200
 
 
 def test_an_executor_id_that_cannot_name_a_workflow_is_rejected(http: TestClient) -> None:
@@ -335,7 +367,9 @@ def test_resume_requeues_a_stopped_workflow_once(
     http: TestClient, fake: FakeExecutors, state: str
 ) -> None:
     """The row is marked with the request first; the same request again changes nothing."""
-    fake.workflows.add(workflow_status("w", status=state, attributes={"trace": "t"}))
+    fake.workflows.add(
+        workflow_status("w", status=state, attributes={"trace": "t"}, queue_partition_key="p1")
+    )
     request_id = uuid4()
     first = http.post("/workflows/w/resume", json=_command(request_id, queue_name="scan"))
     assert (first.json()["changed"], first.json()["status"]) == (True, "ENQUEUED")
@@ -355,6 +389,17 @@ def test_resume_keeps_the_rows_queue_when_none_is_named(
     )
     http.post("/workflows/w/resume", json=_command())
     assert fake.workflows.calls == [("resume", ("w", "verify"))]
+
+
+def test_a_resume_onto_a_partitioned_queue_needs_a_partition(
+    http: TestClient, fake: FakeExecutors
+) -> None:
+    """DBOS's resume keeps the row's empty partition key; the row is left untouched."""
+    fake.workflows.add(workflow_status("w", status="CANCELLED"))
+    response = http.post("/workflows/w/resume", json=_command(queue_name="transfer-large"))
+    assert response.status_code == 422
+    assert fake.workflows.calls == []
+    assert fake.workflows.rows["w"].attributes is None
 
 
 def test_resuming_pending_work_is_refused(http: TestClient, fake: FakeExecutors) -> None:

@@ -89,16 +89,20 @@ class FakeWorkflowClient:
         *,
         workflow_ids: list[str] | None = None,
         status: list[str] | None = None,
+        executor_id: str | None = None,
+        limit: int | None = None,
         load_input: bool = True,
         load_output: bool = True,
     ) -> list[WorkflowStatus]:
-        """Return the rows matching the IDs and statuses given."""
-        return [
+        """Return the rows matching the IDs, statuses and executor given, up to `limit`."""
+        found = [
             row
             for row in self.rows.values()
             if (workflow_ids is None or row.workflow_id in workflow_ids)
             and (status is None or row.status in status)
+            and (executor_id is None or row.executor_id == executor_id)
         ]
+        return found if limit is None else found[:limit]
 
     async def list_queued_workflows_async(
         self, *, load_input: bool = True, load_output: bool = True

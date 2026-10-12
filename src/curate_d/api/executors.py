@@ -407,6 +407,8 @@ class ExecutorsBackend(Protocol):
 
         Raises:
             ConflictError: the executor holds its lease.
+            NotFoundError: the executor holds no lease and owns no PENDING or ENQUEUED
+                work, and no earlier attempt of this request recovered it.
         """
         ...
 
@@ -433,6 +435,7 @@ class ExecutorsBackend(Protocol):
             NotFoundError: there is no such workflow.
             ConflictError: the workflow is in no state to resume, and no earlier attempt
                 of this request resumed it.
+            RejectedError: the named queue needs a partition the workflow has none for.
         """
         ...
 
@@ -499,7 +502,7 @@ def router(backend: Callable[[Request], ExecutorsBackend]) -> APIRouter:
         issued("recover", target, command.request_id, who)
         try:
             outcome = await executors.recover(executor_id, command.request_id, who)
-        except (ConflictError, NotFoundError) as error:
+        except (ConflictError, NotFoundError, RejectedError) as error:
             completed("recover", target, command.request_id, who, f"refused: {error}")
             raise
         if isinstance(outcome, RecoveryStarted):
@@ -553,7 +556,7 @@ def router(backend: Callable[[Request], ExecutorsBackend]) -> APIRouter:
         response_model=RecoveryReport | RecoveryStarted,
         responses={
             status.HTTP_202_ACCEPTED: {"model": RecoveryStarted},
-            **problems(CONFLICT, UNAVAILABLE),
+            **problems(NOT_FOUND, CONFLICT, REJECTED, UNAVAILABLE),
         },
     )
     async def recover(
@@ -603,7 +606,7 @@ def router(backend: Callable[[Request], ExecutorsBackend]) -> APIRouter:
     @routes.post(
         "/workflows/{workflow_id:path}/resume",
         response_model=CommandResult,
-        responses=problems(NOT_FOUND, CONFLICT),
+        responses=problems(NOT_FOUND, CONFLICT, REJECTED),
     )
     async def resume(
         workflow_id: str,
@@ -615,7 +618,7 @@ def router(backend: Callable[[Request], ExecutorsBackend]) -> APIRouter:
         issued("resume", workflow_id, command.request_id, who)
         try:
             result = await executors.resume(workflow_id, command)
-        except (ConflictError, NotFoundError) as error:
+        except (ConflictError, NotFoundError, RejectedError) as error:
             completed("resume", workflow_id, command.request_id, who, f"refused: {error}")
             raise
         completed("resume", workflow_id, command.request_id, who, result.model_dump(mode="json"))
@@ -734,6 +737,17 @@ class LedgerExecutors:
         key = lease_key(APPLICATION_NAME, executor_id)
         return any(lock.key == key and lock.mode == EXCLUSIVE_MODE for lock in await self._locks())
 
+    async def _owns_work(self, executor_id: str) -> bool:
+        """Return whether `executor_id` owns any PENDING or ENQUEUED workflow."""
+        owned = await self._workflows.list_workflows_async(
+            status=[PENDING, ENQUEUED],
+            executor_id=executor_id,
+            limit=1,
+            load_input=False,
+            load_output=False,
+        )
+        return bool(owned)
+
     async def recover(
         self, executor_id: str | None, request_id: UUID, by: str
     ) -> RecoveryReport | RecoveryStarted:
@@ -755,6 +769,9 @@ class LedgerExecutors:
                 raise ConflictError(
                     f"executor {executor_id} is alive (lease held); it recovers its own work"
                 )
+            if executor_id is not None and not await self._owns_work(executor_id):
+                # As `GET /executors/{id}` answers it: no lease and no work, so no executor.
+                raise NotFoundError("executor", executor_id)
             options: EnqueueOptions = {
                 "workflow_name": RECOVERY_WORKFLOW,
                 "queue_name": QueueName.MAINTENANCE.value,
@@ -815,10 +832,13 @@ class LedgerExecutors:
         found = await self._existing(workflow_id)
         attributes = dict(found.attributes or {})
         if found.status in RESUMABLE:
+            queue = found.queue_name
+            if request.queue_name is not None:
+                # DBOS's resume keeps the row's partition key: a partitioned queue needs one.
+                queue, _ = self._routing(found, request.queue_name)
             attributes[RESUMED_BY] = str(request.request_id)
             # Marked first: a crash between the two leaves a CANCELLED row a retry resumes.
             await self._workflows.update_workflow_attributes_async(workflow_id, attributes)
-            queue = request.queue_name.value if request.queue_name else found.queue_name
             await self._workflows.resume_workflow_async(workflow_id, queue_name=queue)
             found = await self._existing(workflow_id)
             changed = True

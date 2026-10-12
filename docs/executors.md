@@ -115,12 +115,13 @@ recovery until the previous build's workers are gone.
 
 | Answer | Meaning | What to do |
 |---|---|---|
+| `no executor <id>` | The identity holds no lease and owns no PENDING or ENQUEUED work: a mistyped name, or one already recovered. | Check `executors`; nothing is left to recover. |
 | `executor <id> is alive (lease held)` | The executor runs and recovers its own work. | Nothing; or drain it first if it is meant to go. |
 | `versions still running: <v>` | A worker of `<v>` holds its version lease, or a live pre-lease worker owns PENDING work on it. | Wait for those workers to drain and go, then recover again. |
 | `workflow <id> is PENDING ... recovered with recover, not resumed` | DBOS's resume would set the row back to ENQUEUED while an executor may still be running it. | `recover` its executor if that executor is gone. |
 | `workflow <id> is <status>; only CANCELLED or MAX_RECOVERY_ATTEMPTS_EXCEEDED workflows are resumed` | Nothing to resume. | Fork it from a step instead, if it should run again. |
 | `workflow ID <id> belongs to an unrelated workflow` | The fork's successor ID is taken by other work. | Use a new request ID. |
-| `queue <q> is partitioned and workflow <id> has no partition key` | The fork cannot be dequeued from that queue. | Fork onto its own queue (omit `--queue`). |
+| `queue <q> is partitioned and workflow <id> has no partition key` | The fork or resumed workflow could not be dequeued from that queue. | Name an unpartitioned queue, or fork onto the workflow's own queue (omit `--queue`). |
 
 ## Commands on one workflow
 

@@ -132,13 +132,17 @@ The control plane SHALL report every DBOS executor's liveness and pending work, 
 #### Scenario: Vanished executor recovered
 - **WHEN** a user asks to recover an executor whose lease is free
 - **THEN** its PENDING workflows on the current version are re-enqueued under their own identifiers while the recovery holds its lease
-- **AND** repeating the request with the same request ID returns the same report, and a new request re-enqueues nothing more
+- **AND** repeating the request with the same request ID returns the same report, and a new request re-enqueues nothing more: once the executor owns no PENDING or ENQUEUED work it is reported as not existing
 
 #### Scenario: Recovery refused while an older version runs
 - **WHEN** recovery finds work pinned to an older version and a worker of that version holds its version lease, or a live executor without a version lease owns PENDING work on it
 - **THEN** that work is skipped and reported with the versions still running, and nothing of that version is forked
 - **AND** when nothing else was recovered the request is answered as a conflict naming those versions
 - **AND** once that version's workers are gone, a new request forks the work onto the current version and cancels each original after its successor is confirmed
+
+#### Scenario: Command onto a partitioned queue without a partition
+- **WHEN** a user resumes or forks a workflow onto a partitioned queue and the workflow carries no partition key
+- **THEN** the request is rejected and the workflow is left unchanged
 
 #### Scenario: Resume of PENDING work refused
 - **WHEN** a user asks to resume a PENDING workflow
@@ -151,7 +155,7 @@ The control plane SHALL report every DBOS executor's liveness and pending work, 
 - **AND** a fork whose derived successor identifier is held by an unrelated workflow is refused as a conflict
 
 #### Scenario: Unknown target
-- **WHEN** a user names an executor, workflow, schedule or recovery that does not exist
+- **WHEN** a user names an executor (an identity that holds no lease and owns no PENDING or ENQUEUED work), workflow, schedule or recovery that does not exist
 - **THEN** the control plane reports that it does not exist and changes nothing
 
 #### Scenario: No audit entries

@@ -298,14 +298,11 @@ async def test_a_killed_then_removed_executor_is_recovered_once(
 
     repeat = await _post(http, f"/executors/{gone}/recover", json={"request_id": request_id})
     assert repeat.json() == report
+    # Its work done elsewhere, nothing names the identity any more: a new request finds none.
     again = await _post(http, f"/executors/{gone}/recover", json={"request_id": str(uuid4())})
-    assert again.status_code == 200 and again.json()["reenqueued"] == []
+    assert again.status_code == 404
     assert await _audit_count(ledger_engine) == audit_before
-    seeded.extend(
-        workflow_id
-        for workflow_id in (report["workflow_id"], again.json()["workflow_id"])
-        if workflow_id
-    )
+    seeded.append(report["workflow_id"])
 
 
 async def test_work_of_a_running_older_version_is_not_forked_until_it_stops(
@@ -408,6 +405,48 @@ async def test_the_commands_are_idempotent_per_request(
     finally:
         await DBOS.delete_schedule_async(schedule)
     assert await _audit_count(ledger_engine) == audit_before
+
+
+async def test_recovering_an_executor_with_no_lease_and_no_work_is_404(
+    http: TestClient, ledger_engine: AsyncEngine, seeded: list[str]
+) -> None:
+    """An identity owning only finished work is unknown; no recovery is enqueued for it."""
+    unknown = f"mgr-unknown-{uuid4().hex[:8]}"
+    finished = await _seed(ledger_engine, seeded, executor_id=unknown, status="SUCCESS")
+    request_id = str(uuid4())
+    response = await _post(http, f"/executors/{unknown}/recover", json={"request_id": request_id})
+    assert response.status_code == 404
+    assert (await _get(http, f"/executors/{unknown}")).status_code == 404
+    async with ledger_engine.connect() as connection:
+        enqueued = await connection.scalar(
+            text("SELECT count(*) FROM dbos.workflow_status WHERE workflow_uuid LIKE :id"),
+            {"id": f"recover-executor:{unknown}:%"},
+        )
+    assert enqueued == 0
+    assert (await _status(ledger_engine, finished))["status"] == "SUCCESS"
+
+
+async def test_a_resume_onto_a_partitioned_queue_without_a_partition_is_refused(
+    http: TestClient, ledger_engine: AsyncEngine, seeded: list[str]
+) -> None:
+    """The cancelled row stays cancelled and unmarked rather than stuck on a partitioned queue."""
+    queued = await _seed(ledger_engine, seeded, executor_id="mgr-x", status="ENQUEUED")
+    cancelled = await _post(http, f"/workflows/{queued}/cancel", json={"request_id": str(uuid4())})
+    assert cancelled.status_code == 200
+    response = await _post(
+        http,
+        f"/workflows/{queued}/resume",
+        json={"request_id": str(uuid4()), "queue_name": "transfer-large"},
+    )
+    assert response.status_code == 422
+    row = await _status(ledger_engine, queued)
+    assert (row["status"], row["queue_name"]) == ("CANCELLED", None)
+    async with ledger_engine.connect() as connection:
+        attributes = await connection.scalar(
+            text("SELECT attributes FROM dbos.workflow_status WHERE workflow_uuid = :id"),
+            {"id": queued},
+        )
+    assert not attributes
 
 
 async def test_conductor_style_writes_stay_out_of_the_api(http: TestClient) -> None:
