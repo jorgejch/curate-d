@@ -4,11 +4,11 @@ The URL comes from application settings rather than alembic.ini, so migrations c
 pointed at a database the application itself is not configured to use.
 
 Online runs first bring the DBOS system schema up to date, the same step `dbos migrate`
-performs. Migrations 0005 and 0007 define views over DBOS's tables and 0008 and 0009
-update its queue rows; those tables otherwise exist only once a DBOS process has launched,
-so `alembic upgrade` on an empty database would fail. The migrations assume the system
-schema lives in the ledger database: a separated system database is migrated here, but
-the ledger database then has no `dbos` tables and 0005 fails.
+performs. The baseline revision defines views over DBOS's tables, which otherwise exist
+only once a DBOS process has launched, so `alembic upgrade` on an empty database would
+fail. The migrations assume the system schema lives in the ledger database: a separated
+system database is migrated here, but the ledger database then has no `dbos` tables and
+the baseline fails.
 """
 
 import asyncio
