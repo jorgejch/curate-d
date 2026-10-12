@@ -185,3 +185,34 @@ def test_the_executor_list_prints_json_on_request() -> None:
     """--json prints the API's answer as is."""
     _, out = _run(_Api((200, {"executors": []})), "--json", "executors")
     assert json.loads(out) == {"executors": []}
+
+
+def test_json_also_follows_executors() -> None:
+    """`executors --json`, as the runbook writes it, prints the API's answer."""
+    _, out = _run(_Api((200, {"executors": []})), "executors", "--json")
+    assert json.loads(out) == {"executors": []}
+
+
+def test_shared_options_also_follow_the_command() -> None:
+    """`recover io-1 --request-id R`, as the runbook repeats it, lands under R."""
+    api = _Api()
+    status, out = _run(
+        api, "recover", "io-1", "--request-id", str(REQUEST_ID), "--operator", "ops@example"
+    )
+    assert status == manage.EXIT_OK
+    assert out.splitlines()[0] == f"request_id {REQUEST_ID}"
+    assert api.bodies() == [{"request_id": str(REQUEST_ID)}]
+    assert api.requests[0].headers["Tailscale-User-Login"] == "ops@example"
+
+
+def test_an_option_after_the_command_overrides_one_before_it() -> None:
+    """The value given before the command stands unless the command repeats the option."""
+    api = _Api()
+    manage.run(
+        ["--api", "http://wrong.test", "cancel", "w", "--api", "http://api.test"],
+        transport=httpx.MockTransport(api),
+        out=io.StringIO(),
+    )
+    _run(api, "--operator", "ops@example", "cancel", "w")
+    assert str(api.requests[0].url) == "http://api.test/workflows/w/cancel"
+    assert api.requests[1].headers["Tailscale-User-Login"] == "ops@example"

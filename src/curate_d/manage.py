@@ -40,33 +40,62 @@ TIMEOUT_SECONDS: Final = 120.0
 _WRITES: Final = frozenset({"recover", "cancel", "resume", "fork", "trigger"})
 
 
+def _shared_options(*, subcommand: bool) -> argparse.ArgumentParser:
+    """Return the options every command takes, before or after its name.
+
+    Args:
+        subcommand: Build the copy a subcommand parses. Its options have no default, so
+            one left out after the command name keeps the value given before it.
+    """
+    shared = argparse.ArgumentParser(add_help=False)
+    defaults: dict[str, object] = {
+        "api": os.environ.get(API_URL_ENV, DEFAULT_API_URL),
+        "request_id": None,
+        "operator": os.environ.get(OPERATOR_ENV),
+        "json": False,
+    }
+    if subcommand:
+        defaults = dict.fromkeys(defaults, argparse.SUPPRESS)
+    shared.add_argument(
+        "--api",
+        default=defaults["api"],
+        help=f"Control plane URL (${API_URL_ENV}, default {DEFAULT_API_URL}).",
+    )
+    shared.add_argument(
+        "--request-id",
+        type=UUID,
+        default=defaults["request_id"],
+        help="Repeat an earlier command under its request ID; a new one when omitted.",
+    )
+    shared.add_argument(
+        "--operator",
+        default=defaults["operator"],
+        help=f"Who is acting, for the API's logs (${OPERATOR_ENV}); where no proxy names you.",
+    )
+    shared.add_argument(
+        "--json", action="store_true", default=defaults["json"], help="Print `executors` as JSON."
+    )
+    return shared
+
+
 def parser() -> argparse.ArgumentParser:
     """Return the command-line parser."""
     root = argparse.ArgumentParser(
-        prog="python -m curate_d.manage", description="Operate curate.d's DBOS executors."
+        prog="python -m curate_d.manage",
+        description="Operate curate.d's DBOS executors.",
+        parents=[_shared_options(subcommand=False)],
     )
-    root.add_argument(
-        "--api",
-        default=os.environ.get(API_URL_ENV, DEFAULT_API_URL),
-        help=f"Control plane URL (${API_URL_ENV}, default {DEFAULT_API_URL}).",
-    )
-    root.add_argument(
-        "--request-id",
-        type=UUID,
-        help="Repeat an earlier command under its request ID; a new one when omitted.",
-    )
-    root.add_argument(
-        "--operator",
-        default=os.environ.get(OPERATOR_ENV),
-        help=f"Who is acting, for the API's logs (${OPERATOR_ENV}); where no proxy names you.",
-    )
-    root.add_argument("--json", action="store_true", help="Print `executors` as JSON.")
     commands = root.add_subparsers(dest="command", required=True)
+    shared = _shared_options(subcommand=True)
 
-    executors = commands.add_parser("executors", help="List executors, or show one.")
+    executors = commands.add_parser(
+        "executors", help="List executors, or show one.", parents=[shared]
+    )
     executors.add_argument("executor_id", nargs="?")
 
-    recover = commands.add_parser("recover", help="Recover a vanished executor's work.")
+    recover = commands.add_parser(
+        "recover", help="Recover a vanished executor's work.", parents=[shared]
+    )
     target = recover.add_mutually_exclusive_group(required=True)
     target.add_argument("executor_id", nargs="?")
     target.add_argument("--all", action="store_true", help="Every executor's stranded work.")
@@ -75,17 +104,19 @@ def parser() -> argparse.ArgumentParser:
     )
 
     for name, text in (("cancel", "Cancel a workflow."), ("resume", "Resume a workflow.")):
-        command = commands.add_parser(name, help=text)
+        command = commands.add_parser(name, help=text, parents=[shared])
         command.add_argument("workflow_id")
     commands.choices["resume"].add_argument("--queue", help="Queue to resume onto.")
 
-    fork = commands.add_parser("fork", help="Fork a workflow from a step.")
+    fork = commands.add_parser("fork", help="Fork a workflow from a step.", parents=[shared])
     fork.add_argument("workflow_id")
     fork.add_argument("--start-step", type=int, required=True)
     fork.add_argument("--version", help="Application version; the latest when omitted.")
     fork.add_argument("--queue", help="Queue to fork onto; the workflow's own when omitted.")
 
-    trigger = commands.add_parser("trigger", help="Run a schedule's workflow now.")
+    trigger = commands.add_parser(
+        "trigger", help="Run a schedule's workflow now.", parents=[shared]
+    )
     trigger.add_argument("schedule_name")
     return root
 
