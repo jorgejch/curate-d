@@ -62,6 +62,12 @@ class FakeSession:
             self.server.events.append("lease-acquired")
         return holder is self
 
+    def try_lock_shared(self, key: int) -> bool:
+        raise NotImplementedError
+
+    def unlock_shared(self, key: int) -> None:
+        raise NotImplementedError
+
     def holds(self, key: int) -> bool:
         self._check()
         if self.server.fail_probes:

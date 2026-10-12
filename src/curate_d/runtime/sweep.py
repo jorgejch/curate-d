@@ -25,13 +25,16 @@ executing in another process, and a predecessor that predates the lease holds no
 """
 
 import asyncio
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from hashlib import sha256
 from sqlite3 import IntegrityError as SQLiteIntegrityError
+from typing import Final, Protocol
 
-from dbos import DBOS, SetWorkflowID
+from dbos import DBOS, DBOSClient, SetWorkflowID, WorkflowStatus
 from dbos._dbos import _get_dbos_instance
 from dbos._utils import INTERNAL_QUEUE_NAME
 from psycopg.errors import UniqueViolation
@@ -41,11 +44,15 @@ from curate_d.config import Settings
 from curate_d.observability.logging import get_logger
 from curate_d.runtime.dbos_app import APPLICATION_VERSION
 from curate_d.runtime.lease import ExecutorLease
+from curate_d.runtime.version_lease import VersionHold
 
 logger = get_logger(__name__)
 
 PENDING = "PENDING"
 ENQUEUED = "ENQUEUED"
+
+RECOVERY_SCHEDULE_NAME: Final = "recovery-sweep"
+"""The scheduled sweep's own schedule; its stale ticks are retired, never recovered."""
 
 
 class RecoveryAction(StrEnum):
@@ -72,6 +79,7 @@ class PendingWorkflow:
     queue_name: str | None = None
     queue_partition_key: str | None = None
     was_forked_from: bool = False
+    schedule_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -96,6 +104,16 @@ class SweepOutcome:
     """Pending workflows left alone because their executor's lease is held."""
     failed: tuple[tuple[str, str], ...] = ()
     """Pairs of (workflow identifier, failure reason)."""
+    skipped: tuple[str, ...] = ()
+    """Fork and retire rows left because this sweeper is not on the target version."""
+    unregistered: tuple[str, ...] = ()
+    """Rows of a version that never registered in `lease_versions`."""
+    newer_than_target: tuple[str, ...] = ()
+    """Rows of a version registered after the target, such as a rolled-back build."""
+    version_live: int = 0
+    """Fork and retire rows left because some process holds their version's lock."""
+    retired_ticks: tuple[str, ...] = ()
+    """Stale ticks of the sweep's own schedule, cancelled rather than recovered."""
 
     @property
     def recovered_count(self) -> int:
@@ -271,6 +289,142 @@ async def _recover_version(workflow: PendingWorkflow, version: str) -> tuple[str
 
 
 type LeaseFactory = Callable[[str], ExecutorLease]
+type VersionHolds = Callable[[str], AbstractAsyncContextManager[VersionHold]]
+"""Tries once to hold one version's lock exclusively for the duration of a block."""
+type Registrations = Callable[[], Awaitable[Mapping[str, datetime]]]
+"""Reads every registered version with its first registration time."""
+
+
+class RecoveryControl(Protocol):
+    """The DBOS operations a sweep needs, from a launched instance or a client."""
+
+    async def list_pending(self) -> tuple[PendingWorkflow, ...]:
+        """List PENDING and ENQUEUED workflows with routing, lineage and schedule."""
+        ...
+
+    async def step_ids(self, workflow_id: str) -> list[int]:
+        """Return the function IDs of the steps recorded for `workflow_id`."""
+        ...
+
+    async def status(self, workflow_id: str) -> WorkflowStatus | None:
+        """Return `workflow_id`'s status, or None if it does not exist."""
+        ...
+
+    async def fork(
+        self,
+        workflow_id: str,
+        successor_id: str,
+        start_step: int,
+        *,
+        application_version: str,
+        queue_name: str | None,
+        queue_partition_key: str | None,
+    ) -> None:
+        """Fork `workflow_id` from `start_step` under `successor_id`."""
+        ...
+
+    async def cancel(self, workflow_id: str) -> None:
+        """Cancel `workflow_id`."""
+        ...
+
+    async def latest_version(self) -> str:
+        """Return DBOS's latest application version for this application."""
+        ...
+
+    async def reenqueue(self, workflow_id: str, executor_id: str) -> bool:
+        """Re-enqueue one PENDING row on its own queue if `executor_id` still owns it."""
+        ...
+
+
+class DBOSRecoveryControl:
+    """`RecoveryControl` over the launched DBOS instance, for the scheduled sweep."""
+
+    async def list_pending(self) -> tuple[PendingWorkflow, ...]:
+        """List PENDING and ENQUEUED workflows with routing, lineage and schedule."""
+        raise NotImplementedError
+
+    async def step_ids(self, workflow_id: str) -> list[int]:
+        """Return the function IDs of the steps recorded for `workflow_id`."""
+        raise NotImplementedError
+
+    async def status(self, workflow_id: str) -> WorkflowStatus | None:
+        """Return `workflow_id`'s status, or None if it does not exist."""
+        raise NotImplementedError
+
+    async def fork(
+        self,
+        workflow_id: str,
+        successor_id: str,
+        start_step: int,
+        *,
+        application_version: str,
+        queue_name: str | None,
+        queue_partition_key: str | None,
+    ) -> None:
+        """Fork `workflow_id` from `start_step` under `successor_id`."""
+        raise NotImplementedError
+
+    async def cancel(self, workflow_id: str) -> None:
+        """Cancel `workflow_id`."""
+        raise NotImplementedError
+
+    async def latest_version(self) -> str:
+        """Return DBOS's latest application version for this application."""
+        raise NotImplementedError
+
+    async def reenqueue(self, workflow_id: str, executor_id: str) -> bool:
+        """Re-enqueue one PENDING row on its own queue if `executor_id` still owns it."""
+        raise NotImplementedError
+
+
+class ClientRecoveryControl:
+    """`RecoveryControl` over a `DBOSClient`, for the operator sweep.
+
+    `before_write` runs before every write, so a lost standalone version lease stops the
+    sweep before its next fork, cancel or re-enqueue.
+    """
+
+    def __init__(self, client: DBOSClient, *, before_write: Callable[[], None]) -> None:
+        """Bind the adapter to `client`."""
+        self._client = client
+        self._before_write = before_write
+
+    async def list_pending(self) -> tuple[PendingWorkflow, ...]:
+        """List PENDING and ENQUEUED workflows with routing, lineage and schedule."""
+        raise NotImplementedError
+
+    async def step_ids(self, workflow_id: str) -> list[int]:
+        """Return the function IDs of the steps recorded for `workflow_id`."""
+        raise NotImplementedError
+
+    async def status(self, workflow_id: str) -> WorkflowStatus | None:
+        """Return `workflow_id`'s status, or None if it does not exist."""
+        raise NotImplementedError
+
+    async def fork(
+        self,
+        workflow_id: str,
+        successor_id: str,
+        start_step: int,
+        *,
+        application_version: str,
+        queue_name: str | None,
+        queue_partition_key: str | None,
+    ) -> None:
+        """Fork `workflow_id` from `start_step` under `successor_id`."""
+        raise NotImplementedError
+
+    async def cancel(self, workflow_id: str) -> None:
+        """Cancel `workflow_id`."""
+        raise NotImplementedError
+
+    async def latest_version(self) -> str:
+        """Return DBOS's latest application version for this application."""
+        raise NotImplementedError
+
+    async def reenqueue(self, workflow_id: str, executor_id: str) -> bool:
+        """Re-enqueue one PENDING row on its own queue if `executor_id` still owns it."""
+        raise NotImplementedError
 
 
 async def _reenqueue(workflow: PendingWorkflow, executor_id: str) -> bool:
@@ -286,22 +440,39 @@ async def _reenqueue(workflow: PendingWorkflow, executor_id: str) -> bool:
 async def run_recovery_sweep(
     settings: Settings,
     *,
+    control: RecoveryControl | None = None,
+    own_version: str | None = None,
     current_version: str | None = None,
     lease_factory: LeaseFactory | None = None,
+    version_holds: VersionHolds | None = None,
+    registrations: Registrations | None = None,
 ) -> SweepOutcome:
     """Recover pending and queued work that no live worker will claim.
 
     Args:
         settings: Resolved configuration; names the database holding executor leases.
+        control: The DBOS operations to sweep with: the launched instance's or a client's.
+        own_version: The version this sweeper runs, compared with the target to decide
+            whether it may fork and retire.
         current_version: The version live workers run. Defaults to this build's.
         lease_factory: Builds the lease for one executor identity. Defaults to a lease on
             the configured DBOS system database.
+        version_holds: Tries to hold one version's lock exclusively. Defaults to
+            `version_lease.hold_exclusive` on the configured database.
+        registrations: Reads the version registry. Defaults to `version_lease.registrations`.
 
     Returns:
         What the sweep did, including per-workflow failures. One workflow that cannot be
         recovered does not abort the rest; a sweep that gave up on the first bad row
         would leave the remaining orphans stranded for another interval.
     """
+    if (
+        control is not None
+        or own_version is not None
+        or version_holds is not None
+        or registrations is not None
+    ):
+        raise NotImplementedError("the version gate is not implemented yet")
     version = current_version or APPLICATION_VERSION
     leases = lease_factory or (
         lambda executor_id: ExecutorLease.for_settings(
