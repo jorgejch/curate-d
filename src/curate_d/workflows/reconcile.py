@@ -90,6 +90,9 @@ class ReconcileContext(DomainModel):
 
     templates: TemplateSet
     policy: PlacementPolicy
+    policy_version: int | None = Field(
+        default=None, ge=1, description="The configuration version of `policy`."
+    )
 
 
 class ReconcileBatch(DomainModel):
@@ -118,8 +121,10 @@ async def enqueue_reconcile(request: ReconcileRequest) -> str:
     return workflow_id
 
 
-def _request_for(target: Target, attempt: int) -> PlacementRequest:
-    """The placement request that establishes `target`."""
+def _request_for(
+    target: Target, attempt: int, policy_version: int | None = None
+) -> PlacementRequest:
+    """Return the placement request that establishes `target`."""
     return PlacementRequest(
         content_object_id=target.content_object_id,
         fingerprint=target.fingerprint,
@@ -129,6 +134,7 @@ def _request_for(target: Target, attempt: int) -> PlacementRequest:
         size_bytes=target.size_bytes,
         attempt=attempt,
         originals=target.originals,
+        policy_version=policy_version,
     )
 
 
@@ -205,15 +211,18 @@ async def _open_tx() -> ReconcileContext:
     configurations = ConfigurationRepository(connection)
     templates = await active_templates(configurations)
     policy = await active_policy(configurations)
-    return ReconcileContext(templates=templates.templates, policy=policy.policy)
+    return ReconcileContext(
+        templates=templates.templates, policy=policy.policy, policy_version=policy.version
+    )
 
 
 async def _record_tx(
     evaluations: tuple[ContentEvaluation, ...],
     stale: tuple[PlacementId, ...],
     now: datetime,
+    policy_version: int | None = None,
 ) -> None:
-    """Record what one batch decided, apart from the placements it enqueues."""
+    """Record what one batch decided under `policy_version`, apart from what it enqueues."""
     connection = await current().datasource.sql_session().connection()
     for placement_id in stale:
         await fail(connection, placement_id, "the attempt ended without concluding", now=now)
@@ -242,7 +251,7 @@ async def _record_tx(
                     entry_type=AuditEntryType.RETENTION_DECIDED,
                     occurred_at=now,
                     decided_by=DECIDED_BY,
-                    details=evaluation.retention.audit_details(),
+                    details=evaluation.retention.audit_details(policy_version=policy_version),
                     content_object_id=evaluation.content_object_id,
                 )
             )
@@ -308,14 +317,18 @@ async def reconcile(request: ReconcileRequest) -> ReconcileSummary:
             attempts = 0 if target.existing is None else target.existing.attempts
             if action is Action.STALE and target.existing is not None:
                 stale.append(target.existing.id)
-                place.append(_request_for(target, attempts + 1))
+                place.append(_request_for(target, attempts + 1, context.policy_version))
             elif action is Action.PLACE:
                 # A copy registered elsewhere is moving: a new attempt, so that moving back
                 # to a locator it once had is not mistaken for that earlier placement.
                 moving = (
                     target.existing is not None and target.existing.state is PlacementState.PRESENT
                 )
-                place.append(_request_for(target, attempts + 1 if moving else attempts))
+                place.append(
+                    _request_for(
+                        target, attempts + 1 if moving else attempts, context.policy_version
+                    )
+                )
             summary = summary.model_copy(
                 update={
                     "satisfied": summary.satisfied + (action is Action.SATISFIED),
@@ -328,6 +341,7 @@ async def reconcile(request: ReconcileRequest) -> ReconcileSummary:
             batch.evaluations,
             tuple(stale),
             await _reconcile_now_step(),
+            context.policy_version,
         )
         for placement in place:
             await enqueue_placement(placement)

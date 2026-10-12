@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import hashlib
 from collections.abc import AsyncGenerator, AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 from uuid import uuid4
@@ -36,15 +37,17 @@ from curate_d.domain import (
 from curate_d.ledger import PlacementRepository
 from curate_d.ledger.mapping import to_audit_entry
 from curate_d.ledger.tables import audit_entries
-from curate_d.placement.pipeline import PlacementStore
+from curate_d.placement.pipeline import PlacementStore, conclude, start
 from curate_d.placement.rclone import ObjectInfo, RcloneClient
-from curate_d.placement.verification import SideEvidence
+from curate_d.placement.verification import Assessment, SideEvidence, Verdict
 from curate_d.runtime.queues import QueueName
 from curate_d.workflows.placement import (
+    SUPERSEDED,
     PlacementRequest,
     PlaceOutcome,
     enqueue_placement,
     placement_workflow_for,
+    verification_workflow_for,
     verify_placement,
 )
 from curate_d.workflows.scan import scan_root
@@ -64,6 +67,8 @@ _DESTINATION_ACCOUNT: Final = DESTINATION_ACCOUNT
 _SOURCE_PATH: Final = "/Photos/IMG_0001.JPG"
 _LOCATOR: Final = "/Photos/2026/IMG_0001.JPG"
 _ALL_BUT_VERIFY: Final = tuple(q.value for q in QueueName if q is not QueueName.VERIFY)
+_LOCATION: Final = ("destination_provider", "destination_account", "destination_root")
+_CORRUPT: Final = 'corrupted on transfer: sha1 hashes differ src(a:) "aa11" vs dst(b:) "bb22"'
 
 
 @pytest.fixture
@@ -107,7 +112,14 @@ async def _ingested(
     return source, stored
 
 
-def _request(content: ContentObject, destination: str, *, attempt: int = 0) -> PlacementRequest:
+def _request(
+    content: ContentObject,
+    destination: str,
+    *,
+    attempt: int = 0,
+    policy_version: int | None = None,
+    locator: str = _LOCATOR,
+) -> PlacementRequest:
     """Place `content` at the test's destination."""
     return PlacementRequest(
         content_object_id=content.id,
@@ -118,11 +130,12 @@ def _request(content: ContentObject, destination: str, *, attempt: int = 0) -> P
             account=_DESTINATION_ACCOUNT,
             root_path="/",
         ),
-        locator=_LOCATOR,
+        locator=locator,
         template_version="seed-1",
         size_bytes=content.size_bytes,
         attempt=attempt,
         originals={"Photos": "photos"},
+        policy_version=policy_version,
     )
 
 
@@ -196,9 +209,9 @@ async def test_a_placement_is_copied_verified_and_only_then_registered(
     access = ScriptedAccess()
     content = media.photo(seed=int(uuid4().int % 97))
     async with _pipeline(settings, ledger_engine, tmp_path, daemon[1], access) as pipeline:
-        _, stored = await _ingested(pipeline, daemon, content, at_source=content)
+        source, stored = await _ingested(pipeline, daemon, content, at_source=content)
         before = await _source_state(pipeline, daemon)
-        request = _request(stored, _destination())
+        request = _request(stored, _destination(), policy_version=7)
 
         assert await _place(pipeline, request) is PlaceOutcome.COPIED
 
@@ -226,6 +239,16 @@ async def test_a_placement_is_copied_verified_and_only_then_registered(
         assert started.details["source_path"] == _SOURCE_PATH
         assert started.details["template_version"] == "seed-1"
         assert started.details["original_Photos"] == "photos"
+        assert {key: started.details[key] for key in _LOCATION} == {
+            "destination_provider": "pcloud",
+            "destination_account": _DESTINATION_ACCOUNT,
+            "destination_root": "/",
+        }
+        assert (started.details["policy_version"], started.details["attempt"]) == (7, 0)
+        assert source.version_marker is not None
+        assert started.details["source_version_marker"] == source.version_marker
+        assert verified.details["source_version_marker"] == source.version_marker
+        assert verified.details["attempt"] == 0
         assert verified.details["compared"] == "sha256"
         assert verified.details["source_value"] == verified.details["destination_value"] == sha256
         assert all(e.placement_id == placement.id for e in audit)
@@ -351,7 +374,7 @@ async def test_a_copy_rclone_rejects_as_corrupt_is_a_mismatch_from_its_report(
 ) -> None:
     """rclone's post-copy check deleted the copy; the two values it named are recorded."""
     access = ScriptedAccess()
-    access.corrupt = 'corrupted on transfer: sha1 hashes differ src(a:) "aa11" vs dst(b:) "bb22"'
+    access.corrupt = _CORRUPT
     content = media.photo(seed=int(uuid4().int % 97))
     async with _pipeline(settings, ledger_engine, tmp_path, daemon[1], access) as pipeline:
         _, stored = await _ingested(pipeline, daemon, content, at_source=content)
@@ -465,3 +488,196 @@ async def test_scratch_that_stays_exhausted_fails_explicitly_and_a_later_attempt
         entries = listing["list"]
         assert isinstance(entries, list)
         assert [entry["Name"] for entry in entries] == [name]
+
+
+async def test_a_rewound_failed_attempt_is_verified_under_the_attempt_it_records(
+    settings: Settings,
+    ledger_engine: AsyncEngine,
+    tmp_path: Path,
+    daemon: tuple[RcloneClient, str],
+) -> None:
+    """The re-copy gets a verification of its own and is registered, not left verifying."""
+    access = ScriptedAccess()
+    access.corrupt = _CORRUPT
+    content = media.photo(seed=int(uuid4().int % 97))
+    async with _pipeline(settings, ledger_engine, tmp_path, daemon[1], access) as pipeline:
+        _, stored = await _ingested(pipeline, daemon, content, at_source=content)
+        request = _request(stored, _destination())
+        assert await _place(pipeline, request) is PlaceOutcome.COPIED
+        untrusted = await _placement(ledger_engine, stored)
+        assert (untrusted.state, untrusted.attempts) == (PlacementState.UNTRUSTED, 1)
+
+        access.corrupt = None
+        rewound = await DBOS.rewind_workflow_async(placement_workflow_for(request), start_step=1)
+        assert PlaceOutcome(await rewound.get_result()) is PlaceOutcome.COPIED
+        await pipeline.settle()
+
+        placement = await _placement(ledger_engine, stored)
+        assert (placement.state, placement.attempts) == (PlacementState.PRESENT, 1)
+        assert access.copies == 2
+        assert await pipeline.workflows(f"verify:{placement.id}:") == [
+            (verification_workflow_for(placement.id, 0), "SUCCESS"),
+            (verification_workflow_for(placement.id, 1), "SUCCESS"),
+        ]
+        audit = await _audit(ledger_engine, placement)
+        assert [(e.entry_type, e.details.get("attempt")) for e in audit] == [
+            (AuditEntryType.PLACEMENT_STARTED, 0),
+            (AuditEntryType.VERIFICATION_FAILED, 0),
+            (AuditEntryType.PLACEMENT_STARTED, 1),
+            (AuditEntryType.VERIFICATION_SUCCEEDED, 1),
+            (AuditEntryType.PLACEMENT_REGISTERED, None),
+        ]
+
+
+async def test_an_old_verification_run_again_after_a_newer_attempt_started_changes_nothing(
+    settings: Settings,
+    ledger_engine: AsyncEngine,
+    tmp_path: Path,
+    daemon: tuple[RcloneClient, str],
+) -> None:
+    """The new copy discarded the old evidence; nothing is concluded, nothing audited."""
+    access = ScriptedAccess()
+    access.corrupt = _CORRUPT
+    content = media.photo(seed=int(uuid4().int % 97))
+    async with _pipeline(settings, ledger_engine, tmp_path, daemon[1], access) as pipeline:
+        source, stored = await _ingested(pipeline, daemon, content, at_source=content)
+        request = _request(stored, _destination())
+        assert await _place(pipeline, request) is PlaceOutcome.COPIED
+        untrusted = await _placement(ledger_engine, stored)
+        async with ledger_engine.begin() as connection:
+            old_evidence = await PlacementStore(connection).evidence(untrusted.id)
+            assert old_evidence is not None
+            _, starting = await start(
+                connection,
+                content_object_id=stored.id,
+                fingerprint=stored.fingerprint,
+                destination_name=request.destination.name,
+                locator=_LOCATOR,
+                template_version="seed-1",
+                source=source,
+                transformations={},
+                attempt=untrusted.attempts,
+                now=datetime.now(UTC),
+            )
+            assert starting
+        copying = await _placement(ledger_engine, stored)
+        assert (copying.state, copying.attempts) == (PlacementState.COPYING, 1)
+        trail = await _audit(ledger_engine, copying)
+
+        rewound = await DBOS.rewind_workflow_async(
+            verification_workflow_for(copying.id, 0), start_step=1
+        )
+        assert await rewound.get_result() == SUPERSEDED
+
+        assert await _placement(ledger_engine, stored) == copying
+        assert await _audit(ledger_engine, copying) == trail
+        async with ledger_engine.begin() as connection:
+            store = PlacementStore(connection)
+            assert await store.evidence(copying.id) is None
+            assert not await store.set_evidence(copying.id, old_evidence, attempt=0)
+            verified = Assessment(
+                verdict=Verdict.VERIFIED, level=VerificationLevel.STRONG_COMMON_HASH
+            )
+            assert await conclude(connection, copying.id, verified, now=datetime.now(UTC)) is None
+        assert await _placement(ledger_engine, stored) == copying
+        assert await _audit(ledger_engine, copying) == trail
+
+
+async def test_rewinding_a_registered_placement_copies_nothing(
+    settings: Settings,
+    ledger_engine: AsyncEngine,
+    tmp_path: Path,
+    daemon: tuple[RcloneClient, str],
+) -> None:
+    """The re-run finds the copy present at its locator and leaves record and trail alone."""
+    access = ScriptedAccess()
+    content = media.photo(seed=int(uuid4().int % 97))
+    async with _pipeline(settings, ledger_engine, tmp_path, daemon[1], access) as pipeline:
+        _, stored = await _ingested(pipeline, daemon, content, at_source=content)
+        request = _request(stored, _destination())
+        assert await _place(pipeline, request) is PlaceOutcome.COPIED
+        registered = await _placement(ledger_engine, stored)
+        trail = await _audit(ledger_engine, registered)
+
+        rewound = await DBOS.rewind_workflow_async(placement_workflow_for(request), start_step=1)
+        assert PlaceOutcome(await rewound.get_result()) is PlaceOutcome.ALREADY_PRESENT
+        await pipeline.settle()
+
+        assert access.copies == 1
+        assert await _placement(ledger_engine, stored) == registered
+        assert await _audit(ledger_engine, registered) == trail
+
+
+async def _copy_step(workflow_id: str) -> int:
+    """Return the step at which `workflow_id` copied."""
+    steps = await DBOS.list_workflow_steps_async(workflow_id, load_output=False)
+    [step] = [s["function_id"] for s in steps if s["function_name"].endswith("_copy_step")]
+    return step
+
+
+async def test_an_old_copy_that_fails_after_the_placement_registered_leaves_it_registered(
+    settings: Settings,
+    ledger_engine: AsyncEngine,
+    tmp_path: Path,
+    daemon: tuple[RcloneClient, str],
+) -> None:
+    """Rewound from its copy, the old attempt ends superseded: no failure, no audit entry."""
+    access = ScriptedAccess()
+    content = media.photo(seed=int(uuid4().int % 97))
+    async with _pipeline(settings, ledger_engine, tmp_path, daemon[1], access) as pipeline:
+        _, stored = await _ingested(pipeline, daemon, content, at_source=content)
+        request = _request(stored, _destination())
+        assert await _place(pipeline, request) is PlaceOutcome.COPIED
+        registered = await _placement(ledger_engine, stored)
+        assert registered.state is PlacementState.PRESENT
+        trail = await _audit(ledger_engine, registered)
+
+        access.out_of_space = 1_000
+        workflow_id = placement_workflow_for(request)
+        rewound = await DBOS.rewind_workflow_async(
+            workflow_id, start_step=await _copy_step(workflow_id)
+        )
+        assert PlaceOutcome(await rewound.get_result()) is PlaceOutcome.SUPERSEDED
+        await pipeline.settle()
+
+        assert access.copies > 1
+        assert await _placement(ledger_engine, stored) == registered
+        assert await _audit(ledger_engine, registered) == trail
+
+
+async def test_an_old_attempt_rewound_over_a_copy_registered_elsewhere_is_verified_anew(
+    settings: Settings,
+    ledger_engine: AsyncEngine,
+    tmp_path: Path,
+    daemon: tuple[RcloneClient, str],
+) -> None:
+    """The re-copy records the next attempt rather than collapse onto a finished verification."""
+    access = ScriptedAccess()
+    content = media.photo(seed=int(uuid4().int % 97))
+    async with _pipeline(settings, ledger_engine, tmp_path, daemon[1], access) as pipeline:
+        _, stored = await _ingested(pipeline, daemon, content, at_source=content)
+        destination = _destination()
+        first = _request(stored, destination)
+        assert await _place(pipeline, first) is PlaceOutcome.COPIED
+        moved = _request(stored, destination, attempt=1, locator="/Photos/moved/IMG_0001.JPG")
+        assert await _place(pipeline, moved) is PlaceOutcome.COPIED
+        elsewhere = await _placement(ledger_engine, stored)
+        assert (elsewhere.state, elsewhere.locator, elsewhere.attempts) == (
+            PlacementState.PRESENT,
+            moved.locator,
+            1,
+        )
+
+        rewound = await DBOS.rewind_workflow_async(placement_workflow_for(first), start_step=1)
+        assert PlaceOutcome(await rewound.get_result()) is PlaceOutcome.COPIED
+        await pipeline.settle()
+
+        placement = await _placement(ledger_engine, stored)
+        assert (placement.state, placement.locator, placement.attempts) == (
+            PlacementState.PRESENT,
+            _LOCATOR,
+            2,
+        )
+        assert await pipeline.workflows(f"verify:{placement.id}:") == [
+            (verification_workflow_for(placement.id, attempt), "SUCCESS") for attempt in range(3)
+        ]

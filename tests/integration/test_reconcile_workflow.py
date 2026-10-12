@@ -490,6 +490,35 @@ async def test_retention_follows_the_strongly_verified_copies(
         assert decisions[-1].details["strong_copies"] == library
 
 
+async def test_decisions_record_the_policy_version_they_applied(
+    settings: Settings,
+    ledger_engine: AsyncEngine,
+    tmp_path: Path,
+    daemon: tuple[RcloneClient, str],
+    activate: Activate,
+    names: tuple[str, str],
+) -> None:
+    """The retention decision and the copy a run starts name the policy version in force."""
+    library, _ = names
+    await activate(_policy(library, retention=(RetentionRule(name="keep"),)))
+    async with ledger_engine.begin() as connection:
+        version = (await active_policy(ConfigurationRepository(connection))).version
+    access = ScriptedAccess()
+    remotes = WorkspaceRemotes(daemon[1])
+    async with transfer_pipeline(settings, ledger_engine, tmp_path, remotes, access) as pipeline:
+        content_id = (await _ingest(pipeline, daemon))[_DATED]
+        since = await _high_water(ledger_engine)
+
+        await _reconcile(pipeline, content_id)
+
+        [decided] = await _audit(ledger_engine, content_id, AuditEntryType.RETENTION_DECIDED, since)
+        assert (decided.details["rule"], decided.details["policy_version"]) == ("keep", version)
+        [started] = await _audit(ledger_engine, content_id, AuditEntryType.PLACEMENT_STARTED, since)
+        assert started.details["policy_version"] == version
+        assert started.details["destination_root"] == f"/{library}"
+        assert started.details["destination_account"] == DESTINATION_ACCOUNT
+
+
 async def test_a_render_failure_opens_one_review_item_and_places_nothing(
     settings: Settings,
     ledger_engine: AsyncEngine,

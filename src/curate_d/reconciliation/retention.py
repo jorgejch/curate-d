@@ -48,9 +48,10 @@ class RetentionDecision(DomainModel):
         default=(), description="Destinations holding a present copy too weakly verified to count."
     )
 
-    def audit_details(self) -> dict[str, AuditValue]:
-        """The decision as audit entry details."""
+    def audit_details(self, *, policy_version: int | None = None) -> dict[str, AuditValue]:
+        """Return the decision as audit entry details, with the policy version it applied."""
         return {
+            "policy_version": policy_version,
             "outcome": self.outcome.value,
             "reason": self.reason,
             "rule": self.rule,
