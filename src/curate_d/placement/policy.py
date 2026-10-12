@@ -4,7 +4,7 @@ from typing import Final
 
 from pydantic import Field
 
-from curate_d.configuration.documents import parse_policy
+from curate_d.configuration.documents import parse_policy, parse_stored_policy
 from curate_d.configuration.store import ConfigurationRepository
 from curate_d.domain import SEED_POLICY, ConfigurationKind, DomainModel, PlacementPolicy
 
@@ -25,4 +25,4 @@ async def active_policy(configurations: ConfigurationRepository) -> ActivePolicy
     )
     stored = await configurations.active(ConfigurationKind.POLICY)
     assert stored is not None
-    return ActivePolicy(version=version, policy=parse_policy(stored[1]))
+    return ActivePolicy(version=version, policy=parse_stored_policy(stored[1]))

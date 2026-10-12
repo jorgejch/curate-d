@@ -3,8 +3,7 @@
 Destinations are named targets. Placement rules map facts to the destinations content
 should have copies at; every matching rule contributes, so policies compose. Retention is
 separate: an original is kept unless a retention rule explicitly permits release, and even
-then only once enough strongly verified copies exist — counting the original itself when
-the policy says it is one of the copies.
+then only once the required number of strongly verified copies exist besides the original.
 """
 
 from collections.abc import Mapping
@@ -73,8 +72,12 @@ class RetentionRule(DomainModel):
     name: str = Field(min_length=1)
     when: Mapping[str, str] = Field(default_factory=dict)
     release_source: bool = False
-    required_copies: int = Field(default=2, ge=1)
-    source_counts_as_copy: bool = True
+    required_copies: int = Field(
+        default=2,
+        ge=1,
+        description="Strongly verified copies at destinations, not counting the original, "
+        "needed before release is permitted; the original is retained until they exist.",
+    )
     minimum_level: VerificationLevel = VerificationLevel.STRONG_IN_TRANSIT
 
     @model_validator(mode="after")
