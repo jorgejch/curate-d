@@ -57,7 +57,7 @@ Source retention SHALL be determined by policy evaluation, not by transfer compl
 
 ### Requirement: Verification gate on source release
 
-A source SHALL NOT be released unless the governing policy is satisfied by placements at one of the two strong verification levels (in-transit or common-hash). Placements at weaker verification levels SHALL NOT count toward that requirement.
+A source SHALL NOT be released unless the governing policy is satisfied by placements at one of the two strong verification levels (in-transit or common-hash). Placements at weaker verification levels SHALL NOT count toward that requirement, and neither SHALL placements at destinations the policy in force does not define, which nothing checks any more.
 
 #### Scenario: Requirement met by strongly verified copies
 - **WHEN** the policy permits release and enough strongly verified placements exist
@@ -71,3 +71,8 @@ A source SHALL NOT be released unless the governing policy is satisfied by place
 #### Scenario: Verification level downgraded
 - **WHEN** a placement's verification level is later found to be weaker than recorded
 - **THEN** the source release decision is re-evaluated against the corrected levels
+
+#### Scenario: Copy at a destination no longer in the policy
+- **WHEN** a present placement is at a destination the policy in force no longer defines, so no destination check verifies it
+- **THEN** it does not count toward the requirement, whatever its verification level
+- **AND** the decision names that destination among the copies that did not count

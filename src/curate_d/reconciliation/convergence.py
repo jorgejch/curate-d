@@ -9,8 +9,9 @@ attempts are still running, which the workflow asks DBOS for between the two.
 
 Content awaiting a person — other than for a render failure, which a template change may
 resolve — is left alone, and content a person excluded is never placed. The retention
-decision is re-derived from the placements as they stand, and reported only when it
-differs from the last one recorded.
+decision is re-derived from the placements as they stand, counting only those at
+destinations the policy defines (the ones the destination checks still verify), and is
+reported only when it differs from the last one recorded.
 """
 
 from collections.abc import Sequence
@@ -111,7 +112,11 @@ async def evaluate(
         p.destination_name: p
         for p in await PlacementRepository(connection).find_for_content_object(content_object_id)
     }
-    retention = decide_retention(policy.retention_for(facts), list(existing.values()))
+    retention = decide_retention(
+        policy.retention_for(facts),
+        list(existing.values()),
+        destinations=policy.destination_names(),
+    )
     last = await ReconciliationStore(connection).last_retention(content_object_id)
     changed = last != (retention.outcome.value, retention.reason)
     evaluation = nothing.model_copy(update={"retention": retention if changed else None})

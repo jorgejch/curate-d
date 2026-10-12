@@ -123,6 +123,14 @@ class PlacementPolicy(DomainModel):
         """A destination by name."""
         return next((d for d in self.destinations if d.name == name), None)
 
+    def destination_names(self) -> frozenset[str]:
+        """Return the names of the destinations this policy defines.
+
+        These are the destinations the destination checks verify, so only copies at them
+        count toward source release.
+        """
+        return frozenset(d.name for d in self.destinations)
+
     def desired_destinations(self, facts: Facts) -> tuple[str, ...]:
         """Every destination a matching rule asks for, in a stable order."""
         wanted = {
