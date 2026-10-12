@@ -19,7 +19,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from curate_d.config import Settings
-from curate_d.domain import HashAlgorithm, StrongFingerprint
+from curate_d.domain import HashAlgorithm, StrongFingerprint, derive_destination_id
 from curate_d.runtime.dbos_app import SYSTEM_SCHEMA, configure
 from curate_d.runtime.queues import (
     DEFAULT_CPU_CONCURRENCY,
@@ -300,7 +300,9 @@ async def test_enqueueing_the_same_placement_twice_runs_it_once(
     # A fresh digest per run: a workflow id is permanent, so a fixed one would collide
     # with an earlier run instead of demonstrating collapse within this one.
     fingerprint = StrongFingerprint(algorithm=HashAlgorithm.SHA256, digest=uuid4().hex * 2)
-    workflow_id = placement_workflow_id(fingerprint, "archive")
+    workflow_id = placement_workflow_id(
+        fingerprint, derive_destination_id("pcloud", "acct-1", "/Archive")
+    )
 
     handles = []
     for _ in range(3):

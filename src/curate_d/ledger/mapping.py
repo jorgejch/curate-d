@@ -22,6 +22,8 @@ from curate_d.domain import (
     ChangeSignal,
     ContentObject,
     ContentObjectId,
+    DestinationId,
+    DestinationIdentity,
     HashAlgorithm,
     PerceptualFingerprint,
     Placement,
@@ -246,6 +248,7 @@ def to_placement(row: Row) -> Placement:
     return Placement(
         id=PlacementId(identifier(row, "id")),
         content_object_id=ContentObjectId(identifier(row, "content_object_id")),
+        destination_id=DestinationId(identifier(row, "destination_id")),
         destination_name=text(row, "destination_name"),
         locator=text(row, "locator"),
         template_version=text(row, "template_version"),
@@ -269,6 +272,7 @@ def placement_values(placement: Placement) -> ColumnValues:
     return {
         "id": placement.id,
         "content_object_id": placement.content_object_id,
+        "destination_id": placement.destination_id,
         "destination_name": placement.destination_name,
         "locator": placement.locator,
         "template_version": placement.template_version,
@@ -280,6 +284,25 @@ def placement_values(placement: Placement) -> ColumnValues:
         "observed_destination_digest": placement.observed_destination_digest,
         "source_object_id": placement.source_object_id,
         "attempts": placement.attempts,
+    }
+
+
+def to_destination(row: Row) -> DestinationIdentity:
+    """Translate a destinations row into a `DestinationIdentity`."""
+    return DestinationIdentity(
+        provider=Provider(text(row, "provider")),
+        account=text(row, "account"),
+        root_path=text(row, "root_path"),
+    )
+
+
+def destination_values(destination: DestinationIdentity) -> ColumnValues:
+    """Flatten a `DestinationIdentity` into column values for insert."""
+    return {
+        "id": destination.id,
+        "provider": destination.provider.value,
+        "account": destination.account,
+        "root_path": destination.root_path,
     }
 
 

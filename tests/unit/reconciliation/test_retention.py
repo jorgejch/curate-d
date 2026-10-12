@@ -4,8 +4,10 @@ from uuid import uuid4
 
 from curate_d.domain import (
     ContentObjectId,
+    DestinationIdentity,
     Placement,
     PlacementState,
+    Provider,
     RetentionRule,
     VerificationLevel,
 )
@@ -18,14 +20,24 @@ def _copy(
     destination: str,
     level: VerificationLevel = VerificationLevel.STRONG_COMMON_HASH,
     state: PlacementState = PlacementState.PRESENT,
+    *,
+    account: str = "acct-1",
 ) -> Placement:
-    """A placement of the content at `destination`."""
+    """A placement of the content at `destination`, in `account`."""
     return Placement.build(
         content_object_id=_CONTENT,
+        destination_id=_identity(destination, account).id,
         destination_name=destination,
         locator=f"/{destination}/a.jpg",
         template_version="seed-1",
     ).model_copy(update={"state": state, "verification_level": level})
+
+
+def _identity(destination: str, account: str = "acct-1") -> DestinationIdentity:
+    """Return the identity a destination named `destination` points at in `account`."""
+    return DestinationIdentity(
+        provider=Provider.PCLOUD, account=account, root_path=f"/{destination}"
+    )
 
 
 def _releasing(required: int = 2, *, counts: bool = True) -> RetentionRule:
@@ -118,3 +130,23 @@ def test_the_rules_minimum_level_is_respected() -> None:
     decision = decide_retention(rule, [_copy("a", VerificationLevel.STRONG_IN_TRANSIT)])
     assert decision.outcome is RetentionOutcome.RETAIN
     assert decision.audit_details()["minimum_level"] == "strong_common_hash"
+
+
+def test_copies_are_named_with_their_identity() -> None:
+    """A decision says where each copy is, not only the name it was placed under."""
+    copies = [_copy("a"), _copy("b", VerificationLevel.WEAK)]
+    identities = {p.destination_id: _identity(p.destination_name) for p in copies}
+    decision = decide_retention(_releasing(2), copies, identities)
+    assert decision.strong_copies == ("a [pcloud:acct-1:/a]",)
+    assert decision.weak_copies == ("b [pcloud:acct-1:/b]",)
+
+
+def test_two_copies_under_one_name_are_listed_apart() -> None:
+    """One name moved to another account holds two copies; the decision tells them apart."""
+    copies = [_copy("lib"), _copy("lib", account="acct-2")]
+    identities = {
+        copies[0].destination_id: _identity("lib"),
+        copies[1].destination_id: _identity("lib", "acct-2"),
+    }
+    decision = decide_retention(_releasing(2), copies, identities)
+    assert decision.strong_copies == ("lib [pcloud:acct-1:/lib]", "lib [pcloud:acct-2:/lib]")

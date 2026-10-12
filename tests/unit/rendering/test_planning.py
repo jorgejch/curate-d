@@ -11,6 +11,7 @@ from curate_d.domain import (
     MediaKind,
     Placement,
     StrongFingerprint,
+    derive_destination_id,
 )
 from curate_d.rendering.planning import (
     PlacementPlan,
@@ -66,6 +67,7 @@ def test_an_occupied_locator_is_resolved_in_the_plan() -> None:
     """Different content at the locator moves this content aside."""
     other = Placement.build(
         content_object_id=ContentObjectId(uuid4()),
+        destination_id=derive_destination_id("pcloud", "acct-1", "/Organized"),
         destination_name="archive",
         locator="/Organized/Photos/2026/2026-09/first.jpg",
         template_version="seed-1",

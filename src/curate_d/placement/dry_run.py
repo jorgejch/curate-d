@@ -12,7 +12,9 @@ is reported with the reason, and evaluation continues with the rest.
 A locator the run has already proposed for other content counts as taken, as it would be
 once that copy started: the later content is given its suffixed locator, just as a real
 start claims one. Content is evaluated in id order, so the earlier id keeps the rendered
-locator; in a real run whichever copy starts first does.
+locator; in a real run whichever copy starts first does. Locators are taken per
+destination identity, as in a real start: two destinations sharing a template in
+different accounts each get the plain locator.
 """
 
 from collections.abc import Sequence
@@ -28,6 +30,7 @@ from curate_d.domain import (
     ContentObject,
     ContentObjectId,
     DestinationConfig,
+    DestinationId,
     DomainModel,
     DryRunOutcome,
     Facts,
@@ -41,7 +44,15 @@ from curate_d.domain import (
     VerificationLevel,
 )
 from curate_d.ledger import ContentObjectRepository, PlacementRepository, SourceObjectRepository
-from curate_d.ledger.mapping import Row, identifier, moment, opt_moment, opt_text, text
+from curate_d.ledger.mapping import (
+    Row,
+    identifier,
+    moment,
+    opt_identifier,
+    opt_moment,
+    opt_text,
+    text,
+)
 from curate_d.ledger.tables import content_objects, dry_run_items, dry_runs, provider_connections
 from curate_d.placement.pipeline import claim
 from curate_d.placement.verification import expected_level
@@ -82,6 +93,9 @@ class DryRunItem(DomainModel):
     run_id: UUID
     content_object_id: ContentObjectId
     destination_name: str = NO_DESTINATION
+    destination_id: DestinationId | None = Field(
+        default=None, description="None for content that did not reach rendering."
+    )
     outcome: DryRunOutcome
     paths: tuple[str, ...] = ()
     facts: Facts | None = None
@@ -143,13 +157,13 @@ class DryRunStore:
         )
 
     async def proposed_for(
-        self, run_id: UUID, destination_name: str, locator: str
+        self, run_id: UUID, destination_id: DestinationId, locator: str
     ) -> ContentObjectId | None:
         """The content a run already proposed `locator` for at a destination, if any."""
         value = await self._connection.scalar(
             select(dry_run_items.c.content_object_id).where(
                 dry_run_items.c.run_id == run_id,
-                dry_run_items.c.destination_name == destination_name,
+                dry_run_items.c.destination_id == destination_id,
                 dry_run_items.c.locator == locator,
                 dry_run_items.c.outcome == DryRunOutcome.PROPOSED.value,
             )
@@ -172,6 +186,7 @@ def _item_values(item: DryRunItem) -> dict[str, object]:
         "run_id": item.run_id,
         "content_object_id": item.content_object_id,
         "destination_name": item.destination_name,
+        "destination_id": item.destination_id,
         "outcome": item.outcome.value,
         "paths": "\n".join(item.paths),
         "facts": None if item.facts is None else item.facts.model_dump(mode="json"),
@@ -188,10 +203,12 @@ def _to_item(row: Row) -> DryRunItem:
     level = row["expected_level"]
     facts = row["facts"]
     values = row["rejected_values"]
+    destination_id = opt_identifier(row, "destination_id")
     return DryRunItem(
         run_id=identifier(row, "run_id"),
         content_object_id=ContentObjectId(identifier(row, "content_object_id")),
         destination_name=text(row, "destination_name"),
+        destination_id=None if destination_id is None else DestinationId(destination_id),
         outcome=DryRunOutcome(text(row, "outcome")),
         paths=tuple(paths.split("\n")) if paths else (),
         facts=None if facts is None else Facts.model_validate(facts, strict=False),
@@ -234,9 +251,9 @@ class Evaluator:
         self._policy = policy
         self._destinations = tuple(destinations)
         self._hosts: dict[tuple[Provider, str], str | None] = {}
-        # Locators proposed while this evaluator ran, by destination; earlier pages' are
-        # read back from the run's recorded items.
-        self._proposed: dict[str, dict[str, ContentObjectId]] = {}
+        # Locators proposed while this evaluator ran, by destination identity; earlier
+        # pages' are read back from the run's recorded items.
+        self._proposed: dict[DestinationId, dict[str, ContentObjectId]] = {}
 
     async def evaluate(self, content_object_id: ContentObjectId) -> list[DryRunItem]:
         """Items for one content object; a failure is reported as an item, never raised."""
@@ -305,6 +322,7 @@ class Evaluator:
                 run_id=self._run_id,
                 content_object_id=content_object_id,
                 destination_name=destination.name,
+                destination_id=destination.id,
                 outcome=DryRunOutcome.RENDER_FAILED,
                 paths=paths,
                 facts=facts,
@@ -312,7 +330,7 @@ class Evaluator:
             if isinstance(outcome, RenderFailure):
                 items.append(base.model_copy(update={"reason": outcome.reason}))
                 continue
-            locator, present = await self._claim(outcome, content)
+            locator, present = await self._claim(outcome, content, destination)
             items.append(
                 base.model_copy(
                     update={
@@ -326,7 +344,9 @@ class Evaluator:
             )
         return items
 
-    async def _claim(self, planned: PlacementPlan, content: ContentObject) -> tuple[str, bool]:
+    async def _claim(
+        self, planned: PlacementPlan, content: ContentObject, destination: DestinationConfig
+    ) -> tuple[str, bool]:
         """The locator a copy would claim, given what this run proposed; and if it is there.
 
         Returns:
@@ -334,8 +354,8 @@ class Evaluator:
         """
         if planned.already_present:
             return planned.locator, True
-        destination = planned.destination_name
-        proposed = self._proposed.setdefault(destination, {})
+        destination_id = destination.id
+        proposed = self._proposed.setdefault(destination_id, {})
         placements_repo = PlacementRepository(self._connection)
         store = DryRunStore(self._connection)
         own: set[str] = set()
@@ -343,20 +363,21 @@ class Evaluator:
         async def holder(candidate: str) -> Placement | None:
             """The ledger's occupant of `candidate`, else other content this run put there."""
             occupant = await placements_repo.find_at_locator(
-                destination_name=destination, locator=candidate
+                destination_id=destination_id, locator=candidate
             )
             if occupant is not None:
                 if occupant.content_object_id == content.id:
                     own.add(candidate)
                 return occupant
             other = proposed.get(candidate) or await store.proposed_for(
-                self._run_id, destination, candidate
+                self._run_id, destination_id, candidate
             )
             if other is None or other == content.id:
                 return None
             return Placement.build(
                 content_object_id=other,
-                destination_name=destination,
+                destination_id=destination_id,
+                destination_name=destination.name,
                 locator=candidate,
                 template_version=planned.rendered.template_version,
             )

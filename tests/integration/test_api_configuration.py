@@ -15,11 +15,13 @@ from curate_d.configuration.store import ConfigurationRepository
 from curate_d.domain import (
     ConfigurationKind,
     ContentObject,
+    DestinationConfig,
     HashAlgorithm,
     Placement,
+    Provider,
     StrongFingerprint,
 )
-from curate_d.ledger import ContentObjectRepository, PlacementRepository
+from curate_d.ledger import ContentObjectRepository, DestinationRepository, PlacementRepository
 from curate_d.ledger.tables import content_objects, placements
 from curate_d.rendering.templates import parse_templates
 
@@ -115,10 +117,18 @@ async def test_a_template_change_leaves_existing_placements_untouched(
                 media_type="image/jpeg",
             )
         )
+        library = DestinationConfig(
+            name=f"lib-{uuid.uuid4().hex[:8]}",
+            provider=Provider.PCLOUD,
+            account="acct-1",
+            root_path="/lib",
+        )
+        await DestinationRepository(connection).ensure(library.identity)
         placed = await PlacementRepository(connection).upsert(
             Placement.build(
                 content_object_id=content.id,
-                destination_name=f"lib-{uuid.uuid4().hex[:8]}",
+                destination_id=library.id,
+                destination_name=library.name,
                 locator="/lib/Photos/2024/x.jpg",
                 template_version="seed-1",
             )
