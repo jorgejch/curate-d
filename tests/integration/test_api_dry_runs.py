@@ -115,8 +115,7 @@ async def test_a_started_run_exports_facts_locators_and_unresolved_items(
 async def test_a_draft_policy_is_dry_run_without_being_activated(
     settings: Settings, ledger_engine: AsyncEngine, tmp_path: Path, http: TestClient
 ) -> None:
-    """Locators come from the draft's rules, a rule matching nothing counts zero, and the
-    policy in force stays as it was."""
+    """The draft's rules give the locators, an unmatched rule counts zero, the policy holds."""
     async with running_pipeline(settings, ledger_engine, tmp_path) as pipeline:
         camera = ("Canon", f"EOS {pipeline.account}")
         pipeline.pcloud.file(

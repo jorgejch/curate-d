@@ -610,7 +610,8 @@ dry_runs = Table(
         "policy_version",
         Integer,
         nullable=True,
-        comment="The policy version in force that the run evaluated with; null for a draft.",
+        comment="The policy version in force that the run evaluated with; null for a draft "
+        "or named destinations.",
     ),
     Column(
         "policy_rules",

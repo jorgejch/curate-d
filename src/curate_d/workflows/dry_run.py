@@ -97,7 +97,11 @@ async def _open_tx(request: DryRunRequest, now: datetime) -> DryRunContext:
     """
     connection = await current().datasource.sql_session().connection()
     configurations = ConfigurationRepository(connection)
-    templates = request.templates or (await active_templates(configurations)).templates
+    templates = (
+        request.templates
+        if request.templates is not None
+        else (await active_templates(configurations)).templates
+    )
     taxonomy = await active_taxonomy(configurations)
     version: int | None = None
     if request.policy is not None:
