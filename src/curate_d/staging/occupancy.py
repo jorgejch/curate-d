@@ -22,14 +22,16 @@ collides with a reclaimed one waits behind the transfer. Reviewed and kept on 20
 the lock to admission plus registration, with a reservation row carrying the interval
 between them — is a different design whose crash semantics need their own evidence.
 Revisit when measured upload concurrency, rather than speculation, shows it binding. The
-`staging.writer_lock_held` and `staging.reader_lock_wait` log events are that measurement
-(see `docs/staging.md`).
+`staging.writer_lock_held` (with its `entry_claims`), `staging.reader_lock_wait` and
+`staging.reservation_phases` log events are that measurement, the last splitting a
+reservation's hold with `AdmissionReport.admission_seconds` (see `docs/staging.md`).
 
 What this bounds is active staged content. It is not a provider billing cap: incomplete
 multipart uploads bill separately and are reclaimed by explicit abort and the backend's
 residual cleanup, and are reported rather than folded into this budget.
 """
 
+import time
 from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, replace
@@ -120,11 +122,17 @@ class _Reclamation:
 
 @dataclass(frozen=True)
 class AdmissionReport:
-    """The accepted reservation and the state of staging it was accepted against."""
+    """The accepted reservation and the state of staging it was accepted against.
+
+    `admission_seconds` is the time from acquiring the writer lock to the admission
+    decision: measuring, reclaiming and evicting. The wait for the lock is not in it; the
+    holding's `staging.writer_lock_held` event already reports that.
+    """
 
     occupancy: OccupancyReport
     reserved_bytes: int
     reclaimed: ReclaimReport
+    admission_seconds: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -282,7 +290,8 @@ class StagingOccupancy:
                 rather than consuming capacity nobody reserved.
 
         Yields:
-            The accepted reservation and the occupancy it was accepted against.
+            The accepted reservation, the occupancy it was accepted against and how long
+            the decision took under the lock.
 
         Raises:
             ValueError: A negative declaration.
@@ -294,6 +303,7 @@ class StagingOccupancy:
                 committed, so the entries eviction already deleted stay unregistered.
         """
         async with self._index.writer_lock("occupancy.reserve"):
+            started = time.monotonic()
             try:
                 admitted = await self._admit(declared_max_bytes)
             except StagingError as refusal:
@@ -302,7 +312,7 @@ class StagingOccupancy:
                 # registrations for objects this pass has already deleted.
                 deferred = refusal
             else:
-                yield admitted
+                yield replace(admitted, admission_seconds=time.monotonic() - started)
                 return
         raise deferred
 
