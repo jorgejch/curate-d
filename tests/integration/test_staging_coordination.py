@@ -31,6 +31,12 @@ pytestmark = pytest.mark.integration
 
 _WHEN = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
 
+# Two valid staging keys whose four-byte entry lock ids collide.
+_COLLIDING_KEYS: tuple[StagingKey, StagingKey] = (
+    StagingKey(f"{0xEAE7:032x}"),
+    StagingKey(f"{0x12388:032x}"),
+)
+
 # Long enough that a lock wait is not mistaken for scheduling latency, short enough that
 # the suite does not pay for it when the lock behaves.
 _BLOCKED_FOR = 0.25
@@ -81,6 +87,11 @@ class KeyIssuer:
         key = StagingKey(uuid4().hex)
         self.issued.append(key)
         return key
+
+    def colliding_pair(self) -> tuple[StagingKey, StagingKey]:
+        """Return two distinct keys that share an entry lock, remembered for cleanup."""
+        self.issued.extend(_COLLIDING_KEYS)
+        return _COLLIDING_KEYS
 
 
 def staged(
@@ -403,6 +414,53 @@ async def test_a_reader_behind_a_reclaiming_writer_reports_its_wait(
     held = [e for e in events if e["event"] == "staging.writer_lock_held"]
     assert [(e["caller"], e["entry_claims"]) for e in held] == [("occupancy.reserve", 1)]
     assert held[0]["held_seconds"] >= _BLOCKED_FOR
+
+
+async def test_a_reader_waits_behind_a_writer_that_claimed_only_a_colliding_key(
+    index: PostgresStagingCacheIndex, other_index: PostgresStagingCacheIndex, new_key: KeyIssuer
+) -> None:
+    """On the blocking reader side a lock collision is a stall, not a skip."""
+    reclaimed, read_key = new_key.colliding_pair()
+    winner = staged(read_key)
+    orphan = staged(reclaimed)
+    await index.register(winner)
+    store = FakeObjectStore(orphan.object_key)
+
+    async def read() -> StagedObject | None:
+        async with index.hold_for_download(read_key) as held:
+            return held
+
+    with capture_logs() as events:
+        async with other_index.writer_lock("test"):
+            assert await other_index.reconcile(store) == 1
+            reader = asyncio.create_task(read())
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(reader), timeout=_BLOCKED_FOR)
+        assert await reader == winner
+
+    assert store.deleted == [orphan.object_key]
+    waits = [e for e in events if e["event"] == "staging.reader_lock_wait"]
+    assert [(e["staging_key"], e["registered"]) for e in waits] == [(str(read_key), True)]
+    assert waits[0]["wait_seconds"] > _BLOCKED_FOR / 2
+
+
+async def test_a_reader_of_a_colliding_key_makes_reconciliation_skip_an_orphan(
+    index: PostgresStagingCacheIndex, other_index: PostgresStagingCacheIndex, new_key: KeyIssuer
+) -> None:
+    """On the writer's try-lock side a collision is an unnecessary skip, retried next pass."""
+    reclaimed, read_key = new_key.colliding_pair()
+    winner = staged(read_key)
+    orphan = staged(reclaimed)
+    await index.register(winner)
+    store = FakeObjectStore(orphan.object_key)
+
+    async with index.hold_for_download(read_key) as held:
+        assert held == winner
+        assert await other_index.reconcile(store) == 0
+        assert store.deleted == []
+
+    assert await other_index.reconcile(store) == 1
+    assert store.deleted == [orphan.object_key]
 
 
 async def test_an_unblocked_reader_of_a_missing_key_reports_a_miss(
