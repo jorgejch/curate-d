@@ -5,6 +5,7 @@ lead to. Real Tesseract runs in the integration suite.
 """
 
 import io
+import zlib
 from uuid import uuid4
 
 import pytesseract
@@ -339,3 +340,80 @@ def test_a_pdf_image_counts_only_the_size_it_declares_as_numbers() -> None:
     assert local._pixels(stream) == 200
     stream[NameObject("/Height")] = TextStringObject("20")
     assert local._pixels(stream) == 0
+
+
+def test_a_pdf_jpeg_is_sized_by_its_own_header_not_its_declaration() -> None:
+    """A 120 MP JPEG declared as 10 x 10 is refused before decode, not decoded in full."""
+    content = media.pdf_with_image_stream(
+        media.jpeg_header(12_000, 10_000), image_filter="/DCTDecode", width=10, height=10
+    )
+    ocr = _CountingOcr("recibo")
+    extracted = _extract(content, "/scan.pdf", ocr)
+    assert ocr.calls == 0
+    assert extracted.limited is ExtractionLimit.DECODE_BUDGET
+    assert extracted.refused
+
+
+def test_a_pdf_jpeg_past_pillows_ceiling_is_refused_not_raised() -> None:
+    """A JPEG stating 450 MP inside a PDF ends as the decode budget, never an error."""
+    content = media.pdf_with_image_stream(
+        media.jpeg_header(30_000, 15_000), image_filter="/DCTDecode", width=10, height=10
+    )
+    ocr = _CountingOcr("recibo")
+    extracted = _extract(content, "/scan.pdf", ocr)
+    assert ocr.calls == 0
+    assert extracted.limited is ExtractionLimit.DECODE_BUDGET
+
+
+def test_pillows_ceiling_reached_during_a_pdf_decode_is_the_decode_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A size `_pixels` could not see, refused by Pillow while decoding, is recorded too."""
+    monkeypatch.setattr(local, "_pixels", lambda xobject: 0)
+    content = media.pdf_with_image_stream(
+        media.jpeg_header(30_000, 15_000), image_filter="/DCTDecode", width=10, height=10
+    )
+    ocr = _CountingOcr("recibo")
+    extracted = _extract(content, "/scan.pdf", ocr)
+    assert ocr.calls == 0
+    assert extracted.limited is ExtractionLimit.DECODE_BUDGET
+
+
+@pytest.mark.parametrize(
+    ("stream", "image_filter"),
+    [
+        # Inflates past pypdf's output limit: LimitReachedError.
+        pytest.param(b"", "/FlateDecode", id="flate-bomb"),
+        # Needs jbig2dec, which the worker image does not ship: DependencyError.
+        pytest.param(b"\x00" * 64, "/JBIG2Decode", id="jbig2"),
+    ],
+)
+def test_a_pdf_image_pypdf_refuses_yields_no_text_rather_than_an_error(
+    stream: bytes, image_filter: str
+) -> None:
+    """pypdf's own refusals skip the image like any undecodable one."""
+    if image_filter == "/FlateDecode":
+        stream = zlib.compress(b"\x00" * 80_000_000)
+    content = media.pdf_with_image_stream(
+        stream, image_filter=image_filter, width=2000, height=2000
+    )
+    ocr = _CountingOcr("recibo")
+    extracted = _extract(content, "/scan.pdf", ocr)
+    assert ocr.calls == 0
+    assert extracted.source is TextSource.NONE
+    assert extracted.limited is None
+
+
+def test_a_pdf_whose_text_pypdf_refuses_to_inflate_yields_no_metadata() -> None:
+    """A content stream past pypdf's decompression limit reads as a broken PDF."""
+    content = media.pdf_with_image_stream(
+        b"",
+        image_filter="/DCTDecode",
+        width=1,
+        height=1,
+        content=zlib.compress(b" " * 80_000_000),
+        content_filter="/FlateDecode",
+    )
+    metadata = extract_metadata(io.BytesIO(content), "application/pdf", local_timezone=None)
+    assert metadata.page_count is None
+    assert metadata.text_sample is None

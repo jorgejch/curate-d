@@ -30,7 +30,7 @@ here. They should state this budget and cite the measurement below.
 | Reduced-scale JPEG decode | long edge 512 (perceptual hash), 1024 (thumbnail), 4096 (OCR) | constants beside each caller | A JPEG decodes at 1/2, 1/4 or 1/8 scale where the caller needs no more; the budget applies to what is decoded. Other formats decode in full. |
 | Image handed to Tesseract | long edge 4096 | `_OCR_EDGE`, `classification/local.py` | Larger scans are reduced first; the full decode is released before Tesseract starts. |
 | PDF pages OCRed | 3 | `_OCR_PAGES` | Later pages are not read; recorded as `page_cap`. |
-| Embedded images OCRed per PDF | 6 | `_OCR_IMAGES` | Later images are not read; recorded as `image_cap`. A page image whose declared size exceeds the pixel budget is skipped before its stream is decoded (`decode_budget`). |
+| Embedded images OCRed per PDF | 6 | `_OCR_IMAGES` | Later images are not read; recorded as `image_cap`. A page image over the pixel budget is skipped before its stream is decoded (`decode_budget`): it is sized by its declared `/Width` × `/Height` and, for a JPEG or JPEG 2000 stream, by the size its own header states, whichever is larger. An image pypdf refuses to decode (past its decompression limits, or JBIG2 with no `jbig2dec` installed) is skipped like an undecodable one. |
 | Tesseract time per image | 60 s | `_OCR_TIMEOUT_SECONDS` | The process is killed; text read so far is kept and OCR stops (`ocr_timeout`). |
 | Extracted text | 20,000 characters | `_MAX_TEXT` | OCR stops once reached; plain text is read to it (`text_cap`). |
 | Text shown to the remote tier | 3,000 characters | `_EXCERPT_CHARS`, `classification/prepare.py` | The excerpt is cut. |
@@ -106,8 +106,9 @@ One per question of issue #8.
    MiB through draft mode). The issue proposed 64 MP from 4 bytes a pixel and no idle
    allowance; measured, that is about 350 MiB a decode, so the default is 32 MP.
 2. **OCR of long scanned PDFs.** Stop at the text cap, the first 3 pages and 6 embedded
-   images; check each page image's declared size before decoding it; 60 s of Tesseract an
-   image, keeping the text read before a timeout; record the limit.
+   images; check each page image's size before decoding it (the declared size, and the
+   header of a JPEG or JPEG 2000 stream, which need not agree); 60 s of Tesseract an image,
+   keeping the text read before a timeout; record the limit.
 3. **Maximum file size.** The mechanism, not the threshold: a file that can never be staged
    fails at once with its size and the bound, before any provider read, with no backoff.
    `ingest_max_bytes` is the hook for a per-file ceiling and is unset. Such a file has no

@@ -91,6 +91,11 @@ The cheap tiers SHALL read content only within configured limits: every image de
 - **THEN** metadata extraction yields no metadata and the image is treated as above the budget
 - **AND** the classification workflow completes rather than failing
 
+#### Scenario: Embedded image larger than its document declares
+- **WHEN** an image embedded in a document states, in its own encoded header, more pixels than the document declares for it
+- **THEN** it is held to the budget by the larger of the two sizes, before it is decoded
+- **AND** an embedded image the document library refuses to decode is skipped like an undecodable one, without failing the classification
+
 #### Scenario: Long scanned document
 - **WHEN** a document without a text layer has more pages or embedded images than OCR reads, or its text reaches the cap
 - **THEN** OCR stops at the first limit reached

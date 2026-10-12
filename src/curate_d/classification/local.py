@@ -16,17 +16,18 @@ Whichever limit cut the text short is recorded as `limited` and carried into the
 so a truncation is never silent.
 """
 
+import io
 import re
 from collections.abc import Callable, Iterator, Mapping
 from enum import StrEnum
 from typing import BinaryIO, Final
 
 import pytesseract
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 from pydantic import Field
 from pypdf import PageObject, PdfReader
-from pypdf.errors import PdfReadError
-from pypdf.generic import DictionaryObject, StreamObject
+from pypdf.errors import DependencyError, PyPdfError
+from pypdf.generic import ArrayObject, DictionaryObject, StreamObject
 
 from curate_d.classification.deterministic import ClassificationInput, TierResult
 from curate_d.content.decode import (
@@ -50,6 +51,13 @@ _OCR_TIMEOUT_SECONDS: Final = 60
 _OCR_EDGE: Final = 4096
 # Form XObjects nested deeper than this are not searched for page images.
 _FORM_DEPTH: Final = 2
+# Filters whose stream is a whole image file (JPEG, JPEG 2000). Its own header states the
+# size it decodes to, whatever the image dictionary declares.
+_SELF_SIZED_FILTERS: Final = frozenset({"/DCTDecode", "/JPXDecode"})
+# What pypdf raises for an image it will not decode: a stream past its output limits
+# (`LimitReachedError`), empty image data, or a missing decoder such as jbig2dec
+# (`DependencyError`, which is not a `PyPdfError`).
+_PDF_DECODE_ERRORS: Final = (PyPdfError, DependencyError)
 # Words of OCR text that make an image a scanned document rather than a photo.
 SCAN_WORD_THRESHOLD: Final = 25
 
@@ -185,8 +193,8 @@ def _page_images(resources: object, depth: int = 0) -> Iterator[StreamObject]:
             yield from _page_images(nested.get_object() if nested is not None else None, depth + 1)
 
 
-def _pixels(xobject: StreamObject) -> int:
-    """Return the pixel count an image XObject declares, without decoding it.
+def _declared_pixels(xobject: StreamObject) -> int:
+    """Return the pixel count an image XObject's dictionary declares.
 
     An image declaring no usable size counts as none: pypdf cannot decode it either.
     """
@@ -198,6 +206,37 @@ def _pixels(xobject: StreamObject) -> int:
     if not isinstance(width, int) or not isinstance(height, int):
         return 0
     return width * height
+
+
+def _last_filter(xobject: StreamObject) -> object:
+    """Return the filter applied last when decoding the stream, the one yielding the image."""
+    filters = xobject.get("/Filter")
+    if isinstance(filters, ArrayObject):
+        return filters[-1] if filters else None
+    return filters
+
+
+def _pixels(xobject: StreamObject) -> int:
+    """Return the pixel count an image XObject decodes to, without decoding its pixels.
+
+    A raw or Flate stream decodes to its declared `/Width` x `/Height`. A JPEG or JPEG 2000
+    stream decodes to whatever its own header states, which the dictionary need not match,
+    so that header is read too and the larger count wins: a 10 x 10 declaration cannot
+    smuggle a 120 MP JPEG past the budget.
+    """
+    declared = _declared_pixels(xobject)
+    if _last_filter(xobject) not in _SELF_SIZED_FILTERS:
+        return declared
+    try:
+        with Image.open(io.BytesIO(xobject.get_data())) as embedded:
+            stated = embedded.width * embedded.height
+    except Image.DecompressionBombError:
+        # Pillow will not open it: it states more than twice Pillow's ceiling.
+        return 2 * (Image.MAX_IMAGE_PIXELS or 0) + 1
+    except (UnidentifiedImageError, OSError, ValueError, *_PDF_DECODE_ERRORS):
+        # No readable header; decoding fails on it the same way and is caught there.
+        stated = 0
+    return max(declared, stated)
 
 
 def _ocr_pdf(
@@ -250,12 +289,23 @@ def _ocr_pdf(
             except OcrTimeoutError:
                 limited = ExtractionLimit.OCR_TIMEOUT
                 break
-            except (PdfReadError, OSError, ValueError, KeyError, TypeError, NotImplementedError):
+            except Image.DecompressionBombError:
+                # Pillow's own ceiling, should a size reach it that `_pixels` could not see.
+                limited = ExtractionLimit.DECODE_BUDGET
+                continue
+            except (
+                *_PDF_DECODE_ERRORS,
+                OSError,
+                ValueError,
+                KeyError,
+                TypeError,
+                NotImplementedError,
+            ):
                 # One image pypdf or Pillow cannot decode does not end the others' OCR.
                 continue
             text.append(page_text)
             length += len(page_text) + 1
-    except (PdfReadError, OSError, ValueError, KeyError, TypeError, AttributeError):
+    except (*_PDF_DECODE_ERRORS, OSError, ValueError, KeyError, TypeError, AttributeError):
         # A malformed PDF yields what was read before it broke, never an error.
         pass
     finally:

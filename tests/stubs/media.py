@@ -150,6 +150,70 @@ def png_header(width: int, height: int, *, comment: str = "") -> bytes:
     )
 
 
+def jpeg_header(width: int, height: int) -> bytes:
+    """Return a small greyscale JPEG whose frame header states `width` by `height`.
+
+    Like `png_header`, the size a decoder reads is a lie the bytes cannot back.
+    """
+    buffer = io.BytesIO()
+    Image.new("L", (16, 16), 255).save(buffer, format="JPEG")
+    data = bytearray(buffer.getvalue())
+    index = 2
+    while index < len(data):
+        marker = data[index + 1]
+        (length,) = struct.unpack(">H", data[index + 2 : index + 4])
+        if marker in (0xC0, 0xC1, 0xC2):
+            data[index + 5 : index + 9] = struct.pack(">HH", height, width)
+            break
+        index += 2 + length
+    return bytes(data)
+
+
+def pdf_with_image_stream(
+    stream: bytes,
+    *,
+    image_filter: str,
+    width: int,
+    height: int,
+    content: bytes = b"q 612 0 0 792 0 0 cm /Im0 Do Q",
+    content_filter: str | None = None,
+) -> bytes:
+    """Return a one-page PDF drawing one image XObject whose stream is `stream`, as given.
+
+    The dictionary declares `width` by `height` and `image_filter`; nothing checks that the
+    stream agrees, which is the point: a PDF may declare one size and carry another, or
+    carry streams pypdf refuses to decode. `content` is the page's content stream, stored
+    under `content_filter` when one is given.
+    """
+    content_entry = b"" if content_filter is None else b"/Filter " + content_filter.encode()
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+        b"/Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>",
+        b"<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace /DeviceGray "
+        b"/BitsPerComponent 8 /Filter %s /Length %d >>\nstream\n"
+        % (width, height, image_filter.encode(), len(stream))
+        + stream
+        + b"\nendstream",
+        b"<< /Length %d %s >>\nstream\n" % (len(content), content_entry) + content + b"\nendstream",
+    ]
+    out = io.BytesIO()
+    out.write(b"%PDF-1.4\n")
+    offsets = []
+    for number, body in enumerate(objects, start=1):
+        offsets.append(out.tell())
+        out.write(b"%d 0 obj\n" % number + body + b"\nendobj\n")
+    xref = out.tell()
+    out.write(b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1))
+    for offset in offsets:
+        out.write(b"%010d 00000 n \n" % offset)
+    out.write(
+        b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objects) + 1, xref)
+    )
+    return out.getvalue()
+
+
 def mp3() -> bytes:
     """An MP3 with an ID3 header; enough to be sniffed as audio."""
     return b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\xff\xfb\x90\x00" * 64

@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 from PIL import Image, UnidentifiedImageError
 from pydantic import AwareDatetime, Field
 from pypdf import PdfReader
-from pypdf.errors import PdfReadError
+from pypdf.errors import DependencyError, PyPdfError
 
 from curate_d.content import decode  # noqa: F401 - registers the HEIF opener
 from curate_d.domain import DomainModel, GeoPoint
@@ -189,7 +189,12 @@ _TEXT_SAMPLE_CHARS: Final = 4000
 
 
 def pdf_metadata(handle: BinaryIO) -> EmbeddedMetadata:
-    """The information dictionary and leading text of a PDF. A broken PDF yields nothing."""
+    """Return the information dictionary and leading text of a PDF.
+
+    A broken PDF yields nothing, as does one pypdf refuses to read: a stream past its
+    decompression limits (`LimitReachedError`) or one needing a decoder that is not
+    installed (`DependencyError`).
+    """
     handle.seek(0)
     try:
         reader = PdfReader(handle)
@@ -200,7 +205,7 @@ def pdf_metadata(handle: BinaryIO) -> EmbeddedMetadata:
             sample += page.extract_text() or ""
             if len(sample) >= _TEXT_SAMPLE_CHARS:
                 break
-    except (PdfReadError, OSError, ValueError, KeyError):
+    except (PyPdfError, DependencyError, OSError, ValueError, KeyError):
         return EmbeddedMetadata()
     finally:
         handle.seek(0)

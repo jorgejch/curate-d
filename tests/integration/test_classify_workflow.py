@@ -314,6 +314,64 @@ async def test_an_image_over_the_decode_budget_goes_to_review_without_a_remote_c
         )
 
 
+def _pdf_jpeg_bomb(tag: str) -> bytes:
+    """Return a PDF declaring a 10 x 10 page image whose JPEG header states 450 MP."""
+    return media.pdf_with_image_stream(
+        media.jpeg_header(30_000, 15_000),
+        image_filter="/DCTDecode",
+        width=10,
+        height=10,
+        content=b"q 612 0 0 792 0 0 cm /Im0 Do Q % " + tag.encode(),
+    )
+
+
+def _pdf_jbig2(tag: str) -> bytes:
+    """Return a PDF whose page image is JBIG2, which the worker image has no decoder for."""
+    return media.pdf_with_image_stream(
+        b"\x00" * 64,
+        image_filter="/JBIG2Decode",
+        width=100,
+        height=100,
+        content=b"q 612 0 0 792 0 0 cm /Im0 Do Q % " + tag.encode(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("build", "reason"),
+    [
+        # The JPEG's own size is over the budget, whatever the PDF declares: nothing read.
+        pytest.param(_pdf_jpeg_bomb, ReviewReason.RESOURCE_LIMIT, id="jpeg-larger-than-declared"),
+        # Skipped as undecodable: no limit applied, so names go to the remote tier.
+        pytest.param(_pdf_jbig2, None, id="jbig2-without-decoder"),
+    ],
+)
+async def test_a_pdf_image_the_cpu_worker_will_not_decode_never_fails_classification(
+    settings: Settings,
+    ledger_engine: AsyncEngine,
+    tmp_path: Path,
+    build: Callable[[str], bytes],
+    reason: ReviewReason | None,
+) -> None:
+    """A scanned PDF's page image refused or undecodable ends the workflow SUCCESS."""
+    remote = StubRemote(answered("Home"))
+    async with running_pipeline(settings, ledger_engine, tmp_path, remote=remote) as pipeline:
+        pipeline.pcloud.file(f"/misc/scan-{pipeline.account}.pdf", build(pipeline.account))
+        await _scan(pipeline)
+        [source] = await pipeline.sources()
+        [stored] = await pipeline.contents()
+        assert stored.media_type == "application/pdf"
+        [(_, status)] = await pipeline.workflows(classification_workflow_id(stored.fingerprint))
+        assert status == "SUCCESS"
+        item = await _review(ledger_engine, source.content_object_id)
+        if reason is None:
+            assert len(remote.models) == 1
+            return
+        assert item is not None
+        assert item.reason is reason
+        assert "decode_budget" in item.detail
+        assert remote.models == []
+
+
 async def test_repeat_content_reuses_its_classification(
     settings: Settings, ledger_engine: AsyncEngine, tmp_path: Path
 ) -> None:
