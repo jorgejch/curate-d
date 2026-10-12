@@ -11,9 +11,14 @@ from uuid import uuid4
 import pytest
 from structlog.testing import capture_logs
 
-from curate_d.staging.errors import StagingCapacityExhaustedError, StagingIntegrityError
+from curate_d.staging.errors import (
+    StagingCapacityExhaustedError,
+    StagingIntegrityError,
+    StagingObjectStoreError,
+)
 from curate_d.staging.keys import StagingKey
 from curate_d.staging.objects import StagedObject
+from curate_d.staging.occupancy import OccupancyReport
 from curate_d.staging.publish import Sha1Reader, publish
 from tests.stubs.staging import MemoryStaging
 
@@ -165,6 +170,28 @@ async def test_a_refused_reservation_reports_no_phases(tmp_path: Path) -> None:
     [event] = phase_events(events)
     assert event["outcome"] == "refused"
     assert event["error"] == "StagingCapacityExhaustedError"
+    assert event["admission_seconds"] is None
+    for phase in _PHASES:
+        assert event[phase] is None
+    assert (event["evicted"], event["protected"], event["orphans_deleted"]) == (None,) * 3
+
+
+async def test_an_admission_that_fails_to_measure_reports_no_admission(
+    staging: MemoryStaging, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without an admitted reservation there is no admission time or reclamation to report."""
+
+    async def unmeasurable() -> OccupancyReport:
+        """Fail the measurement admission decides against."""
+        raise StagingObjectStoreError("listing failed")
+
+    monkeypatch.setattr(staging.writer.occupancy, "measure", unmeasurable)
+
+    with capture_logs() as events, pytest.raises(StagingObjectStoreError):
+        await publish(staging.writer, _KEY, io.BytesIO(b"abc"), size_bytes=3)
+
+    [event] = phase_events(events)
+    assert (event["outcome"], event["error"]) == ("failed", "StagingObjectStoreError")
     assert event["admission_seconds"] is None
     for phase in _PHASES:
         assert event[phase] is None
