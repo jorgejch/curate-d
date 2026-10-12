@@ -8,7 +8,8 @@ version they used, which is how a later change stays distinguishable in the ledg
 Activations of one kind serialize on an advisory lock keyed by the kind. A change whose
 validity depends on another kind holds that kind's lock in shared mode while it reads it
 (`lock_shared`): policy and template activations do so on the taxonomy, so a taxonomy
-activation either precedes their check or sees them.
+activation either precedes their check or sees them. A change derived from the version in
+force, such as a taxonomy promotion, takes the kind's lock before reading it (`lock`).
 """
 
 from collections.abc import Callable, Mapping
@@ -127,10 +128,7 @@ class ConfigurationRepository:
             ConfigurationError: the document is invalid; nothing was written.
         """
         parsed = check_document(kind, document, validator)
-        await self._connection.execute(
-            text("SELECT pg_advisory_xact_lock(:class, hashtext(:kind))"),
-            {"class": _LOCK_CLASS, "kind": kind.value},
-        )
+        await self.lock(kind)
         latest = await self._connection.scalar(
             select(func.coalesce(func.max(configurations.c.version), 0)).where(
                 configurations.c.kind == kind.value
@@ -152,6 +150,17 @@ class ConfigurationRepository:
             )
         )
         return version
+
+    async def lock(self, kind: ConfigurationKind) -> None:
+        """Hold off every other activation and shared hold of `kind` until the transaction ends.
+
+        `activate` takes it before storing. A caller that derives the next version from the
+        one in force takes it before reading, so no activation lands between the two.
+        """
+        await self._connection.execute(
+            text("SELECT pg_advisory_xact_lock(:class, hashtext(:kind))"),
+            {"class": _LOCK_CLASS, "kind": kind.value},
+        )
 
     async def lock_shared(self, kind: ConfigurationKind) -> None:
         """Hold off activations of `kind` until the caller's transaction ends.

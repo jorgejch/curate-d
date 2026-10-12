@@ -73,10 +73,15 @@ async def promote(
 ) -> ActiveTaxonomy:
     """Promote values into the taxonomy as a new active version.
 
+    The taxonomy's lock is taken before the version in force is read, so a taxonomy
+    activated meanwhile is extended rather than overwritten: promotion only ever adds
+    values, and so never orphans a policy or template condition unreported.
+
     Raises:
         ConfigurationError: the promoted taxonomy is invalid; the current one stays.
         ValueError: a subcategory is promoted without its category.
     """
+    await configurations.lock(ConfigurationKind.TAXONOMY)
     current = await active_taxonomy(configurations)
     extended = promote_all(current.taxonomy, values)
     if extended == current.taxonomy:

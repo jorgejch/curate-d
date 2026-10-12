@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from curate_d.api.app import create_app
 from curate_d.api.configuration import LedgerConfiguration
+from curate_d.classification.taxonomy import active_taxonomy, promote
 from curate_d.config import Settings
 from curate_d.configuration.consistency import taxonomy_in_force
 from curate_d.configuration.documents import parse_policy, parse_taxonomy
@@ -21,6 +22,7 @@ from curate_d.domain import (
     ContentObject,
     HashAlgorithm,
     Placement,
+    RejectedValue,
     StrongFingerprint,
     TaxonomyField,
 )
@@ -341,3 +343,43 @@ async def test_a_policy_activation_waits_for_a_taxonomy_activation_in_flight(
         await holder.commit()
     activated = await asyncio.wait_for(waiting, timeout=10)
     assert activated.orphaned == ()
+
+
+async def test_a_promotion_extends_a_taxonomy_activated_while_it_waited(
+    ledger_engine: AsyncEngine, restore: None
+) -> None:
+    """Promotion reads the taxonomy under its lock, so it never drops a value just added."""
+    added, promoted = (f"{name}-{uuid.uuid4().hex[:8]}" for name in ("Added", "Promoted"))
+
+    async def promoting() -> object:
+        """Promote `promoted` in a transaction of its own."""
+        async with ledger_engine.begin() as connection:
+            return await promote(
+                ConfigurationRepository(connection),
+                [RejectedValue(field=TaxonomyField.CATEGORY, value=promoted)],
+                promoted_by="test",
+            )
+
+    async with ledger_engine.begin() as connection:
+        # Stored first, so promotion has a version in force to read without waiting.
+        await active_taxonomy(ConfigurationRepository(connection))
+    async with ledger_engine.connect() as holder:
+        await holder.begin()
+        repository = ConfigurationRepository(holder)
+        taxonomy = await taxonomy_in_force(repository)
+        await repository.activate(
+            ConfigurationKind.TAXONOMY,
+            taxonomy.promote(TaxonomyField.CATEGORY, added).model_dump(mode="json"),
+            parse_taxonomy,
+            created_by="test",
+        )
+        waiting = asyncio.create_task(promoting())
+        await asyncio.sleep(0.5)
+        assert not waiting.done()
+        await holder.commit()
+    await asyncio.wait_for(waiting, timeout=10)
+
+    async with ledger_engine.connect() as connection:
+        in_force = await taxonomy_in_force(ConfigurationRepository(connection))
+    assert in_force.accepts(TaxonomyField.CATEGORY, added)
+    assert in_force.accepts(TaxonomyField.CATEGORY, promoted)
