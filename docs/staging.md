@@ -170,6 +170,11 @@ held all the same. That is #1's case: collecting an orphan locks its key, and a 
 the key's registered winner waits until the holding ends. A claim a reader refused is
 not counted. `entry_claims` together with `held_seconds` is the window #1 describes.
 
+A `staging.reader_lock_wait` names the key the reader asked for, not the key the writer
+claimed. Entry locks are a four-byte hash of the key, so a reader can wait behind a writer
+that claimed only a colliding key, or an orphan under the reader's own live key. A long
+wait on a key no worker was touching is that case, not a fault.
+
 `staging.reservation_phases` splits the `occupancy.reserve` hold. `admission_seconds`
 runs from acquiring the lock to the admission decision (measuring, reclaiming and
 evicting). `upload_seconds` is the upload and `registration_seconds` the row insert.

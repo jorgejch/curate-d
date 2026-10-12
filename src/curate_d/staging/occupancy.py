@@ -24,7 +24,11 @@ between them — is a different design whose crash semantics need their own evid
 Revisit when measured upload concurrency, rather than speculation, shows it binding. The
 `staging.writer_lock_held` (with its `entry_claims`), `staging.reader_lock_wait` and
 `staging.reservation_phases` log events are that measurement, the last splitting a
-reservation's hold with `AdmissionReport.admission_seconds` (see `docs/staging.md`).
+reservation's hold with `AdmissionReport.admission_seconds` (see `docs/staging.md`). The
+entry locks alone can be narrowed without the reservation row: reclaiming in a writer-lock
+holding that commits before the admitting one starts ends them at that commit, while the
+writer lock still covers admission, upload and registration. That too waits for the
+measurement (#1, #4).
 
 What this bounds is active staged content. It is not a provider billing cap: incomplete
 multipart uploads bill separately and are reclaimed by explicit abort and the backend's
