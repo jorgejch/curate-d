@@ -5,6 +5,8 @@ capture time, a coordinate, a sentence of text — is visible where the test sta
 """
 
 import io
+import struct
+import zlib
 from datetime import datetime
 
 from PIL import Image, ImageDraw, ImageFont
@@ -123,6 +125,29 @@ def scanned_document(lines: list[str], *, fmt: str = "PNG") -> bytes:
     buffer = io.BytesIO()
     image.save(buffer, format=fmt)
     return buffer.getvalue()
+
+
+def _png_chunk(kind: bytes, data: bytes) -> bytes:
+    """Return one PNG chunk: length, type, data and CRC."""
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+
+def png_header(width: int, height: int, *, comment: str = "") -> bytes:
+    """Return a PNG that declares `width` by `height` RGB pixels but carries almost none.
+
+    A decoder learns the size from the header alone, so this is how a decompression bomb
+    looks before anything is decoded: a few dozen bytes claiming gigabytes of pixels.
+    `comment` goes in a text chunk, to make the bytes distinct without changing the image.
+    """
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    text = _png_chunk(b"tEXt", b"Comment\x00" + comment.encode()) if comment else b""
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", header)
+        + text
+        + _png_chunk(b"IDAT", zlib.compress(b"\x00" * 16))
+        + _png_chunk(b"IEND", b"")
+    )
 
 
 def mp3() -> bytes:

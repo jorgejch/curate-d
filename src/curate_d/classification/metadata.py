@@ -17,7 +17,7 @@ from pydantic import AwareDatetime, Field
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
-from curate_d.content import perceptual  # noqa: F401 - registers the HEIF opener
+from curate_d.content import decode  # noqa: F401 - registers the HEIF opener
 from curate_d.domain import DomainModel, GeoPoint
 
 # EXIF tag numbers (CIPA DC-008).
@@ -124,13 +124,17 @@ def _exif_time(value: object, offset: tzinfo | None, local: tzinfo | None) -> da
 
 
 def image_metadata(handle: BinaryIO, *, local_timezone: str | None) -> EmbeddedMetadata:
-    """EXIF metadata of an image. A file no decoder opens yields nothing."""
+    """Return the EXIF metadata of an image. A file no decoder opens yields nothing.
+
+    Reading EXIF decodes no pixels, so no decode budget applies; an image so large that
+    Pillow refuses even to open it yields nothing, like an undecodable one.
+    """
     handle.seek(0)
     local = ZoneInfo(local_timezone) if local_timezone else None
     try:
         with Image.open(handle) as image:
             exif = image.getexif()
-    except (UnidentifiedImageError, OSError, ValueError):
+    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError):
         return EmbeddedMetadata()
     finally:
         handle.seek(0)

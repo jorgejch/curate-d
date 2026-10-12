@@ -1,1 +1,1 @@
-"""Content inspection: media type sniffing and perceptual fingerprints."""
+"""Content inspection: media type sniffing, bounded image decoding, perceptual fingerprints."""

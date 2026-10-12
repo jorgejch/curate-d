@@ -228,6 +228,22 @@ async def test_an_undecodable_image_keeps_its_type_without_a_perceptual_fingerpr
     assert inspection.note is not None
 
 
+async def test_an_image_over_the_decode_budget_keeps_its_type_with_a_note(
+    files: PCloudFiles, pcloud: StubPCloud, staging: MemoryStaging, tmp_path: Path
+) -> None:
+    """Refused before decoding: no perceptual fingerprint, and the note says why."""
+    stub = pcloud.file("/photo.png", _png())
+    result = await _stage(files, staging, _source(stub), tmp_path)
+    assert result.staged is not None
+
+    inspection = await inspect_staged(staging.reader.reader, result.staged, max_pixels=10)
+
+    assert inspection.media_type == "image/png"
+    assert inspection.perceptual is None
+    assert inspection.note is not None
+    assert "decode budget is 10 pixels" in inspection.note
+
+
 async def test_a_superseded_version_is_not_read_as_if_it_were_current(
     files: PCloudFiles, pcloud: StubPCloud, staging: MemoryStaging, tmp_path: Path
 ) -> None:
