@@ -66,12 +66,12 @@ how it is made idempotent, whether it belongs in a workflow — against the `dbo
 - The DBOS system tables live in the ledger database (schema `dbos`), and separating them
   is not supported: one dump must hold the whole state, and a ledger write and a workflow
   enqueue must stay able to commit in one transaction (`DBOSClient.enqueue_in_transaction`;
-  nothing uses it today, the executor management layer of #5 may). There is no setting for a separate system database; `runtime/dbos_app.py`
+  nothing uses it; the executor operations of #5 call `DBOSClient` directly and do not). There is no setting for a separate system database; `runtime/dbos_app.py`
   derives the system URL from `ledger_database_url`. Test fixtures `DBOS.destroy()`,
   configure and launch; they never call `DBOS.reset_system_database`. Use unique workflow
   IDs per test instead.
-- `retention.py`, `sweep.py`, `queues.py`, `conductor.py`, `worker/main.py` and
-  `api/throughput.py` use private DBOS internals (`_workflow_commands.garbage_collect`,
+- `retention.py`, `sweep.py`, `queues.py`, `conductor.py`, `worker/main.py`,
+  `api/throughput.py` and `api/executors.py` use private DBOS internals (`_workflow_commands.garbage_collect`,
   `_sys_db.reenqueue_for_recovery`, `dbos._utils.INTERNAL_QUEUE_NAME`, `dbos._queue`,
   `_active_workflows_set` to tell whether the drain left workflows running before the
   executor lease is released; `dbos._error.DBOSException`,
@@ -86,6 +86,13 @@ how it is made idempotent, whether it belongs in a workflow — against the `dbo
   auditing nothing. Conductor sends a write to every connected executor under fresh request
   IDs and cannot route one to our stable executor IDs after a rollout; see the
   `add-optional-dbos-conductor` design. Don't reopen a write path through Conductor.
+- Operator commands go through the API (`api/executors.py`, `python -m curate_d.manage`;
+  runbook `docs/executors.md`): cancel, resume, fork and trigger call `DBOSClient` directly,
+  idempotent per request ID; recovery runs as the `recover_executor` workflow on the
+  maintenance queue. None writes an audit entry; the record is DBOS lineage and the
+  `operator_command.*` / `recovery_sweep.*` logs. Workers hold their version's lease shared
+  (`runtime/lease.py`); recovery forks a version's work only once it can take that lease
+  exclusively.
 - Schedule reconciliation runs in one system-database transaction that holds the
   schedule authority (`pg_advisory_xact_lock`), so losing the backend loses the lock and
   every pending write together. DBOS has no public way to write schedules on a caller's

@@ -4,8 +4,9 @@ DBOS is used as a library, not a service: its system tables live in the ledger d
 in their own schema (`SYSTEM_SCHEMA`). That is a requirement, not a default. One dump of
 the database then holds the whole state: ledger rows, audit trail, checkpoints and queues
 together. It also keeps a transactional enqueue possible (`DBOSClient.enqueue_in_transaction`
-needs the caller's connection to reach the system tables): nothing uses one today, and the
-executor management layer (#5) may. There is no setting for a separate system database.
+needs the caller's connection to reach the system tables): nothing uses one, and the
+executor operations (#5) call `DBOSClient` directly and do not. There is no setting for a
+separate system database.
 
 Exactly-once ledger writes are a different mechanism: the datasource's tracking table
 commits in the same transaction as the ledger row (see datasource.py).

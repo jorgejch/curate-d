@@ -127,9 +127,10 @@ DBOS upgrade adds a type the table does not classify.
   when the same ID reconnects. curate.d's executor IDs are stable pod names, so after a
   rollout Conductor finds no executor on a workflow's version, and a resume fails with 503.
 
-Every write stays available by hand, through `DBOSClient` or the `dbos workflow` CLI against
-the ledger database. Do it there, and record who did what and why. A management layer for
-operator commands of our own is an open question (issue #5).
+The writes curate.d supports go through its own API instead: cancel, resume, fork, trigger
+and the recovery of a vanished executor, each idempotent per request ID, from
+`python -m curate_d.manage` or the `/executors`, `/workflows` and `/schedules` routes. See
+the [executor runbook](executors.md).
 
 An earlier design ran cancel, resume and the schedule commands as audited command workflows.
 The `workflow_command_issued` and `workflow_command_completed` entry types stay valid and
@@ -171,8 +172,9 @@ executor is warned about once per connection, and the repeats log at debug.
 - **A removed pod's work waits.** Each worker recovers its own PENDING workflows when it
   restarts, and Conductor's `RECOVERY` is refused, so a pod that never comes back (a
   StatefulSet scaled down after a hard kill) leaves its PENDING workflows until its identity
-  returns. Bring the identity back (scale up, let it drain, scale down) as issue #5
-  describes. A clean scale-down drains first and leaves nothing behind.
+  returns or they are recovered through the API (`recover <id>`, see the
+  [executor runbook](executors.md)). A clean scale-down drains first and leaves nothing
+  behind.
 - **The gate rests on private DBOS internals.** Upstream is moving `dbos._conductor` into the
   commercial `dbos-enterprise` package (dbos-transact-py PR #873). A DBOS upgrade that ships
   it fails the tests that pin those internals, and would stop the workers whatever the flag:

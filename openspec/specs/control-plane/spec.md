@@ -114,3 +114,47 @@ The control plane SHALL allow a user to view and adjust the concurrency and rate
 - **WHEN** a user submits a limit that is negative or otherwise outside the permitted range
 - **THEN** the adjustment is rejected with an error identifying the permitted range
 - **AND** the previously effective limit remains in force
+
+### Requirement: Executor operations
+
+The control plane SHALL report every DBOS executor's liveness and pending work, and SHALL let an operator recover a vanished executor's work and cancel, resume, fork or trigger workflows, each command idempotent on a request ID the client supplies. Liveness SHALL be read from the executor leases in `pg_locks` without taking any lock. No operator command SHALL write an audit entry: the record is DBOS's own lineage and status, and log lines naming the operator and the request ID.
+
+#### Scenario: Executor view
+- **WHEN** a user lists the executors
+- **THEN** each identity that holds a lease or owns PENDING or ENQUEUED work is reported as live or not, with its pending work by version, queue and status and the age of its oldest PENDING workflow
+- **AND** an identity owning PENDING work without a lease is reported as stranded
+- **AND** queue depth per queue and partition, and each application version with whether it is the latest and whether a worker runs it, are reported
+
+#### Scenario: Recovery refused for a live executor
+- **WHEN** a user asks to recover an executor whose lease is held
+- **THEN** the request is refused as a conflict and no workflow is re-enqueued or forked
+
+#### Scenario: Vanished executor recovered
+- **WHEN** a user asks to recover an executor whose lease is free
+- **THEN** its PENDING workflows on the current version are re-enqueued under their own identifiers while the recovery holds its lease
+- **AND** repeating the request with the same request ID returns the same report, and a new request re-enqueues nothing more
+
+#### Scenario: Recovery refused while an older version runs
+- **WHEN** recovery finds work pinned to an older version and a worker of that version holds its version lease, or a live executor without a version lease owns PENDING work on it
+- **THEN** that work is skipped and reported with the versions still running, and nothing of that version is forked
+- **AND** when nothing else was recovered the request is answered as a conflict naming those versions
+- **AND** once that version's workers are gone, a new request forks the work onto the current version and cancels each original after its successor is confirmed
+
+#### Scenario: Resume of PENDING work refused
+- **WHEN** a user asks to resume a PENDING workflow
+- **THEN** the request is refused as a conflict, because the workflow may still be running on its executor, and the workflow is left unchanged
+- **AND** a workflow that is SUCCESS, ERROR or ENQUEUED is likewise refused unless the same request already resumed it
+
+#### Scenario: Fork and trigger idempotent per request
+- **WHEN** a user repeats a fork or a schedule trigger with the same request ID
+- **THEN** exactly one successor or one scheduled run exists, and the repeat reports the existing one as unchanged
+- **AND** a fork whose derived successor identifier is held by an unrelated workflow is refused as a conflict
+
+#### Scenario: Unknown target
+- **WHEN** a user names an executor, workflow, schedule or recovery that does not exist
+- **THEN** the control plane reports that it does not exist and changes nothing
+
+#### Scenario: No audit entries
+- **WHEN** any operator command or recovery completes, is refused or fails
+- **THEN** no audit entry is written
+- **AND** the operator and request ID appear in the `operator_command.*` log lines

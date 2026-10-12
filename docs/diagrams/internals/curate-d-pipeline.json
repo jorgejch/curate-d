@@ -627,7 +627,7 @@
       "col": 4,
       "type": "backend",
       "label": "run_recovery_sweep",
-      "sublabel": "library \u00b7 not wired",
+      "sublabel": "operator recover",
       "width": 135,
       "sources": [
         {

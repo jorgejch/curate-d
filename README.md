@@ -78,7 +78,8 @@ Durable execution is [DBOS](https://docs.dbos.dev/) 3.2, chosen as a library rat
 service so that ledger writes go through a datasource transaction and are exactly-once
 across crashes and replays. An optional connection to DBOS Conductor, off by default, shows
 workflows in the DBOS Console, read-only: every write from the Console is refused
-([guide](docs/conductor.md)).
+([guide](docs/conductor.md)). Operator commands and the recovery of a vanished executor go
+through the control plane instead ([executor runbook](docs/executors.md)).
 
 Designed for Kubernetes. No GPU on any node — all local
 inference is CPU-only.
@@ -159,7 +160,7 @@ RustFS; OVH is verified separately against the real buckets.
   tests/integration/  tests that need the local stack: Postgres, RustFS and the rclone sidecar
   migrations/       Alembic migrations for the ledger schema
   docker/           container image build
-  docs/             staging, Conductor and reset guides, verification records, diagrams
+  docs/             staging, Conductor, executor and reset guides, verification records, diagrams
   infrastructure/   local stack config and operator scripts; deployment manifests
                     are kept outside this repository
   .github/          image publishing and unit-test workflows
