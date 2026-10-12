@@ -62,6 +62,12 @@ The system SHALL record an append-only audit entry for every classification deci
 #### Scenario: Decision recorded with provenance
 - **WHEN** a classification or retention decision is made
 - **THEN** an audit entry records the decision, the inputs it was based on, and which tier or rule produced it
+- **AND** a retention decision records the version of the placement policy it applied
+
+#### Scenario: Placement entries carry their evidence
+- **WHEN** a copy starts, or its verification concludes
+- **THEN** the entry records the attempt and the source's version marker at copy time
+- **AND** a started copy's entry also records the destination's provider, account and root in force when it started, and the policy version it was requested under, so the entry explains the decision after the destination or policy is redefined and after workflow history is pruned
 
 #### Scenario: Failed action recorded
 - **WHEN** a placement action fails
@@ -71,3 +77,27 @@ The system SHALL record an append-only audit entry for every classification deci
 - **WHEN** the ledger holds `workflow_command_issued` or `workflow_command_completed` entries recorded before the Conductor command path was removed
 - **THEN** they remain in the trail unchanged, valid under the entry-type constraint and returned by audit reads
 - **AND** no new entry of either type is written
+
+### Requirement: Audit committed with the decision
+
+Every committed decision that changes ledger state SHALL have its audit entry committed in the same ledger transaction, inside a workflow through the ledger datasource. A transaction that fails SHALL commit neither the change nor its entry. The audit trail covers decisions about files only: an operation on workflow rows, such as a rewind, a cancellation or the recovery sweep, SHALL write no audit entry of its own.
+
+#### Scenario: Decision and entry commit together
+- **WHEN** a workflow records a decision that changes the ledger
+- **THEN** the ledger change and its audit entry are committed in one datasource transaction
+- **AND** a failure of either rolls back both, so the trail never explains a change that did not happen nor misses one that did
+
+#### Scenario: Replay does not repeat an entry
+- **WHEN** a workflow is recovered after a crash, or a datasource transaction is retried
+- **THEN** a transaction that already committed is not executed again
+- **AND** its audit entry is not appended a second time
+
+#### Scenario: Rewound step re-executes
+- **WHEN** a workflow is rewound and a step that wrote a decision runs again
+- **THEN** the re-executed step appends a new audit entry for the decision it reaches, beside the original one
+- **AND** entries are never deduplicated by workflow or step, so the newest entry explains the ledger's current value
+
+#### Scenario: The rewind itself
+- **WHEN** an operator rewinds a workflow
+- **THEN** the rewind writes no audit entry
+- **AND** who ran it, from which step and why is recorded in the issue tracking the incident
