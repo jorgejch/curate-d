@@ -1,4 +1,11 @@
-"""An in-memory stand-in for advisory locks in one PostgreSQL database."""
+"""An in-memory stand-in for advisory locks in one PostgreSQL database.
+
+Models both lock modes: many sessions may hold a key shared, and an exclusive holder
+excludes every other session in either mode, as PostgreSQL's advisory locks do.
+Exclusive locks record `lease-acquired` and `lease-released`; shared locks record
+`version-shared-acquired` and `version-shared-released`, so a test can tell an executor
+key's events from a version key's.
+"""
 
 import threading
 
@@ -12,6 +19,9 @@ class FakeLockServer:
 
     def __init__(self, events: list[str] | None = None) -> None:
         self.holders: dict[int, FakeSession] = {}
+        """The exclusive holder of each key."""
+        self.shared: dict[int, set[FakeSession]] = {}
+        """The shared holders of each key."""
         self.events = events if events is not None else []
         self.sessions: list[FakeSession] = []
         self.refuse_connections = 0
@@ -31,13 +41,25 @@ class FakeLockServer:
         self.sessions.append(session)
         return session
 
-    def lease(self, executor_id: str, *, probe_interval: float = 0.01) -> ExecutorLease:
+    def lease(
+        self, executor_id: str, *, probe_interval: float = 0.01, version: str | None = None
+    ) -> ExecutorLease:
         """Return a real lease whose sessions this server provides."""
-        return ExecutorLease(executor_id, connect=self.connect, probe_interval=probe_interval)
+        return ExecutorLease(
+            executor_id, connect=self.connect, probe_interval=probe_interval, version=version
+        )
 
-    def factory(self, _settings: object, executor_id: str) -> ExecutorLease:
+    def factory(
+        self, _settings: object, executor_id: str, *, version: str | None = None
+    ) -> ExecutorLease:
         """Match the worker's lease factory signature."""
-        return self.lease(executor_id)
+        return self.lease(executor_id, version=version)
+
+    def mode(self, key: int) -> str | None:
+        """Return the mode `key` is held in, `exclusive` or `shared`, or None if free."""
+        if key in self.holders:
+            return "exclusive"
+        return "shared" if self.shared.get(key) else None
 
 
 class FakeSession:
@@ -57,22 +79,39 @@ class FakeSession:
             if self.server.refuse_locks > 0:
                 self.server.refuse_locks -= 1
                 return False
+            if self.server.shared.get(key, set()) - {self}:
+                return False
             holder = self.server.holders.setdefault(key, self)
         if holder is self:
             self.server.events.append("lease-acquired")
         return holder is self
 
     def try_lock_shared(self, key: int) -> bool:
-        raise NotImplementedError
+        self._check()
+        with self.server._mutex:
+            if self.server.refuse_locks > 0:
+                self.server.refuse_locks -= 1
+                return False
+            exclusive = self.server.holders.get(key)
+            if exclusive is not None and exclusive is not self:
+                return False
+            self.server.shared.setdefault(key, set()).add(self)
+        self.server.events.append("version-shared-acquired")
+        return True
 
     def unlock_shared(self, key: int) -> None:
-        raise NotImplementedError
+        self._check()
+        with self.server._mutex:
+            holders = self.server.shared.get(key, set())
+            if self in holders:
+                holders.discard(self)
+                self.server.events.append("version-shared-released")
 
     def holds(self, key: int) -> bool:
         self._check()
         if self.server.fail_probes:
             raise psycopg.OperationalError("server closed the connection unexpectedly")
-        return self.server.holders.get(key) is self
+        return self.server.holders.get(key) is self or self in self.server.shared.get(key, ())
 
     def unlock(self, key: int) -> None:
         self._check()
@@ -83,10 +122,12 @@ class FakeSession:
 
     def holder(self, key: int) -> str | None:
         self._check()
-        return "pid 42 (fake)" if key in self.server.holders else None
+        return "pid 42 (fake)" if self.server.mode(key) is not None else None
 
     def close(self) -> None:
         with self.server._mutex:
             for key in [key for key, holder in self.server.holders.items() if holder is self]:
                 del self.server.holders[key]
+            for holders in self.server.shared.values():
+                holders.discard(self)
         self.closed = True
