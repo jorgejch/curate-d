@@ -15,7 +15,8 @@ attempt under a new workflow identity.
 A verification belongs to the attempt `start` recorded, in its identity and its input. A
 placement rewound after an attempt failed records a later attempt when it starts again, so
 its copy gets a verification of its own rather than collapsing onto the finished one. An
-old attempt run again after a newer one started records no evidence and concludes nothing.
+old attempt run again after a newer one started records no evidence, fails nothing and
+concludes nothing.
 """
 
 from datetime import datetime
@@ -110,7 +111,8 @@ class PlaceOutcome(StrEnum):
     FAILED = "failed"
     NO_SOURCE = "no_source"
     SUPERSEDED = "superseded"
-    """A newer attempt started while this one copied; its evidence was not recorded."""
+    """A newer attempt started, or the placement concluded, while this one copied: its
+    evidence or failure was not recorded."""
 
 
 def placement_workflow_for(request: PlacementRequest) -> str:
@@ -235,16 +237,20 @@ async def _evidence_tx(placement_id: PlacementId, evidence: TransferEvidence, at
     return await PlacementStore(connection).set_evidence(placement_id, evidence, attempt=attempt)
 
 
-async def _defer_tx(placement_id: PlacementId, reason: str) -> None:
-    """Record the resource error a copy is waiting out."""
+async def _defer_tx(placement_id: PlacementId, reason: str, attempt: int) -> None:
+    """Record the resource error a copy is waiting out, while `attempt` is still copying."""
     connection = await current().datasource.sql_session().connection()
-    await defer(connection, placement_id, reason)
+    await defer(connection, placement_id, reason, attempt=attempt)
 
 
-async def _fail_tx(placement_id: PlacementId, reason: str, now: datetime) -> None:
-    """Record a copy that did not complete."""
+async def _fail_tx(placement_id: PlacementId, reason: str, attempt: int, now: datetime) -> bool:
+    """Record a copy that did not complete, while `attempt` is still the one copying.
+
+    Returns:
+        Whether the placement was failed.
+    """
     connection = await current().datasource.sql_session().connection()
-    await fail(connection, placement_id, reason, now=now)
+    return await fail(connection, placement_id, reason, attempt=attempt, now=now) is not None
 
 
 async def _conclude_tx(
@@ -299,7 +305,7 @@ async def place_content(request: PlacementRequest) -> PlaceOutcome:
             failure = str(waiting)
             logger.info("placement.waiting", placement_id=str(placement.id), reason=failure)
             await datasource.run_tx_step_async(
-                {"name": "defer_placement"}, _defer_tx, placement.id, failure
+                {"name": "defer_placement"}, _defer_tx, placement.id, failure, placement.attempts
             )
             await DBOS.sleep_async(wait)
             wait = min(wait * 2, first_wait * _MAX_WAIT_FACTOR)
@@ -312,13 +318,17 @@ async def place_content(request: PlacementRequest) -> PlaceOutcome:
             failure = str(error)
             break
     if evidence is None:
-        await datasource.run_tx_step_async(
+        failed = await datasource.run_tx_step_async(
             {"name": "fail_placement"},
             _fail_tx,
             placement.id,
             failure or "the transfer did not complete",
+            placement.attempts,
             await _placement_now_step(),
         )
+        if not failed:
+            logger.info("placement.superseded", placement_id=str(placement.id))
+            return PlaceOutcome.SUPERSEDED
         return PlaceOutcome.FAILED
     recorded = await datasource.run_tx_step_async(
         {"name": "record_evidence"}, _evidence_tx, placement.id, evidence, placement.attempts

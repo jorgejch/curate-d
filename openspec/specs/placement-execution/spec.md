@@ -75,12 +75,17 @@ Executing the same placement more than once SHALL NOT produce duplicate destinat
 
 ### Requirement: Verification bound to its attempt
 
-Each copy SHALL be verified by a verification belonging to the attempt the placement recorded when that copy started. A verification SHALL conclude only a placement still verifying that attempt's copy, checked in the transaction that records the conclusion; otherwise it SHALL change nothing and write no audit entry. Starting a copy SHALL discard the previous copy's evidence. An attempt's evidence SHALL be recorded only while that attempt is the placement's latest and still copying.
+Each copy SHALL be verified by a verification belonging to the attempt the placement recorded when that copy started. A verification SHALL conclude only a placement still verifying that attempt's copy, checked in the transaction that records the conclusion; otherwise it SHALL change nothing and write no audit entry. Starting a copy SHALL discard the previous copy's evidence. A copy started over a placement still copying, verifying or registered elsewhere, under an attempt no later than the one it records, SHALL record the next attempt. An attempt's evidence, and its failure, SHALL be recorded only while that attempt is the placement's latest and still copying.
 
 #### Scenario: A verification belongs to the attempt the start recorded
 - **WHEN** a placement attempt runs again after the placement recorded a later attempt, as after a rewind of a failed or untrusted attempt
 - **THEN** the copy is verified by a verification of the attempt recorded when it started
 - **AND** it does not collapse onto the earlier attempt's finished verification, so the placement is registered or failed rather than left verifying
+
+#### Scenario: An old attempt started over a placement that has a verification
+- **WHEN** an old attempt runs again over a placement still copying, verifying, or registered at another locator
+- **THEN** the copy records the attempt after the placement's latest
+- **AND** it is verified by a verification of that attempt, not the finished one of the attempt it replaced
 
 #### Scenario: A new copy discards the previous copy's evidence
 - **WHEN** a copy starts
@@ -95,6 +100,10 @@ Each copy SHALL be verified by a verification belonging to the attempt the place
 #### Scenario: An old attempt's copy completes late
 - **WHEN** an attempt's copy completes after a newer attempt has started
 - **THEN** its evidence is not recorded and no verification is started for it
+
+#### Scenario: An old attempt's copy fails late
+- **WHEN** an attempt's copy fails after a newer attempt has started or the placement was registered
+- **THEN** the placement is left unchanged and no audit entry is written
 
 ### Requirement: Bounded resource consumption
 

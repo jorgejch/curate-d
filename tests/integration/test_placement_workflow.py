@@ -118,6 +118,7 @@ def _request(
     *,
     attempt: int = 0,
     policy_version: int | None = None,
+    locator: str = _LOCATOR,
 ) -> PlacementRequest:
     """Place `content` at the test's destination."""
     return PlacementRequest(
@@ -129,7 +130,7 @@ def _request(
             account=_DESTINATION_ACCOUNT,
             root_path="/",
         ),
-        locator=_LOCATOR,
+        locator=locator,
         template_version="seed-1",
         size_bytes=content.size_bytes,
         attempt=attempt,
@@ -605,3 +606,78 @@ async def test_rewinding_a_registered_placement_copies_nothing(
         assert access.copies == 1
         assert await _placement(ledger_engine, stored) == registered
         assert await _audit(ledger_engine, registered) == trail
+
+
+async def _copy_step(workflow_id: str) -> int:
+    """Return the step at which `workflow_id` copied."""
+    steps = await DBOS.list_workflow_steps_async(workflow_id, load_output=False)
+    [step] = [s["function_id"] for s in steps if s["function_name"].endswith("_copy_step")]
+    return step
+
+
+async def test_an_old_copy_that_fails_after_the_placement_registered_leaves_it_registered(
+    settings: Settings,
+    ledger_engine: AsyncEngine,
+    tmp_path: Path,
+    daemon: tuple[RcloneClient, str],
+) -> None:
+    """Rewound from its copy, the old attempt ends superseded: no failure, no audit entry."""
+    access = ScriptedAccess()
+    content = media.photo(seed=int(uuid4().int % 97))
+    async with _pipeline(settings, ledger_engine, tmp_path, daemon[1], access) as pipeline:
+        _, stored = await _ingested(pipeline, daemon, content, at_source=content)
+        request = _request(stored, _destination())
+        assert await _place(pipeline, request) is PlaceOutcome.COPIED
+        registered = await _placement(ledger_engine, stored)
+        assert registered.state is PlacementState.PRESENT
+        trail = await _audit(ledger_engine, registered)
+
+        access.out_of_space = 1_000
+        workflow_id = placement_workflow_for(request)
+        rewound = await DBOS.rewind_workflow_async(
+            workflow_id, start_step=await _copy_step(workflow_id)
+        )
+        assert PlaceOutcome(await rewound.get_result()) is PlaceOutcome.SUPERSEDED
+        await pipeline.settle()
+
+        assert access.copies > 1
+        assert await _placement(ledger_engine, stored) == registered
+        assert await _audit(ledger_engine, registered) == trail
+
+
+async def test_an_old_attempt_rewound_over_a_copy_registered_elsewhere_is_verified_anew(
+    settings: Settings,
+    ledger_engine: AsyncEngine,
+    tmp_path: Path,
+    daemon: tuple[RcloneClient, str],
+) -> None:
+    """The re-copy records the next attempt rather than collapse onto a finished verification."""
+    access = ScriptedAccess()
+    content = media.photo(seed=int(uuid4().int % 97))
+    async with _pipeline(settings, ledger_engine, tmp_path, daemon[1], access) as pipeline:
+        _, stored = await _ingested(pipeline, daemon, content, at_source=content)
+        destination = _destination()
+        first = _request(stored, destination)
+        assert await _place(pipeline, first) is PlaceOutcome.COPIED
+        moved = _request(stored, destination, attempt=1, locator="/Photos/moved/IMG_0001.JPG")
+        assert await _place(pipeline, moved) is PlaceOutcome.COPIED
+        elsewhere = await _placement(ledger_engine, stored)
+        assert (elsewhere.state, elsewhere.locator, elsewhere.attempts) == (
+            PlacementState.PRESENT,
+            moved.locator,
+            1,
+        )
+
+        rewound = await DBOS.rewind_workflow_async(placement_workflow_for(first), start_step=1)
+        assert PlaceOutcome(await rewound.get_result()) is PlaceOutcome.COPIED
+        await pipeline.settle()
+
+        placement = await _placement(ledger_engine, stored)
+        assert (placement.state, placement.locator, placement.attempts) == (
+            PlacementState.PRESENT,
+            _LOCATOR,
+            2,
+        )
+        assert await pipeline.workflows(f"verify:{placement.id}:") == [
+            (verification_workflow_for(placement.id, attempt), "SUCCESS") for attempt in range(3)
+        ]

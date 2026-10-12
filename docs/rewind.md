@@ -99,8 +99,10 @@ The other scheduled workflows that start work (`scan_all`, `full_rescan_all`,
 ## Placement
 
 - `place_content` keys its verification on the attempt the start recorded. A rewound
-  failed or untrusted attempt records the next attempt when it starts again, so its copy
-  gets a verification of its own. There is no collapsed verification to rewind.
+  failed or untrusted attempt records the next attempt when it starts again, and one
+  started over a placement still copying, verifying or registered at another locator
+  records the attempt after the latest, so its copy gets a verification of its own.
+  There is no collapsed verification to rewind.
 - Rewinding a placement registered at its locator copies nothing: the start finds it
   present and the workflow ends `already_present`.
 - A rewound `place_content` keeps the workflow ID of the attempt it originally ran as,
@@ -108,6 +110,9 @@ The other scheduled workflows that start work (`scan_all`, `full_rescan_all`,
   attempt's workflows, so while the rewound copy runs it can record the attempt as ended
   without concluding and start another. The rewound copy then records no evidence and
   ends `superseded`; the cost is a second copy. Rewind between reconciliation passes.
+- An attempt rewound from its copy step, after the placement moved on, records neither
+  its evidence nor its failure, and ends `superseded`: evidence, a wait for resources
+  and a failure are each recorded only while that attempt is still copying.
 - A verification run again after a newer attempt started, or after the placement was
   concluded, ends `superseded` and writes nothing: the new copy discarded the old evidence,
   and the conclusion checks, in its own transaction, that the placement is still verifying

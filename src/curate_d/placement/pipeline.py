@@ -11,7 +11,9 @@ The source is only ever read. Nothing here writes to it.
 A copy that starts discards the previous copy's evidence, and a verification concludes
 only the attempt it belongs to, and only while that attempt is still verifying. A
 verification run again by a rewind or a fork after a newer attempt has started therefore
-changes nothing, and cannot register the old copy's evidence at the new locator.
+changes nothing, and cannot register the old copy's evidence at the new locator. An old
+copy run again records neither its evidence nor its failure once its attempt is no
+longer the one copying.
 
 A copy reserves its locator in the transaction that records it starting. Reconciliation
 resolves collisions against what the ledger held when it evaluated, which says nothing
@@ -48,6 +50,11 @@ DECIDED_BY: Final = "placement"
 # Candidate locators a start tries before giving up: the rendered one, then its
 # fingerprint-suffixed forms.
 _RESERVE_TRIES: Final = 4
+# States whose recorded attempt already has, or is about to have, a verification: an
+# attempt started over one of them records the next attempt instead.
+_RESTARTED: Final = frozenset(
+    {PlacementState.COPYING, PlacementState.VERIFYING, PlacementState.PRESENT}
+)
 
 
 class LocatorConflictError(RuntimeError):
@@ -241,6 +248,15 @@ async def reserve(
     )
 
 
+def recorded_attempt(existing: Placement | None, attempt: int) -> int:
+    """Return the attempt a copy starting as `attempt` records; see `start`."""
+    if existing is None:
+        return attempt
+    if existing.state in _RESTARTED and attempt <= existing.attempts:
+        return existing.attempts + 1
+    return max(existing.attempts, attempt)
+
+
 async def start(
     connection: AsyncConnection,
     *,
@@ -257,7 +273,10 @@ async def start(
 ) -> tuple[Placement, bool]:
     """Reserve a locator and record that a copy is starting as attempt `attempt`.
 
-    The attempt count is never lowered. The locator recorded is `locator` unless other
+    The attempt count is never lowered. A placement still copying, verifying or
+    registered elsewhere already has a verification under its attempt; an old attempt
+    started over it, as by a rewind, records the next attempt, so its copy is verified
+    under an identity of its own. The locator recorded is `locator` unless other
     content already holds it; see `reserve`. The previous copy's evidence is discarded,
     so a verification of that copy run again finds nothing to assess. `context` joins
     the audit entry's details; see `started_details`.
@@ -291,7 +310,7 @@ async def start(
         update={
             "state": PlacementState.COPYING,
             "source_object_id": source.id,
-            "attempts": attempt if existing is None else max(existing.attempts, attempt),
+            "attempts": recorded_attempt(existing, attempt),
         }
     )
     stored = await placements_repo.upsert(placement)
@@ -315,11 +334,33 @@ async def start(
     return stored, True
 
 
-async def defer(connection: AsyncConnection, placement_id: PlacementId, reason: str) -> None:
-    """Record why a copy is waiting for resources; it stays copying and is retried."""
-    await connection.execute(
-        placements.update().where(placements.c.id == placement_id).values(failure_reason=reason)
-    )
+async def defer(
+    connection: AsyncConnection,
+    placement_id: PlacementId,
+    reason: str,
+    *,
+    attempt: int | None = None,
+) -> bool:
+    """Record why a copy is waiting for resources; it stays copying and is retried.
+
+    Args:
+        connection: The connection of the writing transaction.
+        placement_id: The placement waiting.
+        reason: Why it waits.
+        attempt: The attempt waiting. When given, the reason is recorded only while that
+            attempt is the placement's latest and still copying.
+
+    Returns:
+        Whether the reason was recorded.
+    """
+    statement = placements.update().where(placements.c.id == placement_id)
+    if attempt is not None:
+        statement = statement.where(
+            placements.c.attempts == attempt,
+            placements.c.state == PlacementState.COPYING.value,
+        )
+    result = await connection.execute(statement.values(failure_reason=reason))
+    return result.rowcount > 0
 
 
 async def fail(
@@ -327,12 +368,24 @@ async def fail(
     placement_id: PlacementId,
     reason: str,
     *,
+    attempt: int | None = None,
     now: AwareDatetime,
 ) -> Placement | None:
-    """Record a copy that did not complete; the next attempt is a new workflow."""
+    """Record a copy that did not complete; the next attempt is a new workflow.
+
+    When `attempt` is given, only a placement still copying that attempt is failed, so
+    an old attempt run again by a rewind or a fork cannot fail a newer attempt or a
+    registered copy.
+
+    Returns:
+        The placement as recorded, or None when there was nothing to fail.
+    """
     placements_repo = PlacementRepository(connection)
     placement = await placements_repo.get(placement_id)
-    if placement is None:
+    if placement is None or (
+        attempt is not None
+        and (placement.state is not PlacementState.COPYING or placement.attempts != attempt)
+    ):
         return None
     failed = await placements_repo.upsert(
         placement.model_copy(
