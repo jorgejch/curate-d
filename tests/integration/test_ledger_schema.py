@@ -4,6 +4,7 @@ These are integration tests because the invariants live in the database: a CHECK
 constraint or a trigger that only the application respects is not an invariant.
 """
 
+import re
 import uuid
 from datetime import UTC, datetime
 
@@ -318,3 +319,25 @@ async def test_an_unknown_audit_entry_type_is_rejected(ledger_engine: AsyncEngin
                     " VALUES ('made_up', 'test', '{}')"
                 )
             )
+
+
+async def test_the_entry_type_check_allows_exactly_the_audit_entry_types(
+    ledger_engine: AsyncEngine,
+) -> None:
+    """The migrated entry_type CHECK enumerates every AuditEntryType and nothing else."""
+    from curate_d.domain.audit import AuditEntryType
+
+    async with ledger_engine.connect() as connection:
+        definitions = (
+            await connection.scalars(
+                text(
+                    "SELECT pg_get_constraintdef(oid) FROM pg_constraint"
+                    " WHERE conrelid = 'audit_entries'::regclass AND contype = 'c'"
+                    " AND conname LIKE '%entry_type_known'"
+                )
+            )
+        ).all()
+
+    assert len(definitions) == 1, definitions
+    allowed = set(re.findall(r"'([a-z_]+)'::text", definitions[0]))
+    assert allowed == {member.value for member in AuditEntryType}
