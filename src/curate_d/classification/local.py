@@ -8,29 +8,62 @@ remote model rather than being filed on a weak guess.
 
 An image whose OCR turns up a page's worth of text is a scanned document, not a photo, and
 is classified as one.
+
+Extraction is bounded for the CPU worker's budget: at most `_MAX_TEXT` characters, the
+images of the first `_OCR_PAGES` pages of a PDF and no more than `_OCR_IMAGES` of them,
+`_OCR_TIMEOUT_SECONDS` of Tesseract per image, and every decode within the pixel budget.
+Whichever limit cut the text short is recorded as `limited` and carried into the evidence,
+so a truncation is never silent.
 """
 
 import io
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from enum import StrEnum
 from typing import BinaryIO, Final
 
 import pytesseract
 from PIL import Image, UnidentifiedImageError
 from pydantic import Field
-from pypdf import PdfReader
-from pypdf.errors import PdfReadError
+from pypdf import PageObject, PdfReader
+from pypdf.errors import DependencyError, PyPdfError
+from pypdf.generic import ArrayObject, DictionaryObject, StreamObject
 
 from curate_d.classification.deterministic import ClassificationInput, TierResult
+from curate_d.content.decode import (
+    DEFAULT_MAX_PIXELS,
+    ImageTooLargeError,
+    ImageUndecodableError,
+    open_bounded,
+)
 from curate_d.domain import AuditValue, ClassificationTier, DomainModel, Facts, MediaKind
 
 type OcrEngine = Callable[[Image.Image], str]
 
 _MAX_TEXT: Final = 20_000
 _OCR_PAGES: Final = 3
+# Embedded images OCRed per PDF, across its pages: a scan is one image a page, so this
+# leaves room for a split page without letting a PDF of many small images run long.
+_OCR_IMAGES: Final = 6
+# Seconds Tesseract may spend on one image before it is killed.
+_OCR_TIMEOUT_SECONDS: Final = 60
+# Long edge OCR reads at: an A4 page at about 350 dpi, legible and within Tesseract's memory.
+_OCR_EDGE: Final = 4096
+# Form XObjects nested deeper than this are not searched for page images.
+_FORM_DEPTH: Final = 2
+# Filters whose stream is a whole image file (JPEG, JPEG 2000). Its own header states the
+# size it decodes to, whatever the image dictionary declares.
+_SELF_SIZED_FILTERS: Final = frozenset({"/DCTDecode", "/JPXDecode"})
+# What pypdf raises for an image it will not decode: a stream past its output limits
+# (`LimitReachedError`), empty image data, or a missing decoder such as jbig2dec
+# (`DependencyError`, which is not a `PyPdfError`).
+_PDF_DECODE_ERRORS: Final = (PyPdfError, DependencyError)
 # Words of OCR text that make an image a scanned document rather than a photo.
 SCAN_WORD_THRESHOLD: Final = 25
+
+
+class OcrTimeoutError(RuntimeError):
+    """The OCR engine ran past its time limit on one image."""
 
 
 class TextSource(StrEnum):
@@ -42,74 +75,289 @@ class TextSource(StrEnum):
     NONE = "none"
 
 
+class ExtractionLimit(StrEnum):
+    """Which CPU worker limit cut text extraction short."""
+
+    TEXT_CAP = "text_cap"
+    """The text reached the character cap; what followed was not read."""
+
+    PAGE_CAP = "page_cap"
+    """The PDF had more pages than are OCRed."""
+
+    IMAGE_CAP = "image_cap"
+    """The PDF had more embedded images than are OCRed."""
+
+    OCR_TIMEOUT = "ocr_timeout"
+    """OCR of an image ran past its time limit."""
+
+    DECODE_BUDGET = "decode_budget"
+    """An image would decode to more pixels than the budget allows, so it was not read."""
+
+
 class ExtractedText(DomainModel):
-    """The text a file yielded, and how."""
+    """The text a file yielded, how, and which limit, if any, cut it short."""
 
     text: str
     source: TextSource
+    limited: ExtractionLimit | None = None
 
     @property
     def words(self) -> list[str]:
-        """Lowercased word tokens."""
+        """Return the lowercased word tokens."""
         return re.findall(r"[\w']+", self.text.lower())
+
+    @property
+    def refused(self) -> bool:
+        """Return whether a CPU worker limit kept the tier from reading any text at all.
+
+        Only a decode refused for the pixel budget, or OCR killed at its time limit, counts:
+        the caps on text, pages and images apply after something has been read.
+        """
+        return (
+            self.limited in {ExtractionLimit.DECODE_BUDGET, ExtractionLimit.OCR_TIMEOUT}
+            and not self.text.strip()
+        )
 
 
 def tesseract(image: Image.Image) -> str:
-    """OCR with Tesseract's LSTM engine, one thread (the worker pins OMP_THREAD_LIMIT)."""
-    return str(pytesseract.image_to_string(image, config="--oem 1 --psm 3"))
+    """OCR with Tesseract's LSTM engine, one thread (the worker pins OMP_THREAD_LIMIT).
 
-
-def _ocr_image(handle: BinaryIO, ocr: OcrEngine) -> str:
-    """OCR an image file; an image no decoder opens yields no text."""
-    handle.seek(0)
+    Raises:
+        OcrTimeoutError: Tesseract ran past `_OCR_TIMEOUT_SECONDS` and was killed.
+    """
     try:
-        with Image.open(handle) as image:
-            image.load()
-            return ocr(image.convert("L"))
-    except (UnidentifiedImageError, OSError, ValueError):
-        return ""
-    finally:
-        handle.seek(0)
+        return str(
+            pytesseract.image_to_string(
+                image, config="--oem 1 --psm 3", timeout=_OCR_TIMEOUT_SECONDS
+            )
+        )
+    except RuntimeError as error:
+        # pytesseract signals its own timeout with this exact message and no subclass.
+        if str(error) == "Tesseract process timeout":
+            raise OcrTimeoutError(f"OCR ran past {_OCR_TIMEOUT_SECONDS} s") from None
+        raise
 
 
-def _ocr_pdf(handle: BinaryIO, ocr: OcrEngine) -> str:
-    """OCR the images embedded in a PDF's first pages: a scanned PDF is pictures of pages."""
+def _for_ocr(image: Image.Image) -> Image.Image:
+    """Return the image in greyscale, its long edge at most `_OCR_EDGE`.
+
+    Tesseract's memory grows with the pixels it is handed, and it runs beside the decode
+    that produced them; a page scanned finer than that edge reads as well at it.
+    """
+    grey = image.convert("L")
+    if max(grey.size) > _OCR_EDGE:
+        grey.thumbnail((_OCR_EDGE, _OCR_EDGE))
+    return grey
+
+
+def _ocr_image(
+    handle: BinaryIO, ocr: OcrEngine, max_pixels: int
+) -> tuple[str, ExtractionLimit | None]:
+    """OCR an image file; an image no decoder opens yields no text.
+
+    Returns:
+        The text, and the limit that cut it short, if one did.
+    """
+    try:
+        with open_bounded(
+            handle, max_pixels=max_pixels, target_edge=_OCR_EDGE, greyscale=True
+        ) as image:
+            grey = _for_ocr(image)
+        # The full decode is released before Tesseract starts beside it.
+        return ocr(grey), None
+    except ImageTooLargeError:
+        return "", ExtractionLimit.DECODE_BUDGET
+    except ImageUndecodableError:
+        return "", None
+    except OcrTimeoutError:
+        return "", ExtractionLimit.OCR_TIMEOUT
+
+
+def _page_images(resources: object, depth: int = 0) -> Iterator[StreamObject]:
+    """Yield the image XObjects a page's resources draw, through nested forms."""
+    if not isinstance(resources, DictionaryObject):
+        return
+    xobjects = resources.get("/XObject")
+    xobjects = xobjects.get_object() if xobjects is not None else None
+    if not isinstance(xobjects, DictionaryObject):
+        return
+    for reference in xobjects.values():
+        xobject = reference.get_object()
+        if not isinstance(xobject, StreamObject):
+            continue
+        subtype = xobject.get("/Subtype")
+        if subtype == "/Image":
+            yield xobject
+        elif subtype == "/Form" and depth < _FORM_DEPTH:
+            nested = xobject.get("/Resources")
+            yield from _page_images(nested.get_object() if nested is not None else None, depth + 1)
+
+
+def _declared_pixels(xobject: StreamObject) -> int:
+    """Return the pixel count an image XObject's dictionary declares.
+
+    An image declaring no usable size counts as none: pypdf cannot decode it either.
+    """
+    try:
+        width, height = xobject["/Width"], xobject["/Height"]
+    except KeyError:
+        return 0
+    # pypdf's NumberObject is an int; anything else is no usable size.
+    if not isinstance(width, int) or not isinstance(height, int):
+        return 0
+    return width * height
+
+
+def _last_filter(xobject: StreamObject) -> object:
+    """Return the filter applied last when decoding the stream, the one yielding the image."""
+    filters = xobject.get("/Filter")
+    if isinstance(filters, ArrayObject):
+        return filters[-1] if filters else None
+    return filters
+
+
+def _pixels(xobject: StreamObject) -> int:
+    """Return the pixel count an image XObject decodes to, without decoding its pixels.
+
+    A raw or Flate stream decodes to its declared `/Width` x `/Height`. A JPEG or JPEG 2000
+    stream decodes to whatever its own header states, which the dictionary need not match,
+    so that header is read too and the larger count wins: a 10 x 10 declaration cannot
+    smuggle a 120 MP JPEG past the budget.
+    """
+    declared = _declared_pixels(xobject)
+    if _last_filter(xobject) not in _SELF_SIZED_FILTERS:
+        return declared
+    try:
+        with Image.open(io.BytesIO(xobject.get_data())) as embedded:
+            stated = embedded.width * embedded.height
+    except Image.DecompressionBombError:
+        # Pillow will not open it: it states more than twice Pillow's ceiling.
+        return 2 * (Image.MAX_IMAGE_PIXELS or 0) + 1
+    except (UnidentifiedImageError, OSError, ValueError, *_PDF_DECODE_ERRORS):
+        # No readable header; decoding fails on it the same way and is caught there.
+        stated = 0
+    return max(declared, stated)
+
+
+def _ocr_pdf(
+    handle: BinaryIO, ocr: OcrEngine, max_pixels: int
+) -> tuple[str, ExtractionLimit | None]:
+    """OCR the images embedded in a PDF's first pages: a scanned PDF is pictures of pages.
+
+    Stops once the text reaches the cap, after `_OCR_IMAGES` images, or at the first OCR
+    timeout. An image whose declared size is over the pixel budget is skipped before its
+    stream is decoded.
+
+    Returns:
+        The text, and the limit that cut it short, if one did.
+    """
     handle.seek(0)
     text: list[str] = []
+    length = 0
+    read = 0
+    limited: ExtractionLimit | None = None
+
+    def images(reader: PdfReader) -> Iterator[StreamObject]:
+        """Yield the image XObjects of the first pages, in page order."""
+        page: PageObject
+        for page in reader.pages[:_OCR_PAGES]:
+            resources = page.get("/Resources")
+            yield from _page_images(resources.get_object() if resources is not None else None)
+
     try:
         reader = PdfReader(handle)
-        for page in reader.pages[:_OCR_PAGES]:
-            for embedded in page.images:
-                with Image.open(io.BytesIO(embedded.data)) as image:
-                    text.append(ocr(image.convert("L")))
-    except (PdfReadError, UnidentifiedImageError, OSError, ValueError, KeyError):
+        if len(reader.pages) > _OCR_PAGES:
+            limited = ExtractionLimit.PAGE_CAP
+        for xobject in images(reader):
+            if length >= _MAX_TEXT:
+                limited = ExtractionLimit.TEXT_CAP
+                break
+            if read >= _OCR_IMAGES:
+                limited = ExtractionLimit.IMAGE_CAP
+                break
+            if _pixels(xobject) > max_pixels:
+                limited = ExtractionLimit.DECODE_BUDGET
+                continue
+            read += 1
+            try:
+                decoded: Image.Image | None = xobject.decode_as_image()
+                if decoded is None:
+                    continue
+                with decoded as image:
+                    grey = _for_ocr(image)
+                page_text = ocr(grey)
+            except OcrTimeoutError:
+                limited = ExtractionLimit.OCR_TIMEOUT
+                break
+            except Image.DecompressionBombError:
+                # Pillow's own ceiling, should a size reach it that `_pixels` could not see.
+                limited = ExtractionLimit.DECODE_BUDGET
+                continue
+            except (
+                *_PDF_DECODE_ERRORS,
+                OSError,
+                ValueError,
+                KeyError,
+                TypeError,
+                NotImplementedError,
+            ):
+                # One image pypdf or Pillow cannot decode does not end the others' OCR.
+                continue
+            text.append(page_text)
+            length += len(page_text) + 1
+    except (*_PDF_DECODE_ERRORS, OSError, ValueError, KeyError, TypeError, AttributeError):
+        # A malformed PDF yields what was read before it broke, never an error.
         pass
     finally:
         handle.seek(0)
-    return "\n".join(text)
+    joined = "\n".join(text)
+    if len(joined) > _MAX_TEXT:
+        limited = ExtractionLimit.TEXT_CAP
+    return joined[:_MAX_TEXT], limited
 
 
 def extract_text(
-    handle: BinaryIO, item: ClassificationInput, *, ocr: OcrEngine = tesseract
+    handle: BinaryIO,
+    item: ClassificationInput,
+    *,
+    ocr: OcrEngine = tesseract,
+    max_pixels: int = DEFAULT_MAX_PIXELS,
 ) -> ExtractedText:
-    """The text of a document or scan, from the cheapest source that has any."""
+    """Return the text of a document or scan, from the cheapest source that has any.
+
+    Args:
+        handle: The content.
+        item: What is known about it.
+        ocr: The OCR engine.
+        max_pixels: Most pixels one image decode for OCR may hold.
+    """
     media_type = item.media_type
     if media_type == "application/pdf":
         if item.metadata.text_sample:
             return ExtractedText(text=item.metadata.text_sample, source=TextSource.TEXT_LAYER)
-        text = _ocr_pdf(handle, ocr)
+        text, limited = _ocr_pdf(handle, ocr, max_pixels)
         return ExtractedText(
-            text=text[:_MAX_TEXT], source=TextSource.OCR if text.strip() else TextSource.NONE
+            text=text,
+            source=TextSource.OCR if text.strip() else TextSource.NONE,
+            limited=limited,
         )
     if media_type.startswith("text/"):
         handle.seek(0)
-        text = handle.read(_MAX_TEXT).decode("utf-8", errors="replace")
+        raw = handle.read(_MAX_TEXT + 1)
         handle.seek(0)
-        return ExtractedText(text=text, source=TextSource.PLAIN)
-    if media_type.startswith("image/"):
-        text = _ocr_image(handle, ocr)
         return ExtractedText(
-            text=text[:_MAX_TEXT], source=TextSource.OCR if text.strip() else TextSource.NONE
+            text=raw[:_MAX_TEXT].decode("utf-8", errors="replace"),
+            source=TextSource.PLAIN,
+            limited=ExtractionLimit.TEXT_CAP if len(raw) > _MAX_TEXT else None,
+        )
+    if media_type.startswith("image/"):
+        text, limited = _ocr_image(handle, ocr, max_pixels)
+        if len(text) > _MAX_TEXT:
+            limited = ExtractionLimit.TEXT_CAP
+        return ExtractedText(
+            text=text[:_MAX_TEXT],
+            source=TextSource.OCR if text.strip() else TextSource.NONE,
+            limited=limited,
         )
     return ExtractedText(text="", source=TextSource.NONE)
 
@@ -264,6 +512,7 @@ def categorize(
     runner_up = scored[1][0] if len(scored) > 1 else 0
     evidence: dict[str, AuditValue] = {
         "text_source": extracted.source.value,
+        "text_limited": None if extracted.limited is None else extracted.limited.value,
         "words": len(extracted.words),
         "best_rule": best.subcategory if best_hits else None,
         "best_hits": best_hits,
@@ -294,7 +543,11 @@ def classify_local(
             tier=ClassificationTier.LOCAL_INFERENCE,
             facts=base,
             confidence=deterministic.confidence,
-            evidence={"text_source": extracted.source.value, "applied": False},
+            evidence={
+                "text_source": extracted.source.value,
+                "text_limited": None if extracted.limited is None else extracted.limited.value,
+                "applied": False,
+            },
         )
     rule, confidence, evidence = categorize(extracted)
     facts = Facts.model_validate(

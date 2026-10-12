@@ -38,6 +38,9 @@ from curate_d.domain import (
 )
 
 OPENROUTER_BASE_URL: Final = "https://openrouter.ai/api/v1"
+# Tokens one answer may run to unless configured (`remote_max_output_tokens`). The answer
+# is a handful of short fields, well under this.
+DEFAULT_MAX_OUTPUT_TOKENS: Final = 1024
 # The fields the model is asked for; the rest of the facts are never its to assert.
 REMOTE_FIELDS: Final = (
     "media_kind",
@@ -180,12 +183,20 @@ async def classify_remote(
     request: RemoteRequest,
     taxonomy: Taxonomy,
     base: Facts,
+    *,
+    max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
 ) -> RemoteResult:
-    """Ask the configured model, and validate what it answers."""
+    """Ask the configured model, and validate what it answers.
+
+    `max_tokens` bounds the answer, so one call's cost cannot run far past its
+    reservation. An answer cut off at that bound is unusable, whether or not what arrived
+    happens to parse.
+    """
     try:
         completion = await client.chat.completions.create(
             model=model,
             messages=_messages(request),
+            max_tokens=max_tokens,
             response_format={
                 "type": "json_schema",
                 "json_schema": {
@@ -215,6 +226,8 @@ async def classify_remote(
             outcome=RemoteOutcome.MALFORMED, model_id=answered_by, detail=detail, cost_usd=cost
         )
 
+    if completion.choices and completion.choices[0].finish_reason == "length":
+        return malformed(f"output truncated at max_tokens ({max_tokens})")
     if not completion.choices or completion.choices[0].message.content is None:
         return malformed("the model returned no content")
     try:
@@ -269,9 +282,12 @@ class RemoteClassifier(Protocol):
 class OpenRouterClassifier:
     """The remote tier over OpenRouter, with one client per event loop."""
 
-    def __init__(self, api_key: SecretStr) -> None:
-        """Hold the key; clients are made on the loop that uses them."""
+    def __init__(
+        self, api_key: SecretStr, *, max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
+    ) -> None:
+        """Hold the key and the output bound; clients are made on the loop that uses them."""
         self._api_key = api_key
+        self._max_output_tokens = max_output_tokens
         self._clients: dict[asyncio.AbstractEventLoop, AsyncOpenAI] = {}
 
     async def classify(
@@ -283,4 +299,6 @@ class OpenRouterClassifier:
         if client is None:
             client = build_client(self._api_key)
             self._clients[loop] = client
-        return await classify_remote(client, model, request, taxonomy, base)
+        return await classify_remote(
+            client, model, request, taxonomy, base, max_tokens=self._max_output_tokens
+        )

@@ -14,6 +14,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import make_url, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from curate_d.config import Settings
@@ -323,3 +324,68 @@ async def test_transfer_caps_downgrade_restores_the_uncapped_limits(
         "transfer-small": (4, None),
         "transfer-large": (1, None),
     }
+
+
+# 0020 adds the resource_limit review reason.
+BEFORE_RESOURCE_LIMIT = "0019_command_completed_audit"
+RESOURCE_LIMIT = "0020_review_resource_limit"
+
+
+async def _insert_review(database_url: str, reason: str) -> None:
+    """Insert one content object and an open review item for it with `reason`."""
+    engine = create_async_engine(database_url)
+    content_id = uuid4()
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO content_objects (id, fingerprint_algorithm, fingerprint_digest, "
+                    "size_bytes, media_type) VALUES (:id, 'sha256', :digest, 1, 'image/png')"
+                ),
+                {"id": content_id, "digest": content_id.hex},
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO review_items (id, content_object_id, reason, detail, created_at) "
+                    "VALUES (:id, :content, :reason, 'over the decode budget', now())"
+                ),
+                {"id": uuid4(), "content": content_id, "reason": reason},
+            )
+    finally:
+        await engine.dispose()
+
+
+async def _review_rows(database_url: str) -> list[tuple[str, str]]:
+    """Return every review item as `(reason, detail)`."""
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.connect() as connection:
+            rows = await connection.execute(text("SELECT reason, detail FROM review_items"))
+            return [(row[0], row[1]) for row in rows]
+    finally:
+        await engine.dispose()
+
+
+async def test_resource_limit_is_refused_before_its_revision(empty_database: str) -> None:
+    """The narrower check rejects the reason, so the revision is what admits it."""
+    _alembic(empty_database, "upgrade", BEFORE_RESOURCE_LIMIT)
+    with pytest.raises(IntegrityError):
+        await _insert_review(empty_database, "resource_limit")
+
+
+async def test_resource_limit_review_items_survive_a_downgrade_as_low_confidence(
+    empty_database: str,
+) -> None:
+    """Upgrade admits resource_limit; downgrade maps it to low_confidence and keeps why."""
+    _alembic(empty_database, "upgrade", RESOURCE_LIMIT)
+    await _insert_review(empty_database, "resource_limit")
+    await _insert_review(empty_database, "rejected_value")
+
+    _alembic(empty_database, "downgrade", BEFORE_RESOURCE_LIMIT)
+
+    assert sorted(await _review_rows(empty_database)) == [
+        ("low_confidence", "over the decode budget (reason before downgrade: resource_limit)"),
+        ("rejected_value", "over the decode budget"),
+    ]
+    _alembic(empty_database, "upgrade", RESOURCE_LIMIT)
+    await _insert_review(empty_database, "resource_limit")

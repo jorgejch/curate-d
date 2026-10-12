@@ -5,6 +5,7 @@ that answers as told and counts its calls.
 """
 
 import asyncio
+import io
 from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -14,6 +15,8 @@ from uuid import uuid4
 
 import pytest
 from dbos import SetWorkflowID
+from PIL import Image
+from PIL.PngImagePlugin import PngInfo
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -29,6 +32,7 @@ from curate_d.classification.taxonomy import active_taxonomy, promote
 from curate_d.config import Settings
 from curate_d.configuration.documents import parse_taxonomy
 from curate_d.configuration.store import ConfigurationRepository
+from curate_d.content.decode import DEFAULT_MAX_PIXELS
 from curate_d.domain import (
     ClassificationResult,
     ClassificationTier,
@@ -256,6 +260,116 @@ async def test_without_a_remote_tier_unsettled_content_goes_to_review(
         item = await _review(ledger_engine, source.content_object_id)
         assert item is not None
         assert item.reason is ReviewReason.LOW_CONFIDENCE
+
+
+def _bomb(tag: str) -> bytes:
+    """Return a 450 MP PNG header, above Pillow's own ceiling, distinct per `tag`."""
+    return media.png_header(30000, 15000, comment=tag)
+
+
+def _plain_png(tag: str) -> bytes:
+    """Return a 400x300 PNG with no text and no metadata, distinct per `tag`."""
+    info = PngInfo()
+    info.add_text("Comment", tag)
+    buffer = io.BytesIO()
+    Image.new("RGB", (400, 300), (90, 120, 150)).save(buffer, format="PNG", pnginfo=info)
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("build", "max_pixels"),
+    [
+        pytest.param(_bomb, DEFAULT_MAX_PIXELS, id="decompression-bomb-header"),
+        pytest.param(_plain_png, 100_000, id="over-budget"),
+    ],
+)
+async def test_an_image_over_the_decode_budget_goes_to_review_without_a_remote_call(
+    settings: Settings,
+    ledger_engine: AsyncEngine,
+    tmp_path: Path,
+    build: Callable[[str], bytes],
+    max_pixels: int,
+) -> None:
+    """Refused before decoding: review as resource_limit, the workflow succeeds, no call."""
+    remote = StubRemote(answered("Home"))
+    async with running_pipeline(
+        settings, ledger_engine, tmp_path, remote=remote, cpu_decode_max_pixels=max_pixels
+    ) as pipeline:
+        content = build(pipeline.account)
+        pipeline.pcloud.file(f"/misc/upload-{pipeline.account}.png", content)
+        await _scan(pipeline)
+        [source] = await pipeline.sources()
+        [stored] = await pipeline.contents()
+        assert stored.media_type == "image/png"
+        assert stored.perceptual_fingerprint is None
+        item = await _review(ledger_engine, source.content_object_id)
+        assert item is not None
+        assert item.reason is ReviewReason.RESOURCE_LIMIT
+        assert "decode_budget" in item.detail
+        assert remote.models == []
+        [(_, status)] = await pipeline.workflows(classification_workflow_id(stored.fingerprint))
+        assert status == "SUCCESS"
+        assert "classification_rejected" in await _audit_types(
+            ledger_engine, source.content_object_id
+        )
+
+
+def _pdf_jpeg_bomb(tag: str) -> bytes:
+    """Return a PDF declaring a 10 x 10 page image whose JPEG header states 450 MP."""
+    return media.pdf_with_image_stream(
+        media.jpeg_header(30_000, 15_000),
+        image_filter="/DCTDecode",
+        width=10,
+        height=10,
+        content=b"q 612 0 0 792 0 0 cm /Im0 Do Q % " + tag.encode(),
+    )
+
+
+def _pdf_jbig2(tag: str) -> bytes:
+    """Return a PDF whose page image is JBIG2, which the worker image has no decoder for."""
+    return media.pdf_with_image_stream(
+        b"\x00" * 64,
+        image_filter="/JBIG2Decode",
+        width=100,
+        height=100,
+        content=b"q 612 0 0 792 0 0 cm /Im0 Do Q % " + tag.encode(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("build", "reason"),
+    [
+        # The JPEG's own size is over the budget, whatever the PDF declares: nothing read.
+        pytest.param(_pdf_jpeg_bomb, ReviewReason.RESOURCE_LIMIT, id="jpeg-larger-than-declared"),
+        # Skipped as undecodable: no limit applied, so names go to the remote tier.
+        pytest.param(_pdf_jbig2, None, id="jbig2-without-decoder"),
+    ],
+)
+async def test_a_pdf_image_the_cpu_worker_will_not_decode_never_fails_classification(
+    settings: Settings,
+    ledger_engine: AsyncEngine,
+    tmp_path: Path,
+    build: Callable[[str], bytes],
+    reason: ReviewReason | None,
+) -> None:
+    """A scanned PDF's page image refused or undecodable ends the workflow SUCCESS."""
+    remote = StubRemote(answered("Home"))
+    async with running_pipeline(settings, ledger_engine, tmp_path, remote=remote) as pipeline:
+        pipeline.pcloud.file(f"/misc/scan-{pipeline.account}.pdf", build(pipeline.account))
+        await _scan(pipeline)
+        [source] = await pipeline.sources()
+        [stored] = await pipeline.contents()
+        assert stored.media_type == "application/pdf"
+        [(_, status)] = await pipeline.workflows(classification_workflow_id(stored.fingerprint))
+        assert status == "SUCCESS"
+        item = await _review(ledger_engine, source.content_object_id)
+        if reason is None:
+            assert len(remote.models) == 1
+            return
+        assert item is not None
+        assert item.reason is reason
+        assert "decode_budget" in item.detail
+        assert remote.models == []
 
 
 async def test_repeat_content_reuses_its_classification(

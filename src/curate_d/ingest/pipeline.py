@@ -19,7 +19,13 @@ from uuid import UUID
 
 from pydantic import AwareDatetime, Field
 
-from curate_d.content.perceptual import ImageUndecodableError, is_image, perceptual_fingerprint
+from curate_d.content.decode import DEFAULT_MAX_PIXELS
+from curate_d.content.perceptual import (
+    ImageTooLargeError,
+    ImageUndecodableError,
+    is_image,
+    perceptual_fingerprint,
+)
 from curate_d.content.sniff import sniff
 from curate_d.domain import (
     AuditEntry,
@@ -82,7 +88,9 @@ class Inspection(DomainModel):
     media_type: str
     perceptual: PerceptualFingerprint | None = None
     note: str | None = Field(
-        default=None, description="Why an image has no perceptual fingerprint."
+        default=None,
+        description="Why an image has no perceptual fingerprint: it did not decode, or it "
+        "exceeds the CPU worker's decode budget.",
     )
 
 
@@ -164,12 +172,15 @@ async def stage_source(
     )
 
 
-async def inspect_staged(reader: LocalSnapshotReader, staged: StagedRef) -> Inspection:
+async def inspect_staged(
+    reader: LocalSnapshotReader, staged: StagedRef, *, max_pixels: int = DEFAULT_MAX_PIXELS
+) -> Inspection:
     """Read a verified snapshot of exactly the staged version and inspect it.
 
     Decoding runs in a thread so the loop serving other snapshots is never blocked on it.
-    An image no decoder accepts keeps its sniffed type and gets no perceptual fingerprint;
-    the strong fingerprint does not depend on decoding.
+    An image no decoder accepts, or one that would decode to more than `max_pixels`
+    pixels, keeps its sniffed type and gets no perceptual fingerprint, with a note saying
+    why; the strong fingerprint does not depend on decoding.
 
     Raises:
         StagedEntryMissingError: the entry is gone (evicted before it was read).
@@ -181,8 +192,10 @@ async def inspect_staged(reader: LocalSnapshotReader, staged: StagedRef) -> Insp
         if not is_image(media_type):
             return Inspection(media_type=media_type)
         try:
-            perceptual = await asyncio.to_thread(perceptual_fingerprint, handle)
-        except ImageUndecodableError as error:
+            perceptual = await asyncio.to_thread(
+                perceptual_fingerprint, handle, max_pixels=max_pixels
+            )
+        except (ImageTooLargeError, ImageUndecodableError) as error:
             return Inspection(media_type=media_type, note=str(error))
         return Inspection(media_type=media_type, perceptual=perceptual)
 

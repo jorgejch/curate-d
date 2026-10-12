@@ -7,6 +7,7 @@ from PIL import Image, ImageDraw
 
 from curate_d.content.perceptual import (
     MATCH_THRESHOLD_BITS,
+    ImageTooLargeError,
     ImageUndecodableError,
     is_image,
     perceptual_fingerprint,
@@ -76,6 +77,20 @@ def test_bytes_that_are_not_an_image_are_refused() -> None:
     """A decoder refusing the content is reported as undecodable."""
     with pytest.raises(ImageUndecodableError):
         perceptual_fingerprint(io.BytesIO(b"\xff\xd8\xff not really a jpeg"))
+
+
+def test_a_jpeg_decoded_at_a_reduced_scale_matches_its_full_decode() -> None:
+    """Draft mode does not move the fingerprint out of the match threshold."""
+    encoded = _encoded(_scene(4, (4000, 3000)), "JPEG", quality=90)
+    reduced = perceptual_fingerprint(encoded)
+    full = perceptual_fingerprint(_encoded(Image.open(encoded).convert("RGB"), "PNG"))
+    assert same_picture(reduced, full), reduced.distance_to(full)
+
+
+def test_an_image_over_the_pixel_budget_is_refused() -> None:
+    """A PNG has no reduced decode; over the budget it gets no fingerprint."""
+    with pytest.raises(ImageTooLargeError):
+        perceptual_fingerprint(_encoded(_scene(1), "PNG"), max_pixels=640 * 480 - 1)
 
 
 @pytest.mark.parametrize(

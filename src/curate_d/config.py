@@ -239,6 +239,17 @@ class Settings(BaseSettings):
         description="Confidence a tier must reach for its facts to be accepted; below it "
         "the next tier runs.",
     )
+    cpu_decode_max_pixels: int = Field(
+        default=32_000_000,
+        ge=1,
+        description="Most pixels one image decode on the CPU profile may hold. The "
+        "reference CPU worker has 1 GiB, idles near 200 MiB and runs up to four decodes at "
+        "once (fingerprint and classify-cheap, two each); a full decode peaks near 5.7 bytes "
+        "a pixel, so 32 MP keeps four within the rest. A JPEG decodes at a reduced scale "
+        "where the caller needs less; anything still above the budget is refused before "
+        "decoding: no perceptual fingerprint, a recorded note, and classification without "
+        "the pixels (docs/cpu-worker-budget.md).",
+    )
     openrouter_model: str | None = Field(
         default=None,
         description="Model the remote classification tier calls, as an OpenRouter slug. "
@@ -260,6 +271,13 @@ class Settings(BaseSettings):
         gt=Decimal("0"),
         description="Reserved against the cap before each call and replaced by the reported "
         "cost after it, so concurrent calls cannot jointly overrun the cap by more than this.",
+    )
+    remote_max_output_tokens: int = Field(
+        default=1024,
+        ge=64,
+        description="Ceiling on the tokens one remote call may generate, so a single call "
+        "cannot run far past its reservation. The answer is a small JSON object; one cut "
+        "off at this ceiling is unusable and goes to review as malformed output.",
     )
     rclone_rc_url: HttpUrl | None = Field(
         default=None,
@@ -406,6 +424,15 @@ class Settings(BaseSettings):
         description="Ceiling on concurrent local snapshot bytes. Reservations are held "
         "until each handle closes, so this bounds the pod's scratch use across readers "
         "rather than trusting the node's disk to be large enough.",
+    )
+
+    ingest_max_bytes: int | None = Field(
+        default=None,
+        ge=1,
+        description="Largest file ingest stages. A larger one fails at once, before any "
+        "provider read, with its size and this bound as the reason. Unset leaves only the "
+        "capacity bounds (staging_max_bytes, staging_local_scratch_max_bytes), which "
+        "refuse a file that can never fit them the same way.",
     )
 
     @field_validator("conductor_key", mode="before")

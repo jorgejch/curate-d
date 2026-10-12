@@ -124,7 +124,8 @@ variables; credentials must be supplied through the secret-delivery mechanism.
 | `CURATE_D_STAGING_S3_SECRET_ACCESS_KEY` | Required explicit role-specific secret |
 | `CURATE_D_STAGING_S3_CONTENT_PREFIX` | Default `content/`; with S3 configured, validation requires a nonempty trailing-slash prefix |
 | `CURATE_D_STAGING_MAX_BYTES` | Completed active cache ceiling; default 100 GiB |
-| `CURATE_D_STAGING_CAPACITY_RETRY_SECONDS` | First durable ingest wait when staging is full, doubling up to 15 times this; default 60 seconds |
+| `CURATE_D_STAGING_CAPACITY_RETRY_SECONDS` | First durable ingest wait when staging is full for now, doubling up to 15 times this; default 60 seconds. A file that can never fit is not retried: it fails at once with its size |
+| `CURATE_D_INGEST_MAX_BYTES` | Largest file ingest stages; larger fails at once, before any provider read. Default unset: only the staging and scratch bounds apply ([CPU worker budget](cpu-worker-budget.md#files-that-can-never-fit)) |
 | `CURATE_D_STAGING_MAX_AGE_HOURS` | Completed-entry eviction age and explicit stale-upload cutoff; default 24 hours |
 | `CURATE_D_STAGING_TRANSFER_TIMEOUT_SECONDS` | Upload/download and startup readiness timeout; default 300 seconds |
 | `CURATE_D_STAGING_LOCAL_SCRATCH_ROOT` | Disposable seekable snapshots; default `/var/lib/curate-d/scratch` |

@@ -7,13 +7,17 @@ reads a verified snapshot and records the content object. Neither profile does t
 other's half: the I/O profile decodes nothing, and the CPU profile reaches no provider.
 
 Every ledger write is a datasource transaction; provider calls and staging operations are
-steps. Failures take one of four routes:
+steps. Failures take one of five routes:
 
 - The provider cannot deliver the file, or its bytes cannot be read: the source is marked
   failed with the reason, no content object is created, and nothing else waits on it.
 - What arrived is not what the scan listed: the source is marked failed as a source
   change, with both observed values, for the next scan to pick up as a new version.
-- Staging is full: the workflow waits durably and tries again, for a bounded time.
+- The file is larger than staging or local scratch could ever hold, or than
+  `ingest_max_bytes`: the source is marked failed at once with its size and the bound,
+  before any provider read and without waiting, as it is when staging reports that the
+  content will never fit.
+- Staging is full for now: the workflow waits durably and tries again, for a bounded time.
 - The provider refuses the credentials: the connection is flagged and the source left
   for the next scan after a person re-authorizes.
 """
@@ -26,6 +30,7 @@ from uuid import UUID
 from dbos import DBOS, SetEnqueueOptions, SetWorkflowID
 from pydantic import Field
 
+from curate_d.config import Settings
 from curate_d.domain import AuditEntryType, DomainModel, Provider, SourceObject, SourceObjectId
 from curate_d.ingest.checks import content_fingerprint
 from curate_d.ingest.pipeline import (
@@ -55,6 +60,7 @@ from curate_d.staging.errors import (
     StagedEntryMissingError,
     StagedEntrySupersededError,
     StagingCapacityExhaustedError,
+    StagingCapacityNeverFitsError,
     StagingError,
 )
 from curate_d.workflows.classify import enqueue_classification
@@ -95,6 +101,7 @@ class IngestOutcome(StrEnum):
     BLOCKED = "blocked"
     SUPERSEDED = "superseded"
     DEFERRED = "deferred"
+    TOO_LARGE = "too_large"
 
 
 class FingerprintOutcome(StrEnum):
@@ -110,6 +117,24 @@ def _version_tag(observed: str, attempt: int, generation: str) -> str:
     """The observed version, qualified by generation and restage attempt."""
     tag = observed if not generation else f"{observed}@{generation}"
     return tag if attempt == 0 else f"{tag}#{attempt}"
+
+
+def size_refusal(size_bytes: int, settings: Settings) -> str | None:
+    """Return why a file of `size_bytes` can never be staged, or None if it can be.
+
+    The bounds are the per-file ceiling, if one is set, and the two capacity bounds a
+    file must fit whole: total staging and the I/O profile's local scratch.
+    """
+    bounds = [
+        ("staging_max_bytes", settings.staging_max_bytes),
+        ("staging_local_scratch_max_bytes", settings.staging_local_scratch_max_bytes),
+    ]
+    if settings.ingest_max_bytes is not None:
+        bounds.append(("ingest_max_bytes", settings.ingest_max_bytes))
+    name, bound = min(bounds, key=lambda pair: pair[1])
+    if size_bytes <= bound:
+        return None
+    return f"file is {size_bytes} bytes; the bound is {bound} bytes ({name})"
 
 
 async def enqueue_ingest(requests: tuple[IngestRequest, ...] | list[IngestRequest]) -> None:
@@ -150,6 +175,12 @@ async def _source_step(source_object_id: UUID) -> SourceObject | None:
 
 
 @DBOS.step()
+async def _size_refusal_step(size_bytes: int) -> str | None:
+    """Check the size against the bounds, so a replay under changed settings decides alike."""
+    return size_refusal(size_bytes, current().settings)
+
+
+@DBOS.step()
 async def _stage_step(source: SourceObject) -> StageResult:
     """Fetch from the provider onto local scratch, then publish on the staging loop."""
     services = current()
@@ -171,11 +202,14 @@ async def _stage_step(source: SourceObject) -> StageResult:
 @DBOS.step()
 async def _inspect_step(staged: StagedRef) -> Inspection:
     """Read a verified snapshot and inspect it, on the staging loop."""
-    staging = current().require_staging()
+    services = current()
+    staging = services.require_staging()
     reader = staging.reader
     if reader is None:
         raise ServicesNotInstalledError("this process has no staging reader")
-    return await staging.run(inspect_staged(reader.reader, staged))
+    return await staging.run(
+        inspect_staged(reader.reader, staged, max_pixels=services.settings.cpu_decode_max_pixels)
+    )
 
 
 # Transactions.
@@ -247,6 +281,10 @@ async def ingest_source(
     source = await _source_step(source_object_id)
     if source is None or not is_current(source, observed):
         return IngestOutcome.SUPERSEDED
+    refusal = await _size_refusal_step(source.size_bytes)
+    if refusal is not None:
+        await _fail(source_object_id, observed, refusal, AuditEntryType.SOURCE_READ_FAILED)
+        return IngestOutcome.TOO_LARGE
     first_wait = current().settings.staging_capacity_retry_seconds
     wait = first_wait
     result: StageResult | None = None
@@ -254,6 +292,14 @@ async def ingest_source(
         try:
             result = await _stage_step(source)
             break
+        except StagingCapacityNeverFitsError as error:
+            await _fail(
+                source_object_id,
+                observed,
+                f"file is {source.size_bytes} bytes and will never fit: {error}",
+                AuditEntryType.SOURCE_READ_FAILED,
+            )
+            return IngestOutcome.TOO_LARGE
         except StagingCapacityExhaustedError:
             await DBOS.sleep_async(wait)
             wait = min(wait * 2, first_wait * _MAX_WAIT_FACTOR)

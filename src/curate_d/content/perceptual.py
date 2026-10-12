@@ -5,29 +5,37 @@ re-encoding and rescaling barely move it, while a different picture lands far aw
 Compared by Hamming distance rather than equality.
 
 Fingerprints are computed and stored here; acting on a perceptual match is deferred
-(design: "CPU-only inference, with deduplication separated from semantics").
+(design: "CPU-only inference, with deduplication separated from semantics"). Decoding goes
+through `content/decode.py`, so an image above the CPU worker's pixel budget is refused
+rather than decoded, and keeps no perceptual fingerprint.
 """
 
 from typing import BinaryIO, Final
 
 import imagehash
-import pillow_heif
-from PIL import Image, UnidentifiedImageError
 
+from curate_d.content.decode import (
+    DEFAULT_MAX_PIXELS,
+    ImageTooLargeError,
+    ImageUndecodableError,
+    open_bounded,
+)
 from curate_d.domain import PERCEPTUAL_HASH_BITS, PerceptualFingerprint
+
+__all__ = [
+    "MATCH_THRESHOLD_BITS",
+    "ImageTooLargeError",
+    "ImageUndecodableError",
+    "is_image",
+    "perceptual_fingerprint",
+    "same_picture",
+]
 
 # Bits two fingerprints may differ by and still be the same picture. pHash's own guidance
 # puts re-encodings within a handful of bits and unrelated images near half of 64.
 MATCH_THRESHOLD_BITS: Final = 10
-
-# Refuse decompression bombs rather than hand the decoder unbounded memory.
-Image.MAX_IMAGE_PIXELS = 200_000_000
-
-pillow_heif.register_heif_opener()
-
-
-class ImageUndecodableError(ValueError):
-    """The content claims to be an image but no decoder accepts it."""
+# pHash reduces to 32x32, so a JPEG decoded with this edge or more keeps all it uses.
+_DECODE_EDGE: Final = 512
 
 
 def is_image(media_type: str) -> bool:
@@ -35,21 +43,17 @@ def is_image(media_type: str) -> bool:
     return media_type.startswith("image/")
 
 
-def perceptual_fingerprint(handle: BinaryIO) -> PerceptualFingerprint:
+def perceptual_fingerprint(
+    handle: BinaryIO, *, max_pixels: int = DEFAULT_MAX_PIXELS
+) -> PerceptualFingerprint:
     """Compute the perceptual fingerprint of an image, leaving the handle at the start.
 
     Raises:
+        ImageTooLargeError: the image would decode to more than `max_pixels` pixels.
         ImageUndecodableError: the bytes are not an image any installed decoder reads.
     """
-    handle.seek(0)
-    try:
-        with Image.open(handle) as image:
-            image.load()
-            unsigned = int(str(imagehash.phash(image, hash_size=8)), 16)
-    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as error:
-        raise ImageUndecodableError(f"image could not be decoded: {error}") from None
-    finally:
-        handle.seek(0)
+    with open_bounded(handle, max_pixels=max_pixels, target_edge=_DECODE_EDGE) as image:
+        unsigned = int(str(imagehash.phash(image, hash_size=8)), 16)
     # Stored signed so PostgreSQL's bigint round-trips it.
     signed = unsigned - (1 << PERCEPTUAL_HASH_BITS) if unsigned >> 63 else unsigned
     return PerceptualFingerprint(value=signed)

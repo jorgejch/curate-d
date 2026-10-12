@@ -66,6 +66,15 @@ class StagingCapacityExhaustedError(StagingError):
     """
 
 
+class StagingCapacityNeverFitsError(StagingCapacityExhaustedError):
+    """The requested bytes exceed the whole bound, so no amount of waiting admits them.
+
+    A subclass so callers that only distinguish "no room" keep working, while one that
+    retries can stop: a retry is right for staging that is full for now, never for
+    content larger than the bound itself.
+    """
+
+
 class StagingLeaseError(StagingError):
     """A use lease could not be taken or recorded."""
 

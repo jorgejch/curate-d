@@ -16,7 +16,11 @@ from uuid import UUID
 
 import pytest
 
-from curate_d.staging.errors import StagingCapacityExhaustedError, StagingObjectStoreError
+from curate_d.staging.errors import (
+    StagingCapacityExhaustedError,
+    StagingCapacityNeverFitsError,
+    StagingObjectStoreError,
+)
 from curate_d.staging.keys import StagingKey
 from curate_d.staging.objects import (
     StagedObject,
@@ -407,9 +411,10 @@ async def test_the_bound_is_inclusive_at_its_last_byte(
     async with subject.reserve(600) as admitted:
         assert admitted.reclaimed.evicted == ()
 
-    with pytest.raises(StagingCapacityExhaustedError):
+    with pytest.raises(StagingCapacityExhaustedError) as refused:
         async with subject.reserve(601):
             pass
+    assert not isinstance(refused.value, StagingCapacityNeverFitsError)
 
 
 async def test_content_larger_than_the_whole_bound_is_refused_outright(
@@ -419,7 +424,7 @@ async def test_content_larger_than_the_whole_bound_is_refused_outright(
     publish(index, store, seed=1, size=100, age=timedelta(days=9))
     subject = occupancy_for(store, index, max_bytes=1000)
 
-    with pytest.raises(StagingCapacityExhaustedError, match="never fit"):
+    with pytest.raises(StagingCapacityNeverFitsError, match="never fit"):
         async with subject.reserve(1001):
             pass
 

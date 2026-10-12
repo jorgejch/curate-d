@@ -15,9 +15,9 @@ from zoneinfo import ZoneInfo
 from PIL import Image, UnidentifiedImageError
 from pydantic import AwareDatetime, Field
 from pypdf import PdfReader
-from pypdf.errors import PdfReadError
+from pypdf.errors import DependencyError, PyPdfError
 
-from curate_d.content import perceptual  # noqa: F401 - registers the HEIF opener
+from curate_d.content import decode  # noqa: F401 - registers the HEIF opener
 from curate_d.domain import DomainModel, GeoPoint
 
 # EXIF tag numbers (CIPA DC-008).
@@ -124,13 +124,17 @@ def _exif_time(value: object, offset: tzinfo | None, local: tzinfo | None) -> da
 
 
 def image_metadata(handle: BinaryIO, *, local_timezone: str | None) -> EmbeddedMetadata:
-    """EXIF metadata of an image. A file no decoder opens yields nothing."""
+    """Return the EXIF metadata of an image. A file no decoder opens yields nothing.
+
+    Reading EXIF decodes no pixels, so no decode budget applies; an image so large that
+    Pillow refuses even to open it yields nothing, like an undecodable one.
+    """
     handle.seek(0)
     local = ZoneInfo(local_timezone) if local_timezone else None
     try:
         with Image.open(handle) as image:
             exif = image.getexif()
-    except (UnidentifiedImageError, OSError, ValueError):
+    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError):
         return EmbeddedMetadata()
     finally:
         handle.seek(0)
@@ -185,7 +189,12 @@ _TEXT_SAMPLE_CHARS: Final = 4000
 
 
 def pdf_metadata(handle: BinaryIO) -> EmbeddedMetadata:
-    """The information dictionary and leading text of a PDF. A broken PDF yields nothing."""
+    """Return the information dictionary and leading text of a PDF.
+
+    A broken PDF yields nothing, as does one pypdf refuses to read: a stream past its
+    decompression limits (`LimitReachedError`) or one needing a decoder that is not
+    installed (`DependencyError`).
+    """
     handle.seek(0)
     try:
         reader = PdfReader(handle)
@@ -196,7 +205,7 @@ def pdf_metadata(handle: BinaryIO) -> EmbeddedMetadata:
             sample += page.extract_text() or ""
             if len(sample) >= _TEXT_SAMPLE_CHARS:
                 break
-    except (PdfReadError, OSError, ValueError, KeyError):
+    except (PyPdfError, DependencyError, OSError, ValueError, KeyError):
         return EmbeddedMetadata()
     finally:
         handle.seek(0)
