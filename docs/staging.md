@@ -175,21 +175,26 @@ runs from acquiring the lock to the admission decision (measuring, reclaiming an
 evicting). `upload_seconds` is the upload and `registration_seconds` the row insert.
 `commit_seconds` runs from the insert to the end of the reservation block, which is
 mostly the writer transaction's commit. Admission, upload, registration and commit add
-up to the holding's `held_seconds`, less a few statements. The lock wait is not a phase:
-it is the holding's `wait_seconds`. `outcome` is one of:
+up to the holding's `held_seconds`, give or take a few statements. The lock wait is not a
+phase: it is the holding's `wait_seconds`. `outcome` is one of:
 
 - `registered`: the reservation committed. A later lookup that finds another attempt's
-  registration still raises `StagingIntegrityError`, but outside the reservation.
-- `refused`: admission raised `StagingCapacityExhaustedError`. No phase ran, so every
-  phase field and the reclamation counts are `null`.
+  registration (the insert lost the race and wrote nothing) still raises
+  `StagingIntegrityError`, but outside the reservation.
+- `refused`: admission raised `StagingCapacityExhaustedError`, so the block never ran.
 - `cancelled`: the task was cancelled, typically by a drain.
 - `failed`: any other exception, such as a short source, a transfer deadline or a
   database failure.
 
-`error` is the exception's class name, or `null` when the outcome is `registered`. A
-phase that never started is `null`. A phase that a failure or cancellation cut short
-runs to the end of the reservation, rollback included. `evicted` and `protected` count
-keys, and `orphans_deleted` counts objects, from the admission's reclamation.
+`error` is the exception's class name, or `null` when the outcome is `registered`.
+`admission_seconds` and the reclamation counts come from the admission the reservation
+yielded, so they are `null` whenever admission did not admit: a refusal, or a failure or
+cancellation while measuring or evicting. That admission still ran under the lock, and
+its time, eviction included, is in the holding's `held_seconds` (`occupancy.reserve`).
+Upload, registration and commit are `null` when they never started. A phase that a
+failure or cancellation cut short runs to the end of the reservation, rollback included.
+`evicted` and `protected` count keys, and `orphans_deleted` counts objects, from the
+admission's reclamation.
 
 The queries read JSON lines over a chosen window. Pick the window with `--since`, add
 `-c <container>` for a pod that runs a sidecar, and skip non-JSON lines with `fromjson?`.

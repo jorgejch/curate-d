@@ -875,10 +875,12 @@ class SlowListingStore(FakeObjectStore):
     """Takes `delay` seconds to start every listing, standing in for a slow paginator."""
 
     def __init__(self, delay: float) -> None:
+        """Start empty, with every listing delayed by `delay` seconds."""
         super().__init__()
         self.delay = delay
 
     async def list_objects(self) -> AsyncIterator[StagedObjectRef]:
+        """Wait `delay` seconds, then list as the fake store does."""
         await asyncio.sleep(self.delay)
         async for ref in super().list_objects():
             yield ref
@@ -908,14 +910,14 @@ async def test_an_admission_that_reclaims_counts_every_listing_it_waited_on(
         assert admitted.admission_seconds >= 3 * delay
 
 
-async def test_an_uncontended_admission_reports_a_nonnegative_time(
+async def test_an_uncontended_admission_reports_its_time(
     store: FakeObjectStore, index: FakeCacheIndex
 ) -> None:
     """A fast decision still reports its time rather than leaving the default in place."""
     subject = occupancy_for(store, index, max_bytes=1000)
 
     async with subject.reserve(0) as admitted:
-        assert admitted.admission_seconds >= 0
+        assert admitted.admission_seconds > 0
 
 
 async def test_a_refusal_raises_as_before_the_timing_was_added(

@@ -426,6 +426,7 @@ class EmptyResult:
     """Answers every lock probe with `granted` and finds no row."""
 
     def __init__(self, granted: bool = True) -> None:
+        """Answer every lock probe with `granted`."""
         self._granted = granted
 
     def scalar_one(self) -> bool:
@@ -438,9 +439,11 @@ class EmptyResult:
         return None
 
     def all(self) -> list[object]:
+        """Return no rows."""
         return []
 
     def __iter__(self) -> Iterator[object]:
+        """Iterate over no rows."""
         return iter(())
 
 
