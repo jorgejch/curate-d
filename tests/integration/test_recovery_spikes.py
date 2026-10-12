@@ -56,9 +56,27 @@ async def spike_fork_from_step(original: str, successor: str) -> str:
     return await _fork_then_cancel(original, successor)
 
 
+async def _latest_version(engine: AsyncEngine, settings: Settings) -> str | None:
+    """Return this application's latest version as DBOS ranks it, if any."""
+    async with engine.connect() as connection:
+        latest = await connection.scalar(
+            text(
+                "SELECT version_name FROM dbos.application_versions"
+                " WHERE application_name = :app ORDER BY version_timestamp DESC LIMIT 1"
+            ),
+            {"app": application_name(settings.environment)},
+        )
+    return None if latest is None else str(latest)
+
+
 @pytest.fixture
-async def dbos(settings: Settings) -> AsyncIterator[None]:
-    """Launch DBOS on the target version, holding its executor lease as a worker does."""
+async def dbos(settings: Settings, ledger_engine: AsyncEngine) -> AsyncIterator[None]:
+    """Launch DBOS on the target version, holding its executor lease as a worker does.
+
+    Launching a new version makes it DBOS's latest, so the previous latest is restored
+    and the target version deleted afterwards.
+    """
+    previous_latest = await _latest_version(ledger_engine, settings)
     DBOS.destroy()
     lease = ExecutorLease.for_settings(settings, EXECUTOR)
     lease.acquire(timeout=10)
@@ -72,8 +90,15 @@ async def dbos(settings: Settings) -> AsyncIterator[None]:
         rows = await DBOS.list_workflows_async(app_version=[TARGET_VERSION, SOURCE_VERSION])
         if rows:
             await DBOS.delete_workflows_async([row.workflow_id for row in rows])
+        if previous_latest is not None:
+            await DBOS.set_latest_application_version_async(previous_latest)
         DBOS.destroy()
         lease.release()
+        async with ledger_engine.begin() as connection:
+            await connection.execute(
+                text("DELETE FROM dbos.application_versions WHERE version_name = :v"),
+                {"v": TARGET_VERSION},
+            )
 
 
 async def _seed(engine: AsyncEngine, workflow_id: str, app_name: str | None) -> None:
