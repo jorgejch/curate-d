@@ -12,6 +12,12 @@ from curate_d.domain.audit import (
     AuditValue,
 )
 from curate_d.domain.base import DomainModel
+from curate_d.domain.conditions import (
+    CONDITION_FIELDS,
+    check_conditions,
+    matches,
+    orphaned,
+)
 from curate_d.domain.configuration import ConfigurationKind
 from curate_d.domain.connection import (
     ConnectionHealth,
@@ -51,6 +57,7 @@ from curate_d.domain.placement import (
 )
 from curate_d.domain.policy import (
     SEED_POLICY,
+    CapabilityProfileName,
     DestinationConfig,
     PlacementPolicy,
     PlacementRule,
@@ -77,6 +84,7 @@ from curate_d.domain.source import (
 from curate_d.domain.taxonomy import SEED_TAXONOMY, Taxonomy, TaxonomyField
 
 __all__ = [
+    "CONDITION_FIELDS",
     "CURATE_D_NAMESPACE",
     "PERCEPTUAL_HASH_BITS",
     "SEED_POLICY",
@@ -85,6 +93,7 @@ __all__ = [
     "AuditEntry",
     "AuditEntryType",
     "AuditValue",
+    "CapabilityProfileName",
     "ChangeSignal",
     "ClassificationResult",
     "ClassificationTier",
@@ -128,7 +137,10 @@ __all__ = [
     "Taxonomy",
     "TaxonomyField",
     "VerificationLevel",
+    "check_conditions",
     "derive_content_object_id",
     "derive_placement_id",
     "derive_source_object_id",
+    "matches",
+    "orphaned",
 ]
