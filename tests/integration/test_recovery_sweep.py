@@ -783,6 +783,7 @@ async def test_a_running_worker_keeps_its_version_from_the_sweep(
             failures.append(error)
 
     thread = threading.Thread(target=serve, name="sweep-test-worker")
+    worker_version_registered = worker_version in await _registered_versions(ledger_engine)
     thread.start()
     try:
         for _ in range(300):
@@ -819,7 +820,7 @@ async def test_a_running_worker_keeps_its_version_from_the_sweep(
             )
             await connection.execute(
                 text("DELETE FROM lease_versions WHERE version = ANY(:v)"),
-                {"v": [target, worker_version]},
+                {"v": [target] if worker_version_registered else [target, worker_version]},
             )
             await connection.execute(
                 text("DELETE FROM dbos.application_versions WHERE version_name = :v"),

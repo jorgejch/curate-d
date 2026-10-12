@@ -57,10 +57,21 @@ def target(system_engine: sa.Engine) -> Iterator[str]:
             ),
             {"app": _app()},
         )
+        inserted_target = (
+            connection.scalar(
+                sa.text(
+                    "INSERT INTO lease_versions (version) VALUES (:target)"
+                    " ON CONFLICT (version) DO NOTHING RETURNING version"
+                ),
+                {"target": version},
+            )
+            is not None
+        )
         connection.execute(
             sa.text(
-                "INSERT INTO lease_versions (version, first_registered) VALUES"
-                " (:source, now() - interval '1 hour'), (:target, now())"
+                "INSERT INTO lease_versions (version, first_registered)"
+                " SELECT :source, first_registered - interval '1 hour'"
+                " FROM lease_versions WHERE version = :target"
                 " ON CONFLICT (version) DO NOTHING"
             ),
             {"source": SOURCE, "target": version},
@@ -90,7 +101,7 @@ def target(system_engine: sa.Engine) -> Iterator[str]:
             )
             connection.execute(
                 sa.text("DELETE FROM lease_versions WHERE version = ANY(:v)"),
-                {"v": [SOURCE, version]},
+                {"v": [SOURCE, version] if inserted_target else [SOURCE]},
             )
             if previous is not None and previous != version:
                 connection.execute(
