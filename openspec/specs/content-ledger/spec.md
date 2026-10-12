@@ -71,3 +71,35 @@ The system SHALL record an append-only audit entry for every classification deci
 - **WHEN** the ledger holds `workflow_command_issued` or `workflow_command_completed` entries recorded before the Conductor command path was removed
 - **THEN** they remain in the trail unchanged, valid under the entry-type constraint and returned by audit reads
 - **AND** no new entry of either type is written
+
+### Requirement: Perceptual fingerprint within the decode budget
+
+The system SHALL compute an image's perceptual fingerprint within the CPU worker's pixel budget, decoding at a reduced scale where the format allows. An image that would still exceed the budget, or that no decoder reads, SHALL keep its strong fingerprint and media type, SHALL have no perceptual fingerprint, and SHALL have the reason recorded.
+
+#### Scenario: Large JPEG
+- **WHEN** a JPEG larger than the budget can be decoded at a reduced scale within it
+- **THEN** its perceptual fingerprint is computed from the reduced decode
+- **AND** it lies within the match threshold of a full decode's fingerprint
+
+#### Scenario: Image above the budget
+- **WHEN** an image would decode to more pixels than the budget
+- **THEN** the content object is recorded with its strong fingerprint and no perceptual fingerprint
+- **AND** the inspection records the image's size and the budget
+
+### Requirement: Files that can never be staged fail at once
+
+A file larger than any bound it must fit whole — the configured per-file ceiling when set, the total staging bound, or the reading worker's local scratch bound — SHALL fail before its content is requested from the provider. A staging refusal stating that a request can never fit SHALL be treated the same way. Neither SHALL wait for capacity.
+
+#### Scenario: File larger than staging
+- **WHEN** a listed file's size exceeds a bound it must fit whole
+- **THEN** no content is requested from the provider and no content object is created
+- **AND** the source object is marked as failed with a reason naming the file's size and the bound
+- **AND** the failure is recorded in the audit trail
+
+#### Scenario: Staging reports that a request will never fit
+- **WHEN** staging refuses a file because it exceeds the whole bound
+- **THEN** the source object is marked as failed at once, without waiting for capacity
+
+#### Scenario: Staging full for now
+- **WHEN** staging refuses a file that fits its bound because the space is in use
+- **THEN** the ingest waits durably and tries again, for a bounded time, as before
