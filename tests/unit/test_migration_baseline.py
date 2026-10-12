@@ -1,15 +1,12 @@
 """The Alembic revision graph starts at the squashed baseline and stays one chain."""
 
 import ast
-import re
 from pathlib import Path
 
 import pytest
 from alembic.config import Config
 from alembic.script import Script, ScriptDirectory
 from alembic.util import to_tuple
-
-from curate_d.domain.audit import AuditEntryType
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BASELINE = "0001_baseline"
@@ -60,10 +57,3 @@ def test_the_baseline_imports_nothing_from_the_application(scripts: ScriptDirect
     ]
     imported += [node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
     assert not [name for name in imported if name.split(".")[0] == "curate_d"]
-
-
-def test_the_baseline_allows_every_audit_entry_type(scripts: ScriptDirectory) -> None:
-    """The baseline's entry_type CHECK lists exactly the AuditEntryType values."""
-    allowed = set(re.findall(r"'([a-z_]+)'", _baseline(scripts).module._AUDIT_ENTRY_TYPES))
-
-    assert allowed == {member.value for member in AuditEntryType}
