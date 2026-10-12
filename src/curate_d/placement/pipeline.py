@@ -8,6 +8,11 @@ fingerprinted, rather than filing new bytes under the old classification.
 
 The source is only ever read. Nothing here writes to it.
 
+A copy that starts discards the previous copy's evidence, and a verification concludes
+only the attempt it belongs to, and only while that attempt is still verifying. A
+verification run again by a rewind or a fork after a newer attempt has started therefore
+changes nothing, and cannot register the old copy's evidence at the new locator.
+
 A copy reserves its locator in the transaction that records it starting. Reconciliation
 resolves collisions against what the ledger held when it evaluated, which says nothing
 about content evaluated beside it; so the start locks the path, looks again, and resolves
@@ -26,6 +31,7 @@ from curate_d.domain import (
     AuditEntryType,
     AuditValue,
     ContentObjectId,
+    DestinationConfig,
     Placement,
     PlacementId,
     PlacementState,
@@ -55,16 +61,42 @@ class PlacementStore:
         """Wrap a caller-owned connection."""
         self._connection = connection
 
-    async def set_evidence(self, placement_id: PlacementId, evidence: TransferEvidence) -> None:
-        """Record a copy's evidence and move the placement to verifying."""
+    async def set_evidence(
+        self, placement_id: PlacementId, evidence: TransferEvidence, *, attempt: int | None = None
+    ) -> bool:
+        """Record a copy's evidence and move the placement to verifying.
+
+        Args:
+            placement_id: The placement copied.
+            evidence: Both sides of the copy.
+            attempt: The attempt that copied. When given, the evidence is recorded only
+                while that attempt is the placement's latest and still copying, so an old
+                attempt run again cannot overwrite a newer one's.
+
+        Returns:
+            Whether the evidence was recorded.
+        """
+        statement = placements.update().where(placements.c.id == placement_id)
+        if attempt is not None:
+            statement = statement.where(
+                placements.c.attempts == attempt,
+                placements.c.state == PlacementState.COPYING.value,
+            )
+        result = await self._connection.execute(
+            statement.values(
+                evidence=evidence.model_dump(mode="json"), state=PlacementState.VERIFYING.value
+            )
+        )
+        return result.rowcount > 0
+
+    async def clear_evidence(self, placement_id: PlacementId) -> None:
+        """Discard the recorded evidence, so nothing can assess it again."""
         await self._connection.execute(
-            placements.update()
-            .where(placements.c.id == placement_id)
-            .values(evidence=evidence.model_dump(mode="json"), state=PlacementState.VERIFYING.value)
+            placements.update().where(placements.c.id == placement_id).values(evidence=None)
         )
 
     async def evidence(self, placement_id: PlacementId) -> TransferEvidence | None:
-        """The latest copy's evidence."""
+        """Return the latest copy's evidence, or None when none is recorded."""
         value = await self._connection.scalar(
             select(placements.c.evidence).where(placements.c.id == placement_id)
         )
@@ -73,6 +105,56 @@ class PlacementStore:
         if not isinstance(value, Mapping):
             raise ValueError(f"placement {placement_id} evidence is not an object")
         return TransferEvidence.model_validate(value, strict=False)
+
+
+def location_details(destination: DestinationConfig) -> dict[str, AuditValue]:
+    """Return where a destination puts its copies, as audit details.
+
+    Recorded when a copy starts, so the entry still names the location in force then
+    after the destination is redefined.
+    """
+    return {
+        "destination_provider": destination.provider.value,
+        "destination_account": destination.account,
+        "destination_root": destination.root_path,
+    }
+
+
+def started_details(
+    *,
+    template_version: str,
+    source: SourceObject,
+    attempt: int,
+    transformations: Mapping[str, str],
+    rendered_locator: str,
+    held_by: ContentObjectId | None = None,
+    context: Mapping[str, AuditValue] | None = None,
+) -> dict[str, AuditValue]:
+    """Return the details of a placement_started entry.
+
+    Args:
+        template_version: The template version the locator was rendered with.
+        source: The source the copy reads.
+        attempt: The attempt recorded on the placement.
+        transformations: Components normalization changed, by rendered form.
+        rendered_locator: The locator rendered; recorded only when `held_by` holds it.
+        held_by: Other content holding `rendered_locator`, which pushed this content to
+            a suffixed locator.
+        context: Further evidence the caller holds, such as the destination's location
+            and the policy version. The keys above take precedence over it.
+    """
+    collision: dict[str, AuditValue] = (
+        {} if held_by is None else {"rendered_locator": rendered_locator, "held_by": str(held_by)}
+    )
+    return {
+        **(context or {}),
+        "template_version": template_version,
+        "source_path": source.path,
+        "source_version_marker": source.version_marker,
+        "attempt": attempt,
+        **collision,
+        **{f"original_{key}": value for key, value in transformations.items()},
+    }
 
 
 def _audit(
@@ -170,12 +252,15 @@ async def start(
     source: SourceObject,
     transformations: Mapping[str, str],
     attempt: int = 0,
+    context: Mapping[str, AuditValue] | None = None,
     now: AwareDatetime,
 ) -> tuple[Placement, bool]:
     """Reserve a locator and record that a copy is starting as attempt `attempt`.
 
     The attempt count is never lowered. The locator recorded is `locator` unless other
-    content already holds it; see `reserve`.
+    content already holds it; see `reserve`. The previous copy's evidence is discarded,
+    so a verification of that copy run again finds nothing to assess. `context` joins
+    the audit entry's details; see `started_details`.
 
     Returns:
         The placement, and whether a copy should start: False when it is already
@@ -210,20 +295,20 @@ async def start(
         }
     )
     stored = await placements_repo.upsert(placement)
-    collision: dict[str, AuditValue] = (
-        {} if displaced_by is None else {"rendered_locator": locator, "held_by": str(displaced_by)}
-    )
+    await PlacementStore(connection).clear_evidence(stored.id)
     await AuditRepository(connection).append(
         _audit(
             AuditEntryType.PLACEMENT_STARTED,
             stored,
-            {
-                "template_version": template_version,
-                "source_path": source.path,
-                "attempt": stored.attempts,
-                **collision,
-                **{f"original_{key}": value for key, value in transformations.items()},
-            },
+            started_details(
+                template_version=template_version,
+                source=source,
+                attempt=stored.attempts,
+                transformations=transformations,
+                rendered_locator=locator,
+                held_by=displaced_by,
+                context=context,
+            ),
             now,
         )
     )
@@ -308,23 +393,43 @@ async def conclude(
     placement_id: PlacementId,
     assessment: Assessment,
     *,
+    attempt: int | None = None,
+    source_version_marker: str | None = None,
     now: AwareDatetime,
-) -> tuple[Placement | None, SourceObject | None]:
+) -> tuple[Placement, SourceObject | None] | None:
     """Register, distrust or fail a placement from its assessment.
 
+    Only a placement still verifying is concluded, and, when `attempt` is given, only
+    while that attempt is its latest. The check runs in the writing transaction, so a
+    verification run again after a newer attempt started changes nothing.
+
+    Args:
+        connection: The connection of the writing transaction.
+        placement_id: The placement assessed.
+        assessment: What the copy's evidence showed.
+        attempt: The attempt whose evidence was assessed.
+        source_version_marker: The source's version when it was copied, for the audit.
+        now: When the conclusion is recorded.
+
     Returns:
-        The placement as recorded, and the source when it was sent back to be
-        fingerprinted.
+        None when there was nothing to conclude. Otherwise the placement as recorded,
+        and the source when it was sent back to be fingerprinted.
     """
     placements_repo = PlacementRepository(connection)
     placement = await placements_repo.get(placement_id)
-    if placement is None:
-        return None, None
+    if (
+        placement is None
+        or placement.state is not PlacementState.VERIFYING
+        or (attempt is not None and placement.attempts != attempt)
+    ):
+        return None
     details: dict[str, AuditValue] = {
         "compared": assessment.compared,
         "source_value": assessment.source_value,
         "destination_value": assessment.destination_value,
         "reason": assessment.reason,
+        "attempt": placement.attempts,
+        "source_version_marker": source_version_marker,
     }
     audit = AuditRepository(connection)
     if assessment.verdict is Verdict.VERIFIED:

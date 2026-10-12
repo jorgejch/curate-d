@@ -11,6 +11,11 @@ destination content, and nothing is registered until verification says so. A tra
 that cannot be admitted, or that runs out of scratch, waits durably and retries; a copy
 that fails outright is recorded as failed, and the next reconciliation pass starts a new
 attempt under a new workflow identity.
+
+A verification belongs to the attempt `start` recorded, in its identity and its input. A
+placement rewound after an attempt failed records a later attempt when it starts again, so
+its copy gets a verification of its own rather than collapsing onto the finished one. An
+old attempt run again after a newer one started records no evidence and concludes nothing.
 """
 
 from datetime import datetime
@@ -26,6 +31,7 @@ from curate_d.domain import (
     DomainModel,
     Placement,
     PlacementId,
+    PlacementState,
     SourceObject,
     SourceObjectState,
     StrongFingerprint,
@@ -39,7 +45,14 @@ from curate_d.placement.admission import (
     TransferTooLargeError,
     size_class,
 )
-from curate_d.placement.pipeline import PlacementStore, conclude, defer, fail, start
+from curate_d.placement.pipeline import (
+    PlacementStore,
+    conclude,
+    defer,
+    fail,
+    location_details,
+    start,
+)
 from curate_d.placement.rclone import RcloneError
 from curate_d.placement.transfer import (
     ScratchExhaustedError,
@@ -62,6 +75,9 @@ from curate_d.workflows.ingest import IngestRequest, enqueue_ingest
 logger = get_logger(__name__)
 
 VERIFY_PREFIX: Final = "verify"
+# What `verify_placement` returns when it concluded nothing.
+MISSING: Final = "missing"
+SUPERSEDED: Final = "superseded"
 # Deferred or scratch-starved transfers wait and retry this many times, doubling from
 # `transfer_retry_seconds` up to fifteen times it, before being recorded as failed.
 TRANSFER_WAITS: Final = 10
@@ -81,6 +97,9 @@ class PlacementRequest(DomainModel):
     originals: dict[str, str] = Field(
         default_factory=dict, description="Components normalization changed, by rendered form."
     )
+    policy_version: int | None = Field(
+        default=None, ge=1, description="The policy version the request was evaluated under."
+    )
 
 
 class PlaceOutcome(StrEnum):
@@ -90,6 +109,8 @@ class PlaceOutcome(StrEnum):
     ALREADY_PRESENT = "already_present"
     FAILED = "failed"
     NO_SOURCE = "no_source"
+    SUPERSEDED = "superseded"
+    """A newer attempt started while this one copied; its evidence was not recorded."""
 
 
 def placement_workflow_for(request: PlacementRequest) -> str:
@@ -100,7 +121,7 @@ def placement_workflow_for(request: PlacementRequest) -> str:
 
 
 def verification_workflow_for(placement_id: PlacementId, attempt: int) -> str:
-    """The workflow identity of verifying one attempt's copy."""
+    """Return the workflow identity of verifying the copy of the attempt `start` recorded."""
     return f"{VERIFY_PREFIX}:{placement_id}:{attempt}"
 
 
@@ -200,14 +221,18 @@ async def _start_tx(
         source=source,
         transformations=request.originals,
         attempt=request.attempt,
+        context={
+            **location_details(request.destination),
+            "policy_version": request.policy_version,
+        },
         now=now,
     )
 
 
-async def _evidence_tx(placement_id: PlacementId, evidence: TransferEvidence) -> None:
-    """Record the copy's evidence, before anything assesses it."""
+async def _evidence_tx(placement_id: PlacementId, evidence: TransferEvidence, attempt: int) -> bool:
+    """Record the copy's evidence while `attempt` is still the one copying."""
     connection = await current().datasource.sql_session().connection()
-    await PlacementStore(connection).set_evidence(placement_id, evidence)
+    return await PlacementStore(connection).set_evidence(placement_id, evidence, attempt=attempt)
 
 
 async def _defer_tx(placement_id: PlacementId, reason: str) -> None:
@@ -223,12 +248,27 @@ async def _fail_tx(placement_id: PlacementId, reason: str, now: datetime) -> Non
 
 
 async def _conclude_tx(
-    placement_id: PlacementId, assessment: Assessment, now: datetime
-) -> SourceObject | None:
-    """Register, distrust or fail the placement; return a source sent back, if any."""
+    placement_id: PlacementId,
+    assessment: Assessment,
+    attempt: int,
+    source_version_marker: str | None,
+    now: datetime,
+) -> tuple[bool, SourceObject | None]:
+    """Register, distrust or fail the placement if `attempt` is still verifying.
+
+    Returns:
+        Whether it was concluded, and the source sent back to be fingerprinted, if any.
+    """
     connection = await current().datasource.sql_session().connection()
-    _, reset = await conclude(connection, placement_id, assessment, now=now)
-    return reset
+    concluded = await conclude(
+        connection,
+        placement_id,
+        assessment,
+        attempt=attempt,
+        source_version_marker=source_version_marker,
+        now=now,
+    )
+    return (False, None) if concluded is None else (True, concluded[1])
 
 
 # Workflows.
@@ -280,20 +320,39 @@ async def place_content(request: PlacementRequest) -> PlaceOutcome:
             await _placement_now_step(),
         )
         return PlaceOutcome.FAILED
-    await datasource.run_tx_step_async(
-        {"name": "record_evidence"}, _evidence_tx, placement.id, evidence
+    recorded = await datasource.run_tx_step_async(
+        {"name": "record_evidence"}, _evidence_tx, placement.id, evidence, placement.attempts
     )
-    with SetWorkflowID(verification_workflow_for(placement.id, request.attempt)):
-        await DBOS.enqueue_workflow_async(QueueName.VERIFY.value, verify_placement, placement.id)
+    if not recorded:
+        logger.info("placement.superseded", placement_id=str(placement.id))
+        return PlaceOutcome.SUPERSEDED
+    with SetWorkflowID(verification_workflow_for(placement.id, placement.attempts)):
+        await DBOS.enqueue_workflow_async(
+            QueueName.VERIFY.value, verify_placement, placement.id, placement.attempts
+        )
     return PlaceOutcome.COPIED
 
 
 @DBOS.workflow()
-async def verify_placement(placement_id: PlacementId) -> str:
-    """Assess recorded evidence and register, distrust or send the source back."""
+async def verify_placement(placement_id: PlacementId, attempt: int | None = None) -> str:
+    """Assess recorded evidence and register, distrust or send the source back.
+
+    Only `attempt`'s copy is concluded, and only while it is verifying; any attempt when
+    `attempt` is None, as for a verification enqueued before it was passed.
+
+    Returns:
+        The verdict, `MISSING` when there is no placement or evidence, or `SUPERSEDED`
+        when the placement is not verifying that attempt's copy any more.
+    """
     placement, evidence, source = await _verification_inputs_step(placement_id)
-    if placement is None or evidence is None:
-        return "missing"
+    if placement is None:
+        return MISSING
+    if placement.state is not PlacementState.VERIFYING or (
+        attempt is not None and placement.attempts != attempt
+    ):
+        return SUPERSEDED
+    if evidence is None:
+        return MISSING
     assessment = (
         source_changed(
             evidence,
@@ -303,13 +362,17 @@ async def verify_placement(placement_id: PlacementId) -> str:
         if source is not None
         else None
     ) or assess(evidence)
-    reset = await current().datasource.run_tx_step_async(
+    concluded, reset = await current().datasource.run_tx_step_async(
         {"name": "conclude_placement"},
         _conclude_tx,
         placement_id,
         assessment,
+        placement.attempts,
+        evidence.source_version_marker,
         await _placement_now_step(),
     )
+    if not concluded:
+        return SUPERSEDED
     if reset is not None:
         await enqueue_ingest(
             [
