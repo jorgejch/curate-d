@@ -1,14 +1,12 @@
 """The gated sweep's failure boundaries, on in-memory DBOS rows, leases and version locks."""
 
-import inspect
+from collections.abc import Iterator
+from contextlib import contextmanager
 from sqlite3 import IntegrityError as SQLiteIntegrityError
 from unittest.mock import AsyncMock
 
 import pytest
-from dbos import DBOS, DBOSClient
-from dbos._context import get_local_dbos_context
-from dbos._sys_db import WorkflowStatuses
-from dbos._utils import INTERNAL_QUEUE_NAME
+from dbos import DBOS
 from psycopg.errors import UniqueViolation
 from sqlalchemy.exc import IntegrityError
 from structlog.testing import capture_logs
@@ -18,12 +16,16 @@ from curate_d.runtime import sweep
 from curate_d.runtime.dbos_app import APPLICATION_NAME
 from curate_d.runtime.lease import lease_key
 from curate_d.runtime.sweep import (
+    MAX_SWEEP_REDISPATCHES,
     RECOVERY_SCHEDULE_NAME,
+    REDISPATCH_COUNT_ATTRIBUTE,
+    REDISPATCH_VERSION_ATTRIBUTE,
     ClientRecoveryControl,
     DBOSRecoveryControl,
     PendingWorkflow,
     SweepOutcome,
     recovery_successor_id,
+    redispatch_count,
     run_recovery_sweep,
 )
 from curate_d.runtime.version_lease import LockMode
@@ -33,6 +35,7 @@ from tests.unit.runtime.fake_recovery import (
     FakeRecoveryControl,
     FakeRegistrations,
     FakeVersionHolds,
+    Status,
     registered,
     workflow_status,
 )
@@ -40,6 +43,8 @@ from tests.unit.runtime.fake_recovery import (
 ORIGINAL = "original"
 SUCCESSOR = recovery_successor_id(ORIGINAL)
 WORKFLOW = PendingWorkflow(ORIGINAL, "retired", "v1")
+UNROUTED_QUEUES = [None, "_dbos_internal_queue", "retired-queue"]
+"""No queue, DBOS's internal queue, and a queue no curate.d worker dequeues."""
 
 
 @pytest.fixture
@@ -115,38 +120,19 @@ async def test_the_dbos_adapter_reads_the_latest_version_name(
     assert await DBOSRecoveryControl().latest_version() == "v2"
 
 
-async def test_the_dbos_adapter_reenqueues_through_the_system_database(
+async def test_the_dbos_adapter_resumes_onto_the_named_queue_and_replaces_attributes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Re-enqueue is conditional on the owner; the default queue is never relied on."""
-    calls: list[tuple[str, list[str], str]] = []
-
-    class _SysDB:
-        def reenqueue_for_recovery(
-            self, workflow_id: str, executor_ids: list[str], recovery_queue_name: str
-        ) -> bool:
-            calls.append((workflow_id, executor_ids, recovery_queue_name))
-            return True
-
-    class _Instance:
-        _sys_db = _SysDB()
-
-    monkeypatch.setattr(sweep, "_get_dbos_instance", _Instance)
-    assert await DBOSRecoveryControl().reenqueue(ORIGINAL, "worker-9")
-    assert calls == [(ORIGINAL, ["worker-9"], INTERNAL_QUEUE_NAME)]
-
-
-class _ClientSysDB:
-    """The client's private system database, recording re-enqueues."""
-
-    def __init__(self, calls: list[str]) -> None:
-        self.calls = calls
-
-    def reenqueue_for_recovery(
-        self, workflow_id: str, executor_ids: list[str], recovery_queue_name: str
-    ) -> bool:
-        self.calls.append("reenqueue")
-        return True
+    """Resume always names the row's queue; the attribute write goes through DBOS's update."""
+    resume = AsyncMock()
+    update = AsyncMock()
+    monkeypatch.setattr(DBOS, "resume_workflow_async", resume)
+    monkeypatch.setattr(DBOS, "update_workflow_attributes_async", update)
+    control = DBOSRecoveryControl()
+    await control.set_attributes(ORIGINAL, {"k": 1})
+    await control.reenqueue(ORIGINAL, queue_name="stage")
+    update.assert_awaited_once_with(ORIGINAL, {"k": 1})
+    resume.assert_awaited_once_with(ORIGINAL, queue_name="stage")
 
 
 class _Client:
@@ -154,9 +140,10 @@ class _Client:
 
     def __init__(self) -> None:
         self.calls: list[str] = []
-        self._sys_db = _ClientSysDB(self.calls)
         self.known = {ORIGINAL}
-        self.forks: list[tuple[str, str, int, dict[str, object]]] = []
+        self.forks: list[tuple[str | None, str, int, dict[str, object]]] = []
+        self.assigned: str | None = None
+        """The ID `SetWorkflowID` assigns while its block runs."""
 
     async def list_workflows_async(self, **filters: object) -> list[object]:
         self.calls.append(f"list:{sorted(filters)}")
@@ -174,16 +161,37 @@ class _Client:
     async def fork_workflow_async(
         self, workflow_id: str, start_step: int, **routing: object
     ) -> None:
-        context = get_local_dbos_context()
-        assert context is not None
-        self.calls.append(f"fork:{context.id_assigned_for_next_workflow}")
-        self.forks.append((context.id_assigned_for_next_workflow, workflow_id, start_step, routing))
+        self.calls.append(f"fork:{self.assigned}")
+        self.forks.append((self.assigned, workflow_id, start_step, routing))
 
     async def cancel_workflow_async(self, workflow_id: str) -> None:
         self.calls.append("cancel")
 
+    async def update_workflow_attributes_async(
+        self, workflow_id: str, attributes: dict[str, object]
+    ) -> None:
+        self.calls.append("set_attributes")
+
+    async def resume_workflow_async(self, workflow_id: str, *, queue_name: str) -> None:
+        self.calls.append(f"reenqueue:{queue_name}")
+
     async def get_latest_application_version_async(self) -> dict[str, str]:
         return {"version_name": "v2"}
+
+
+def _assign_ids(monkeypatch: pytest.MonkeyPatch, client: _Client) -> None:
+    """Make `SetWorkflowID` record its ID on `client` for the duration of its block."""
+
+    @contextmanager
+    def assign(workflow_id: str) -> Iterator[None]:
+        """Expose `workflow_id` as the ID assigned to the next workflow."""
+        client.assigned = workflow_id
+        try:
+            yield
+        finally:
+            client.assigned = None
+
+    monkeypatch.setattr(sweep, "SetWorkflowID", assign)
 
 
 @pytest.mark.parametrize("adapter", ["launched", "client"])
@@ -192,6 +200,7 @@ async def test_the_adapters_fork_under_the_successor_id_with_the_original_routin
 ) -> None:
     """SetWorkflowID makes the successor deterministic; version, queue and partition pass on."""
     client = _Client()
+    _assign_ids(monkeypatch, client)
     control: DBOSRecoveryControl | ClientRecoveryControl
     if adapter == "launched":
         monkeypatch.setattr(DBOS, "fork_workflow_async", client.fork_workflow_async)
@@ -238,9 +247,12 @@ async def test_the_client_adapter_returns_none_for_a_missing_workflow() -> None:
     assert await control.status(ORIGINAL) is None
 
 
-async def test_the_client_adapter_checks_the_lease_before_every_write() -> None:
-    """A lost standalone version lease stops the next fork, cancel or re-enqueue."""
+async def test_the_client_adapter_checks_the_lease_before_every_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lost standalone version lease stops the next fork, cancel, attribute write or resume."""
     client = _Client()
+    _assign_ids(monkeypatch, client)
     checks: list[str] = []
     control = ClientRecoveryControl(
         client,  # type: ignore[arg-type]
@@ -255,15 +267,16 @@ async def test_the_client_adapter_checks_the_lease_before_every_write() -> None:
         queue_partition_key=None,
     )
     await control.cancel(ORIGINAL)
-    assert await control.reenqueue(ORIGINAL, "worker-9")
+    await control.set_attributes(ORIGINAL, {})
+    await control.reenqueue(ORIGINAL, queue_name="stage")
     assert await control.latest_version() == "v2"
     status = await control.status(ORIGINAL)
     assert status is not None and status.workflow_id == ORIGINAL
-    assert checks == ["checked"] * 3
-    assert client.calls[:3] == [f"fork:{SUCCESSOR}", "cancel", "reenqueue"]
+    assert checks == ["checked"] * 4
+    assert client.calls[:4] == [f"fork:{SUCCESSOR}", "cancel", "set_attributes", "reenqueue:stage"]
 
 
-@pytest.mark.parametrize("operation", ["fork", "cancel", "reenqueue"])
+@pytest.mark.parametrize("operation", ["fork", "cancel", "set_attributes", "reenqueue"])
 async def test_a_lost_lease_stops_the_client_adapters_write(operation: str) -> None:
     """The write never reaches DBOS once the lease check raises."""
     client = _Client()
@@ -284,22 +297,11 @@ async def test_a_lost_lease_stops_the_client_adapters_write(operation: str) -> N
             )
         elif operation == "cancel":
             await control.cancel(ORIGINAL)
+        elif operation == "set_attributes":
+            await control.set_attributes(ORIGINAL, {})
         else:
-            await control.reenqueue(ORIGINAL, "worker-9")
+            await control.reenqueue(ORIGINAL, queue_name="stage")
     assert client.calls == []
-
-
-def test_the_recovery_reenqueue_binding_still_exists() -> None:
-    """Pins the private ``_sys_db.reenqueue_for_recovery`` both adapters call."""
-    from dbos._sys_db import SystemDatabase
-
-    parameters = inspect.signature(SystemDatabase.reenqueue_for_recovery).parameters
-    assert list(parameters) == ["self", "workflow_id", "executor_ids", "recovery_queue_name"]
-
-
-def test_the_client_still_holds_its_system_database_privately() -> None:
-    """Pins ``DBOSClient._sys_db``, which the operator sweep re-enqueues through."""
-    assert "self._sys_db" in inspect.getsource(DBOSClient.__init__)
 
 
 # One successor per original.
@@ -406,7 +408,7 @@ async def test_a_sweeper_off_the_target_forks_nothing_but_still_reenqueues(
     assert outcome.skipped == ("parked",)
     assert outcome.reenqueued == ("orphan",)
     assert outcome.forked == ()
-    assert [call[0] for call in control.writes()] == ["reenqueue"]
+    assert [call[0] for call in control.writes()] == ["set_attributes", "reenqueue"]
     assert registry.reads == 0
 
 
@@ -610,9 +612,9 @@ async def test_a_dead_executors_stale_tick_is_cancelled_not_reenqueued(
     assert control.writes() == [("cancel", "tick")]
 
 
-@pytest.mark.parametrize("queue", [None, INTERNAL_QUEUE_NAME])
-async def test_a_fork_onto_no_named_queue_is_refused(queue: str | None) -> None:
-    """Every worker dequeues the internal queue, so the row could cross the profile split."""
+@pytest.mark.parametrize("queue", UNROUTED_QUEUES)
+async def test_a_fork_onto_no_curate_d_queue_is_refused(queue: str | None) -> None:
+    """Every worker dequeues the internal queue and none another, so the row is not routed."""
     control = FakeRecoveryControl([workflow_status(ORIGINAL, version="v1", queue_name=queue)])
     outcome = await _sweep(control)
     assert [workflow_id for workflow_id, _ in outcome.failed] == [ORIGINAL]
@@ -620,11 +622,11 @@ async def test_a_fork_onto_no_named_queue_is_refused(queue: str | None) -> None:
     assert control.writes() == []
 
 
-@pytest.mark.parametrize("queue", [None, INTERNAL_QUEUE_NAME])
-async def test_a_reenqueue_onto_no_named_queue_is_refused(
+@pytest.mark.parametrize("queue", UNROUTED_QUEUES)
+async def test_a_reenqueue_onto_no_curate_d_queue_is_refused(
     queue: str | None, locks: FakeLockServer
 ) -> None:
-    """A dead executor's row without a named queue is reported and left."""
+    """A dead executor's row without a curate.d queue is reported and left."""
     control = FakeRecoveryControl(
         [workflow_status(ORIGINAL, version="v2", executor_id="worker-9", queue_name=queue)]
     )
@@ -668,11 +670,13 @@ class _LeaseAwareControl(FakeRecoveryControl):
         self.locks = locks
         self.held_at_reenqueue: list[bool] = []
 
-    async def reenqueue(self, workflow_id: str, executor_id: str) -> bool:
+    async def reenqueue(self, workflow_id: str, *, queue_name: str) -> None:
+        executor_id = self.rows[workflow_id].executor_id
+        assert executor_id is not None
         self.held_at_reenqueue.append(
             lease_key(APPLICATION_NAME, executor_id) in self.locks.holders
         )
-        return await super().reenqueue(workflow_id, executor_id)
+        await super().reenqueue(workflow_id, queue_name=queue_name)
 
 
 async def test_an_executor_holding_its_lease_is_never_touched(locks: FakeLockServer) -> None:
@@ -749,7 +753,7 @@ async def test_a_failed_reenqueue_is_reported_and_the_lease_still_released(
 
 
 async def test_an_ownerless_pending_row_is_reported_not_reenqueued(locks: FakeLockServer) -> None:
-    """DBOS re-enqueues conditionally on the owner; a row without one cannot be."""
+    """A row without an owner has no lease that could prove it dead."""
     control = FakeRecoveryControl([workflow_status("a", executor_id=None, version="v2")])
     outcome = await _sweep(control, locks=locks)
     assert control.writes() == []
@@ -811,7 +815,7 @@ async def test_a_failed_row_does_not_strand_other_rows_of_its_version() -> None:
 
 
 @pytest.mark.parametrize("version", ["v1", "v2"])
-@pytest.mark.parametrize("queue", [None, INTERNAL_QUEUE_NAME])
+@pytest.mark.parametrize("queue", UNROUTED_QUEUES)
 async def test_stale_ticks_can_be_retired_without_a_routable_queue(
     version: str, queue: str | None
 ) -> None:
@@ -831,7 +835,7 @@ async def test_stale_ticks_can_be_retired_without_a_routable_queue(
 @pytest.mark.parametrize("version", ["v1", "v2"])
 @pytest.mark.parametrize("state", [None, "SUCCESS", "ERROR", "CANCELLED", "DELAYED"])
 async def test_a_tick_that_became_inactive_after_listing_is_left_alone(
-    monkeypatch: pytest.MonkeyPatch, version: str, state: WorkflowStatuses | None
+    monkeypatch: pytest.MonkeyPatch, version: str, state: Status | None
 ) -> None:
     """The fresh status prevents cancellation of a completed, delayed or deleted tick."""
     row = workflow_status("tick", version=version, schedule_name=RECOVERY_SCHEDULE_NAME)
@@ -934,7 +938,7 @@ async def test_a_promotion_in_progress_skips_forks_and_retirements_but_not_reenq
     with capture_logs() as events:
         outcome = await _sweep(control, holds=holds, locks=locks, fence=fence)
     assert outcome == SweepOutcome(reenqueued=("orphan",), skipped=("fork-me", "retire-me"))
-    assert control.writes() == [("reenqueue", "orphan", "worker-9")]
+    assert control.writes() == [("set_attributes", "orphan"), ("reenqueue", "orphan", "stage")]
     assert holds.events == []
     assert fence.attempts == 1
     [skipped] = [event for event in events if event["event"] == "recovery_sweep.skipped"]
@@ -1027,7 +1031,7 @@ async def test_a_fence_error_fails_every_fork_and_retirement_but_not_reenqueues(
     assert outcome.reenqueued == ("orphan",)
     assert [workflow_id for workflow_id, _ in outcome.failed] == ["fork-me"]
     assert "holding the promotion fence failed" in outcome.failed[0][1]
-    assert control.writes() == [("reenqueue", "orphan", "worker-9")]
+    assert control.writes() == [("set_attributes", "orphan"), ("reenqueue", "orphan", "stage")]
 
 
 async def test_a_latest_read_failure_under_the_fence_fails_every_candidate() -> None:
@@ -1180,22 +1184,164 @@ def test_postgres_conflicts_require_the_workflow_primary_key(constraint: str | N
     assert sweep._is_workflow_id_conflict(error) is (constraint == "workflow_status_pkey")
 
 
-async def test_a_reenqueue_that_changes_nothing_is_not_counted(
-    monkeypatch: pytest.MonkeyPatch, locks: FakeLockServer
+@pytest.mark.parametrize("change", ["claimed", "completed", "cancelled", "deleted"])
+async def test_a_row_that_changed_after_listing_is_not_resumed(
+    monkeypatch: pytest.MonkeyPatch, locks: FakeLockServer, change: str
 ) -> None:
-    """A row another executor claimed after listing is not reported as re-enqueued."""
+    """Resume is unconditional, so the re-read gate keeps a claimed or finished row as it is."""
     control = FakeRecoveryControl([workflow_status(ORIGINAL, version="v2")])
     list_pending = control.list_pending
 
-    async def list_then_claim() -> tuple[PendingWorkflow, ...]:
-        """Return the listing, then hand the row to another executor."""
+    async def list_then_change() -> tuple[PendingWorkflow, ...]:
+        """Return the listing, then change the row behind it."""
         pending = await list_pending()
-        control.rows[ORIGINAL].executor_id = "replacement"
+        row = control.rows[ORIGINAL]
+        if change == "claimed":
+            row.executor_id = "replacement"
+        elif change == "completed":
+            row.status = "SUCCESS"
+        elif change == "cancelled":
+            row.status = "CANCELLED"
+        else:
+            del control.rows[ORIGINAL]
         return pending
 
-    monkeypatch.setattr(control, "list_pending", list_then_claim)
+    monkeypatch.setattr(control, "list_pending", list_then_change)
     assert await _sweep(control, locks=locks) == SweepOutcome()
-    assert control.writes() == [("reenqueue", ORIGINAL, "retired")]
+    assert control.writes() == []
+
+
+async def test_a_row_dequeued_right_after_its_resume_is_left_running(
+    locks: FakeLockServer,
+) -> None:
+    """A live worker that picked the row up first is running it, not stranding it."""
+
+    class _Dequeuing(FakeRecoveryControl):
+        """Hand each resumed row to a live worker before the read-back."""
+
+        async def reenqueue(self, workflow_id: str, *, queue_name: str) -> None:
+            await super().reenqueue(workflow_id, queue_name=queue_name)
+            self.rows[workflow_id].status = "PENDING"
+            self.rows[workflow_id].executor_id = "worker-1"
+
+    control = _Dequeuing([workflow_status(ORIGINAL, version="v2")])
+    outcome = await _sweep(control, locks=locks)
+    assert outcome == SweepOutcome(left_running=1)
+    assert ("reenqueue", ORIGINAL, "stage") in control.writes()
+
+
+async def test_a_resume_that_does_not_take_is_a_failure(
+    monkeypatch: pytest.MonkeyPatch, locks: FakeLockServer
+) -> None:
+    """A row still PENDING under the dead executor after the resume is reported, not counted."""
+    control = FakeRecoveryControl([workflow_status(ORIGINAL, version="v2")])
+    monkeypatch.setattr(control, "reenqueue", AsyncMock())
+    with capture_logs() as events:
+        outcome = await _sweep(control, locks=locks)
+    assert outcome.reenqueued == ()
+    assert [workflow_id for workflow_id, _ in outcome.failed] == [ORIGINAL]
+    assert "unverified" in outcome.failed[0][1]
+    [event] = [
+        event for event in events if event["event"] == "recovery_sweep.redispatch_unverified"
+    ]
+    assert event["log_level"] == "error"
+    assert locks.holders == {}
+
+
+async def test_a_row_at_the_redispatch_cap_is_neither_resumed_nor_counted(
+    locks: FakeLockServer,
+) -> None:
+    """A row that crashes its worker on every run is reported each tick, never resumed again."""
+    control = FakeRecoveryControl(
+        [
+            workflow_status(
+                ORIGINAL,
+                version="v2",
+                attributes={
+                    REDISPATCH_COUNT_ATTRIBUTE: MAX_SWEEP_REDISPATCHES,
+                    REDISPATCH_VERSION_ATTRIBUTE: "v2",
+                },
+            )
+        ]
+    )
+    with capture_logs() as events:
+        outcome = await _sweep(control, locks=locks)
+    assert outcome.reenqueued == ()
+    assert [workflow_id for workflow_id, _ in outcome.failed] == [ORIGINAL]
+    assert f"the cap of {MAX_SWEEP_REDISPATCHES}" in outcome.failed[0][1]
+    assert control.writes() == []
+    assert control.rows[ORIGINAL].status == "PENDING"
+    [event] = [event for event in events if event["event"] == "recovery_sweep.redispatch_cap"]
+    assert event["log_level"] == "error"
+
+
+async def test_a_redispatch_count_from_another_version_restarts_at_zero(
+    locks: FakeLockServer,
+) -> None:
+    """A new build may have fixed the crash, so its redispatches are counted afresh."""
+    control = FakeRecoveryControl(
+        [
+            workflow_status(
+                ORIGINAL,
+                version="v2",
+                attributes={
+                    REDISPATCH_COUNT_ATTRIBUTE: MAX_SWEEP_REDISPATCHES,
+                    REDISPATCH_VERSION_ATTRIBUTE: "v1",
+                },
+            )
+        ]
+    )
+    outcome = await _sweep(control, locks=locks)
+    assert outcome.reenqueued == (ORIGINAL,)
+    assert control.rows[ORIGINAL].attributes == {
+        REDISPATCH_COUNT_ATTRIBUTE: 1,
+        REDISPATCH_VERSION_ATTRIBUTE: "v2",
+    }
+
+
+async def test_a_redispatch_is_counted_before_the_resume_and_keeps_other_attributes(
+    locks: FakeLockServer,
+) -> None:
+    """DBOS replaces the whole mapping, so the sweep writes the row's own attributes back."""
+    control = FakeRecoveryControl(
+        [
+            workflow_status(
+                ORIGINAL,
+                version="v2",
+                attributes={
+                    "tenant": "acme",
+                    REDISPATCH_COUNT_ATTRIBUTE: 3,
+                    REDISPATCH_VERSION_ATTRIBUTE: "v2",
+                },
+            )
+        ]
+    )
+    outcome = await _sweep(control, locks=locks)
+    assert outcome.reenqueued == (ORIGINAL,)
+    assert control.writes() == [("set_attributes", ORIGINAL), ("reenqueue", ORIGINAL, "stage")]
+    assert control.rows[ORIGINAL].attributes == {
+        "tenant": "acme",
+        REDISPATCH_COUNT_ATTRIBUTE: 4,
+        REDISPATCH_VERSION_ATTRIBUTE: "v2",
+    }
+
+
+@pytest.mark.parametrize(
+    "attributes, count",
+    [
+        (None, 0),
+        ({REDISPATCH_COUNT_ATTRIBUTE: 4, REDISPATCH_VERSION_ATTRIBUTE: "v2"}, 4),
+        ({REDISPATCH_COUNT_ATTRIBUTE: 4}, 0),
+        ({REDISPATCH_COUNT_ATTRIBUTE: "4", REDISPATCH_VERSION_ATTRIBUTE: "v2"}, 0),
+        ({REDISPATCH_COUNT_ATTRIBUTE: True, REDISPATCH_VERSION_ATTRIBUTE: "v2"}, 0),
+        ({REDISPATCH_COUNT_ATTRIBUTE: -1, REDISPATCH_VERSION_ATTRIBUTE: "v2"}, 0),
+    ],
+)
+def test_the_redispatch_count_reads_only_a_count_recorded_under_the_rows_version(
+    attributes: dict[str, object] | None, count: int
+) -> None:
+    """A missing, foreign-version or malformed count reads as zero."""
+    assert redispatch_count(workflow_status(ORIGINAL, version="v2", attributes=attributes)) == count
 
 
 async def test_a_latest_version_read_failure_under_one_lock_allows_other_versions(

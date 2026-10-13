@@ -11,6 +11,7 @@ from tests.unit.runtime.fake_recovery import (
     FakeRecoveryControl,
     FakeRegistrations,
     FakeVersionHolds,
+    Status,
     registered,
     workflow_status,
 )
@@ -74,10 +75,13 @@ def test_version_lock_events_are_told_apart_from_lease_events() -> None:
     ]
 
 
-async def test_the_fake_control_forks_cancels_and_reenqueues_like_dbos() -> None:
-    """Fork links the successor, cancel clears the queue, re-enqueue keeps it."""
+async def test_the_fake_control_forks_cancels_and_resumes_like_dbos() -> None:
+    """Fork links the successor and copies attributes, cancel clears the queue, resume sets it."""
     control = FakeRecoveryControl(
-        [workflow_status("old", version="v1"), workflow_status("dead", version="v2")]
+        [
+            workflow_status("old", version="v1", attributes={"k": 1}),
+            workflow_status("dead", version="v2", queue_name=None),
+        ]
     )
     checked: RecoveryControl = control  # The fake must satisfy the protocol mypy checks.
     assert checked is control
@@ -86,7 +90,8 @@ async def test_the_fake_control_forks_cancels_and_reenqueues_like_dbos() -> None
         "old", "new", 1, application_version="v2", queue_name="stage", queue_partition_key="p"
     )
     await control.cancel("old")
-    assert await control.reenqueue("dead", "retired")
+    await control.set_attributes("dead", {"k": 2})
+    await control.reenqueue("dead", queue_name="stage")
 
     successor = control.rows["new"]
     assert (successor.forked_from, successor.app_version, successor.status) == (
@@ -96,8 +101,24 @@ async def test_the_fake_control_forks_cancels_and_reenqueues_like_dbos() -> None
     )
     assert control.rows["old"].status == "CANCELLED"
     assert control.rows["old"].queue_name is None
-    assert control.rows["dead"].queue_name == "stage"
-    assert [call[0] for call in control.writes()] == ["fork", "cancel", "reenqueue"]
+    assert successor.attributes == {"k": 1}
+    dead = control.rows["dead"]
+    assert (dead.status, dead.queue_name, dead.executor_id) == (ENQUEUED, "stage", "retired")
+    assert dead.attributes == {"k": 2}
+    assert [call[0] for call in control.writes()] == [
+        "fork",
+        "cancel",
+        "set_attributes",
+        "reenqueue",
+    ]
+
+
+@pytest.mark.parametrize("status", ["CANCELLED", "MAX_RECOVERY_ATTEMPTS_EXCEEDED", "SUCCESS"])
+async def test_the_fake_resume_leaves_only_success_and_error_alone(status: Status) -> None:
+    """DBOS resumes any row not SUCCESS or ERROR, which is why the sweep gates it first."""
+    control = FakeRecoveryControl([workflow_status("row", status=status)])
+    await control.reenqueue("row", queue_name="stage")
+    assert control.rows["row"].status == (status if status == "SUCCESS" else ENQUEUED)
 
 
 async def test_a_second_fork_under_one_successor_conflicts() -> None:

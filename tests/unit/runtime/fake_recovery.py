@@ -1,7 +1,7 @@
 """In-memory stand-ins for what the recovery sweep reads and writes in DBOS.
 
 `FakeRecoveryControl` keeps workflow rows as DBOS reports them and applies forks,
-cancels and re-enqueues the way DBOS does, recording every call. `FakeRegistrations`,
+cancels, resumes and attribute updates the way DBOS does, recording every call. `FakeRegistrations`,
 `FakeVersionHolds` and `FakePromotionFence` stand in for the version registry, the
 exclusive version lock and the shared promotion fence.
 """
@@ -10,9 +10,9 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from sqlite3 import IntegrityError as SQLiteIntegrityError
+from typing import Literal
 
 from dbos import WorkflowStatus
-from dbos._sys_db import WorkflowStatuses
 from sqlalchemy.exc import IntegrityError
 
 from curate_d.runtime.sweep import ENQUEUED, PENDING, PendingWorkflow
@@ -20,11 +20,22 @@ from curate_d.runtime.version_lease import LockMode, VersionHold
 
 EPOCH = datetime(2026, 10, 1, tzinfo=UTC)
 
+type Status = Literal[
+    "PENDING",
+    "SUCCESS",
+    "ERROR",
+    "MAX_RECOVERY_ATTEMPTS_EXCEEDED",
+    "CANCELLED",
+    "ENQUEUED",
+    "DELAYED",
+]
+"""The statuses `WorkflowStatus.status` takes."""
+
 
 def workflow_status(
     workflow_id: str,
     *,
-    status: WorkflowStatuses = "PENDING",
+    status: Status = "PENDING",
     executor_id: str | None = "retired",
     version: str | None = "v1",
     queue_name: str | None = "stage",
@@ -32,6 +43,7 @@ def workflow_status(
     forked_from: str | None = None,
     was_forked_from: bool = False,
     schedule_name: str | None = None,
+    attributes: dict[str, object] | None = None,
 ) -> WorkflowStatus:
     """Return a DBOS status row with the fields the sweep reads."""
     row = WorkflowStatus()
@@ -44,6 +56,8 @@ def workflow_status(
     row.forked_from = forked_from
     row.was_forked_from = was_forked_from
     row.schedule_name = schedule_name
+    row.attributes = attributes
+    row.recovery_attempts = 0
     return row
 
 
@@ -131,6 +145,7 @@ class FakeRecoveryControl:
                 {},
                 SQLiteIntegrityError("UNIQUE constraint failed: workflow_status.workflow_uuid"),
             )
+        original = self.rows[workflow_id]
         self.rows[successor_id] = workflow_status(
             successor_id,
             status="ENQUEUED",
@@ -139,6 +154,7 @@ class FakeRecoveryControl:
             queue_name=queue_name,
             queue_partition_key=queue_partition_key,
             forked_from=workflow_id,
+            attributes=None if original.attributes is None else dict(original.attributes),
         )
         self.rows[workflow_id].was_forked_from = True
 
@@ -156,20 +172,40 @@ class FakeRecoveryControl:
         self._raise_for("latest_version")
         return self._latest.pop(0) if len(self._latest) > 1 else self._latest[0]
 
-    async def reenqueue(self, workflow_id: str, executor_id: str) -> bool:
-        """Return a PENDING row owned by `executor_id` to its own queue."""
-        self.calls.append(("reenqueue", workflow_id, executor_id))
+    async def reenqueue(self, workflow_id: str, *, queue_name: str) -> None:
+        """Resume `workflow_id` onto `queue_name` unconditionally, as DBOS's resume does.
+
+        Any row not SUCCESS or ERROR becomes ENQUEUED on `queue_name`, keeping its
+        executor and attributes and resetting its recovery attempts.
+
+        Raises:
+            LookupError: `workflow_id` does not exist.
+        """
+        self.calls.append(("reenqueue", workflow_id, queue_name))
         self._raise_for("reenqueue", workflow_id)
         row = self.rows.get(workflow_id)
-        if row is None or row.status != PENDING or row.executor_id != executor_id:
-            return False
+        if row is None:
+            raise LookupError(f"workflow {workflow_id!r} does not exist")
+        if row.status in {"SUCCESS", "ERROR"}:
+            return
         row.status = "ENQUEUED"
-        row.executor_id = None
-        return True
+        row.queue_name = queue_name
+        row.recovery_attempts = 0
+
+    async def set_attributes(self, workflow_id: str, attributes: dict[str, object]) -> None:
+        """Replace the attributes of `workflow_id`, as DBOS's update does."""
+        self.calls.append(("set_attributes", workflow_id))
+        self._raise_for("set_attributes", workflow_id)
+        if workflow_id in self.rows:
+            self.rows[workflow_id].attributes = dict(attributes)
 
     def writes(self) -> list[tuple[str, ...]]:
-        """Return the fork, cancel and re-enqueue calls, in order."""
-        return [call for call in self.calls if call[0] in {"fork", "cancel", "reenqueue"}]
+        """Return the fork, cancel, attribute and resume calls, in order."""
+        return [
+            call
+            for call in self.calls
+            if call[0] in {"fork", "cancel", "set_attributes", "reenqueue"}
+        ]
 
 
 class FakeRegistrations:
