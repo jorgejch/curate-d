@@ -4,6 +4,7 @@ Everything the application needs to reach the outside world arrives through the
 environment; nothing here has a default that would silently work against production.
 """
 
+import re
 from decimal import Decimal
 from enum import StrEnum
 from functools import lru_cache
@@ -11,7 +12,6 @@ from pathlib import Path
 from typing import Final, Self
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from dbos._croniter import croniter  # type: ignore[attr-defined]
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -32,6 +32,15 @@ from curate_d.domain.source import Provider
 _LOCAL_LEDGER_DSN = "postgresql+psycopg://curate_d:curate_d@localhost:5433/curate_d"
 _HIDDEN_INPUT: Final = "<hidden>"
 
+# Inclusive bounds of each cron field: minute, hour, day of month, month, day of week
+# (0 and 7 are both Sunday). A six-field expression puts seconds, 0-59, in front.
+_CRON_SECOND_BOUNDS: Final = (0, 59)
+_CRON_FIELD_BOUNDS: Final = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
+# One comma-separated item: `*`, `*/n`, `a`, `a-b` or `a-b/n`.
+_CRON_ITEM: Final = re.compile(
+    r"\*(?:/(?P<every>\d+))?|(?P<start>\d+)(?:-(?P<end>\d+)(?:/(?P<step>\d+))?)?"
+)
+
 
 def _without_input(error: ValidationError) -> ValidationError:
     """Return `error` rebuilt with every error's input replaced by a placeholder."""
@@ -46,6 +55,45 @@ def _without_input(error: ValidationError) -> ValidationError:
             detail["ctx"] = line["ctx"]
         details.append(detail)
     return ValidationError.from_exception_data(error.title, details)
+
+
+def _cron_field_is_valid(field: str, low: int, high: int) -> bool:
+    """Return whether every comma-separated item of one cron field is in grammar and bounds."""
+    for item in field.split(","):
+        match = _CRON_ITEM.fullmatch(item)
+        if match is None:
+            return False
+        step = match["every"] or match["step"]
+        if step is not None and not 1 <= int(step) <= high:
+            return False
+        if match["start"] is not None:
+            start = int(match["start"])
+            end = int(match["end"]) if match["end"] is not None else start
+            if not low <= start <= end <= high:
+                return False
+    return True
+
+
+def _is_strict_cron(value: str) -> bool:
+    """Return whether `value` is a cron expression in a strict subset of DBOS's grammar.
+
+    Five whitespace-separated fields, or six with seconds first. Each field is a comma
+    list of `*`, `*/n`, `a`, `a-b` or `a-b/n`, numeric only, within the field's bounds,
+    with a step of at least 1 and at most the field's upper bound. Names, `@` aliases and
+    `L`, `W`, `#`, `?` are refused although DBOS takes them. This is a strict subset of
+    DBOS's cron grammar; stricter is the safe direction: whatever passes here, DBOS accepts.
+    """
+    fields = value.split()
+    if len(fields) == len(_CRON_FIELD_BOUNDS) + 1:
+        bounds: tuple[tuple[int, int], ...] = (_CRON_SECOND_BOUNDS, *_CRON_FIELD_BOUNDS)
+    elif len(fields) == len(_CRON_FIELD_BOUNDS):
+        bounds = _CRON_FIELD_BOUNDS
+    else:
+        return False
+    return all(
+        _cron_field_is_valid(field, low, high)
+        for field, (low, high) in zip(fields, bounds, strict=True)
+    )
 
 
 class StagingRole(StrEnum):
@@ -385,11 +433,11 @@ class Settings(BaseSettings):
     def _recovery_sweep_schedule_is_a_cron(cls, value: str) -> str:
         """Reject a cron DBOS would refuse, before the lease and the launch.
 
-        The check is the same check DBOS applies: failing here stops a worker at settings
-        load, where `apply_schedules` would instead fail after launch and crash-loop every
-        I/O worker.
+        The grammar is a strict subset of DBOS's (`_is_strict_cron`), so an expression accepted
+        here is one DBOS accepts too: failing here stops a worker at settings load, where
+        `apply_schedules` would instead fail after launch and crash-loop every I/O worker.
         """
-        if not croniter.is_valid(value, second_at_beginning=True):
+        if not _is_strict_cron(value):
             raise ValueError(f"recovery_sweep_schedule {value!r} is not a valid cron expression")
         return value
 

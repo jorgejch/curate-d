@@ -6,14 +6,18 @@ be changed without a release, and a boundary computed wrong prunes either nothin
 wrong month's records.
 """
 
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from curate_d.config import Settings
+from curate_d.runtime import retention
 from curate_d.runtime.retention import (
     MILLISECONDS_PER_SECOND,
+    TERMINAL_STATUSES,
     RetentionWindow,
+    prune_completed_workflows,
     retention_window,
 )
 
@@ -44,7 +48,7 @@ def test_the_default_cutoff_is_thirty_days_back() -> None:
 
 
 def test_the_cutoff_is_expressed_in_epoch_milliseconds() -> None:
-    """DBOS's collector takes milliseconds; seconds would prune a thousandfold too far back."""
+    """Checkpoints are stamped in milliseconds; seconds would prune a thousandfold too far back."""
     window = retention_window(Settings(), now=NOW)
     assert window.cutoff_epoch_ms == int(window.cutoff.timestamp() * MILLISECONDS_PER_SECOND)
     assert window.cutoff_epoch_ms == int((NOW - timedelta(days=30)).timestamp() * 1000)
@@ -76,8 +80,84 @@ def test_a_window_built_directly_reports_its_own_boundary() -> None:
     assert window.cutoff_epoch_ms == int(NOW.timestamp() * 1000)
 
 
-def test_the_collector_binding_still_exists() -> None:
-    """Pins a DBOS internal: an upgrade that moves it must fail here, not silently stop pruning."""
-    from dbos._workflow_commands import garbage_collect
+@dataclass
+class _Status:
+    """The one field of DBOS's `WorkflowStatus` the prune reads."""
 
-    assert callable(garbage_collect)
+    workflow_id: str
+
+
+@dataclass
+class _FakeDBOS:
+    """Serve listed workflow IDs in batches and record every list and delete call."""
+
+    rows: list[str]
+    listed: list[dict[str, object]] = field(default_factory=list)
+    deleted: list[list[str]] = field(default_factory=list)
+
+    def list_workflows(
+        self,
+        *,
+        status: list[str],
+        completed_before: str,
+        load_input: bool,
+        load_output: bool,
+        limit: int,
+    ) -> list[_Status]:
+        """Return the first `limit` rows not yet deleted."""
+        self.listed.append(
+            {
+                "status": status,
+                "completed_before": completed_before,
+                "load_input": load_input,
+                "load_output": load_output,
+                "limit": limit,
+            }
+        )
+        return [_Status(workflow_id) for workflow_id in self.rows[:limit]]
+
+    def delete_workflows(self, workflow_ids: list[str]) -> None:
+        """Drop the given rows, as DBOS's delete does."""
+        self.deleted.append(workflow_ids)
+        self.rows = [row for row in self.rows if row not in workflow_ids]
+
+
+def test_the_prune_deletes_listed_batches_until_one_comes_back_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Five eligible rows in batches of two take three deletes and a final empty list."""
+    fake = _FakeDBOS(rows=[f"wf-{index}" for index in range(5)])
+    monkeypatch.setattr(retention, "DBOS", fake)
+
+    deleted = prune_completed_workflows(NOW, batch_size=2)
+
+    assert deleted == 5
+    assert fake.deleted == [["wf-0", "wf-1"], ["wf-2", "wf-3"], ["wf-4"]]
+    assert len(fake.listed) == 4
+
+
+def test_the_prune_lists_only_terminal_rows_completed_by_the_cutoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In-flight rows are never listed, and no input or output is loaded to list them."""
+    fake = _FakeDBOS(rows=[])
+    monkeypatch.setattr(retention, "DBOS", fake)
+
+    assert prune_completed_workflows(NOW, batch_size=7) == 0
+
+    assert fake.listed == [
+        {
+            "status": list(TERMINAL_STATUSES),
+            "completed_before": NOW.isoformat(),
+            "load_input": False,
+            "load_output": False,
+            "limit": 7,
+        }
+    ]
+    assert set(TERMINAL_STATUSES) == {
+        "SUCCESS",
+        "ERROR",
+        "CANCELLED",
+        "MAX_RECOVERY_ATTEMPTS_EXCEEDED",
+    }
+    assert fake.deleted == []

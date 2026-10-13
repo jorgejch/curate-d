@@ -11,6 +11,7 @@ import pytest
 from dbos import DBOS
 
 from curate_d.config import DeploymentEnvironment, Settings
+from curate_d.runtime import dbos_app
 from curate_d.runtime.dbos_app import (
     APPLICATION_VERSION,
     BUILD_REVISION_ENV,
@@ -63,9 +64,24 @@ def test_dbos_runs_under_the_environment_s_name(
     monkeypatch.setenv("CURATE_D_ENVIRONMENT", environment.value)
     settings = Settings()
     name = f"curate-d-{environment.value}"
+    built: list[dict[str, object]] = []
+    monkeypatch.setattr(dbos_app, "DBOSClient", lambda **options: built.append(options))
     assert application_name(environment) == name
     assert build_dbos_config(settings, executor_id="worker-1")["name"] == name
-    assert client(settings)._sys_db.app_name == name
+    client(settings)
+    assert built[0]["application_name"] == name
+
+
+def test_the_client_retries_lost_connections_unless_told_not_to(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller with a deadline, such as the worker's drain, opts out of blocking retries."""
+    built: list[dict[str, object]] = []
+    monkeypatch.setattr(dbos_app, "DBOSClient", lambda **options: built.append(options))
+    client(Settings())
+    client(Settings(), retry_connection_errors=False)
+    assert [options["retry_connection_errors"] for options in built] == [True, False]
+    assert all(options["lazy"] for options in built)
 
 
 def test_an_unset_environment_runs_as_local(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -246,7 +262,7 @@ def test_a_build_revision_that_is_not_a_dev_tag_is_refused(revision: str) -> Non
 
 def test_the_system_schema_migration_binding_still_exists() -> None:
     """Pins the DBOS helper `migrations/env.py` calls; an upgrade that moves it fails here."""
-    from dbos.cli.migration import run_dbos_database_migrations
+    from dbos import run_dbos_database_migrations
 
     parameters = inspect.signature(run_dbos_database_migrations).parameters
     assert {"system_database_url", "schema"} <= parameters.keys()

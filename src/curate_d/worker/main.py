@@ -22,8 +22,7 @@ from types import FrameType
 from typing import Final, Protocol, runtime_checkable
 
 from dbos import DBOS
-from dbos._dbos import _get_dbos_instance
-from dbos._error import DBOSException
+from dbos import error as dbos_error
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -578,23 +577,37 @@ def _install_shutdown_handler(stop: threading.Event) -> None:
     signal.signal(signal.SIGINT, handle)
 
 
-def _drain_dbos(timeout_seconds: int) -> bool:
+def _drain_dbos(settings: Settings, executor_id: str, timeout_seconds: int) -> bool:
     """Shut DBOS down after up to `timeout_seconds` for in-flight workflows.
 
     DBOS stops waiting at the deadline but does not stop the workflow threads; the
     interpreter joins them at exit. Their executor identity is still in use until then,
-    so the caller keeps the lease unless nothing was left running.
+    so the caller keeps the lease unless nothing was left running. What was left is read
+    from the system database after the shutdown, through a client since the DBOS
+    singleton is gone: a workflow still running here is a PENDING row under
+    `executor_id`.
 
     Returns:
-        Whether no workflow was still running when DBOS shut down.
+        Whether no PENDING workflow is left under `executor_id`. False as well when the
+        database could not answer, which is logged as `worker.drain_state_unknown`.
     """
-    try:
-        # Private: DBOS's own drain loop counts this set. Pinned in test_worker_main.py.
-        active = _get_dbos_instance()._active_workflows_set
-    except DBOSException:
-        active = None
     DBOS.destroy(workflow_completion_timeout_sec=timeout_seconds)
-    return active is None or not active.activeList()
+    # No retry: a database outage at shutdown must not hold the pod past its grace period.
+    workflows = dbos_app.client(settings, retry_connection_errors=False)
+    try:
+        pending = workflows.list_workflows(
+            status="PENDING",
+            executor_id=[executor_id],
+            limit=1,
+            load_input=False,
+            load_output=False,
+        )
+    except (SQLAlchemyError, dbos_error.DBOSException) as failure:
+        logger.error("worker.drain_state_unknown", executor_id=executor_id, error=str(failure))
+        return False
+    finally:
+        workflows.destroy()
+    return not pending
 
 
 def run(
@@ -699,8 +712,12 @@ def run(
         try:
             # Let workflows already in flight finish rather than orphaning them as PENDING
             # on a version this deployment is about to retire.
-            if launched and block:
-                drained = _drain_dbos(0 if lease_lost.is_set() else DRAIN_SECONDS)
+            if launched and block and lease_lost.is_set():
+                # Another process may already hold the identity: shut down at once, and
+                # ask the database nothing, since losing it is the likeliest cause.
+                DBOS.destroy(workflow_completion_timeout_sec=0)
+            elif launched and block:
+                drained = _drain_dbos(settings, executor_id, DRAIN_SECONDS)
         finally:
             try:
                 # After the drain: a workflow finishing its last step may still be reading

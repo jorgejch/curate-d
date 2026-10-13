@@ -2,9 +2,8 @@
 
 `runtime/retention.py` holds the prune and the reasoning behind it; this module runs it on
 a persisted schedule. The cutoff is measured from the tick's scheduled time, not the clock,
-so a recovered or backfilled run applies the boundary its tick would have. Concurrent
-rounds are already excluded by DBOS's retention lock, and the prune is idempotent, so a
-re-executed step only finds less to delete.
+so a recovered or backfilled run applies the boundary its tick would have. The prune is
+idempotent, so a re-executed step only finds less to delete.
 """
 
 from datetime import datetime

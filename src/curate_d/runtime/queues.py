@@ -31,12 +31,23 @@ gets, not what every restart reasserts.
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Final, Literal, TypedDict
 
 from dbos import DBOS, Queue
-from dbos._queue import QueueConflictResolution, QueueRateLimit
 
 # Startup registration must not overwrite a limit the control plane set at runtime.
-REGISTRATION_CONFLICT_POLICY: QueueConflictResolution = "never_update"
+REGISTRATION_CONFLICT_POLICY: Final[Literal["never_update"]] = "never_update"
+
+
+class RateLimitSpec(TypedDict):
+    """The rate limiter DBOS takes and reports: at most `limit` starts per `period` seconds.
+
+    The shape of DBOS's own limiter dict, declared here so callers need no private DBOS
+    module; TypedDicts compare structurally, so DBOS accepts it as its own.
+    """
+
+    limit: int
+    period: float
 
 
 class QueueName(StrEnum):
@@ -222,8 +233,8 @@ CPU_QUEUES: tuple[QueueName, ...] = (
 
 def _registration_kwargs(spec: QueueSpec) -> dict[str, object]:
     """Return the arguments that express one spec, shared by the sync and async registrars."""
-    limiter: QueueRateLimit | None = (
-        QueueRateLimit(limit=spec.partition_limiter.limit, period=spec.partition_limiter.period)
+    limiter: RateLimitSpec | None = (
+        RateLimitSpec(limit=spec.partition_limiter.limit, period=spec.partition_limiter.period)
         if spec.partition_limiter is not None
         else None
     )
