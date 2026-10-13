@@ -9,13 +9,10 @@ this also catches an attribute reached through a public object.
 import re
 from pathlib import Path
 
-import pytest
-
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 PRIVATE_REFERENCE = re.compile(r"dbos\._|_get_dbos_instance")
 
 
-@pytest.mark.xfail(strict=True, reason="sections 2 and 3 of remove-dbos-internals still pending")
 def test_no_shipped_code_reaches_into_dbos_internals() -> None:
     """Reject a `dbos._` module or `_get_dbos_instance` reference in src/ and migrations/."""
     offenders = [

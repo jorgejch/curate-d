@@ -152,17 +152,6 @@ known-first-party = ["curate_d", "tests"]
 "tests/local/*" = ["S101", "T201"]
 # Still on DBOS internals while sections 2 and 3 land on their own branches; remove in
 # task 5 of remove-dbos-internals.
-"src/curate_d/runtime/schedule_authority.py" = ["TID251"]
-"src/curate_d/runtime/sweep.py" = ["TID251"]
-"src/curate_d/runtime/promote.py" = ["TID251"]
-"tests/unit/runtime/fake_recovery.py" = ["TID251"]
-"tests/unit/runtime/test_promote.py" = ["TID251"]
-"tests/unit/runtime/test_schedule_authority.py" = ["TID251"]
-"tests/unit/runtime/test_sweep_execution.py" = ["TID251"]
-"tests/integration/test_operator_sweep.py" = ["TID251"]
-"tests/integration/test_recovery_spikes.py" = ["TID251"]
-"tests/integration/test_recovery_sweep.py" = ["TID251"]
-"tests/integration/test_schedule_authority.py" = ["TID251"]
 
 [tool.mypy]
 python_version = "3.12"
