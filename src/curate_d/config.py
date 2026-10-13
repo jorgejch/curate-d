@@ -7,9 +7,8 @@ environment; nothing here has a default that would silently work against product
 from decimal import Decimal
 from enum import StrEnum
 from functools import lru_cache
-from ipaddress import ip_address
 from pathlib import Path
-from typing import Annotated, Final, Self
+from typing import Final, Self
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dbos._croniter import croniter  # type: ignore[attr-defined]
@@ -21,9 +20,7 @@ from pydantic import (
     ModelWrapValidatorHandler,
     PostgresDsn,
     SecretStr,
-    UrlConstraints,
     ValidationError,
-    WebsocketUrl,
     field_validator,
     model_validator,
 )
@@ -49,20 +46,6 @@ def _without_input(error: ValidationError) -> ValidationError:
             detail["ctx"] = line["ctx"]
         details.append(detail)
     return ValidationError.from_exception_data(error.title, details)
-
-
-def _is_loopback(host: str | None) -> bool:
-    """Return whether a URL host, as pydantic renders it, names this machine.
-
-    Pydantic lowercases host names and keeps the brackets on an IPv6 literal, so
-    `localhost`, any 127/8 address and `[::1]` all count.
-    """
-    if host is None:
-        return False
-    try:
-        return ip_address(host.strip("[]")).is_loopback
-    except ValueError:
-        return host == "localhost"
 
 
 class StagingRole(StrEnum):
@@ -308,32 +291,6 @@ class Settings(BaseSettings):
         "retired version and re-enqueues work of executors that never return. Five fields, "
         "or six with seconds first, as DBOS reads them.",
     )
-    conductor_enabled: bool = Field(
-        default=False,
-        description="Whether workers connect to DBOS Conductor. Separate from the key so the "
-        "credential can stay provisioned while the switch is flipped in a reviewed commit.",
-    )
-    conductor_key: SecretStr | None = Field(
-        default=None,
-        description="DBOS Conductor API key. Used only when `conductor_enabled` is set, and "
-        "never handed to DBOS's own configuration, so DBOS_CONDUCTOR_KEY is never read.",
-    )
-    conductor_url: WebsocketUrl | None = Field(
-        default=None,
-        description="Conductor websocket endpoint. Unset means the hosted Conductor. `wss://` "
-        "unless the host is loopback: DBOS puts the key in the handshake path, so plaintext "
-        "is only allowed to this machine.",
-    )
-    conductor_proxy_url: Annotated[HttpUrl, UrlConstraints(allowed_schemes=["http"])] | None = (
-        Field(
-            default=None,
-            description="Plain-http egress proxy for the Conductor connection, and nothing "
-            "else in the process. Set where direct egress is not available. "
-            "Plain http is enough: the proxy sees only the CONNECT target, and the handshake "
-            "and every frame cross it inside Conductor's TLS.",
-        )
-    )
-
     content_staging_root: Path = Field(
         default=Path("/var/lib/curate-d/staging"),
         description="Not read anywhere: content staging is S3-backed (see staging_s3_*).",
@@ -427,51 +384,6 @@ class Settings(BaseSettings):
         if not croniter.is_valid(value, second_at_beginning=True):
             raise ValueError(f"recovery_sweep_schedule {value!r} is not a valid cron expression")
         return value
-
-    @field_validator("conductor_key", mode="before")
-    @classmethod
-    def _blank_conductor_key_is_missing(cls, value: object) -> object:
-        """Treat an empty or whitespace-only key as unset.
-
-        An unset environment variable and an empty one are the same operator intent: no
-        key. Collapsing them here keeps `start_conductor` on its one misconfigured path
-        instead of handing a blank credential to the connection gate.
-        """
-        if isinstance(value, str) and not value.strip():
-            return None
-        if isinstance(value, SecretStr) and not value.get_secret_value().strip():
-            return None
-        return value
-
-    @model_validator(mode="after")
-    def _validate_conductor_transport(self) -> Self:
-        """Keep a plaintext Conductor connection on this machine.
-
-        DBOS sends the key in the websocket handshake path and workflow data in the frames,
-        so a `ws://` endpoint exposes both to the network. The local fixtures serve on
-        loopback, which is the one place plaintext never leaves the host. A proxy is a
-        `CONNECT` tunnel: under `wss://` it carries ciphertext whatever its own scheme, but
-        under `ws://` it carries the handshake itself, so it has to be loopback too.
-
-        Raises:
-            ValueError: `conductor_url` is `ws://` to a host other than loopback, or is
-                `ws://` through a proxy on a host other than loopback.
-        """
-        if self.conductor_url is None or self.conductor_url.scheme == "wss":
-            return self
-        if not _is_loopback(self.conductor_url.host):
-            raise ValueError(
-                f"conductor_url {str(self.conductor_url)!r} is plaintext to a host that is "
-                "not loopback. The Conductor key travels in the websocket handshake path, "
-                "so use wss://; ws:// is only allowed to localhost, 127.0.0.1 or [::1]."
-            )
-        if self.conductor_proxy_url is not None and not _is_loopback(self.conductor_proxy_url.host):
-            raise ValueError(
-                f"conductor_proxy_url {str(self.conductor_proxy_url)!r} is not loopback but "
-                "conductor_url is plaintext, so the Conductor key would cross the network in "
-                "the handshake to the proxy. Use wss://, or a proxy on this machine."
-            )
-        return self
 
     @model_validator(mode="after")
     def _validate_staging_s3(self) -> Self:

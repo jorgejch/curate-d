@@ -38,7 +38,6 @@ from curate_d.providers.access import ConnectedAccounts
 from curate_d.providers.crypto import CredentialCipher
 from curate_d.providers.pacing import Pacer, Quota
 from curate_d.runtime import dbos_app
-from curate_d.runtime.conductor import start_conductor
 from curate_d.runtime.datasource import create_ledger_datasource
 from curate_d.runtime.dbos_app import configure
 from curate_d.runtime.identity import resolve_executor_id
@@ -762,15 +761,12 @@ def run(
         lease.acquire(stop=shutdown)
         lease.monitor(on_lease_lost)
         prepare_services(settings, profile, staging)
-        configure(settings, executor_id=executor_id, profile=profile)
+        configure(settings, executor_id=executor_id)
         DBOS.listen_queues([queue.value for queue in profile.queues])
         DBOS.launch()
         launched = True
         register_all()
         apply_schedules(profile, settings)
-        # Last: only a launched executor holding its lease reports, and Conductor failing
-        # or misconfigured never stops the worker serving.
-        start_conductor(settings, profile)
 
         logger.info("worker.ready", profile=profile.value, executor_id=executor_id)
         if not block:

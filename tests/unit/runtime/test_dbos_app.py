@@ -28,7 +28,6 @@ from curate_d.runtime.identity import (
     ExecutorIdentityError,
     resolve_executor_id,
 )
-from curate_d.runtime.profiles import WorkerProfile
 
 
 def test_the_system_database_is_the_ledger_database(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -60,7 +59,7 @@ def test_the_configuration_pins_a_version_and_a_schema() -> None:
 def test_dbos_runs_under_the_environment_s_name(
     environment: DeploymentEnvironment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """DBOS and its client run as `curate-d-<environment>`, the name Conductor lists by."""
+    """DBOS and its client run as `curate-d-<environment>`."""
     monkeypatch.setenv("CURATE_D_ENVIRONMENT", environment.value)
     settings = Settings()
     name = f"curate-d-{environment.value}"
@@ -74,37 +73,6 @@ def test_an_unset_environment_runs_as_local(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.delenv("CURATE_D_ENVIRONMENT", raising=False)
     settings = Settings(_env_file=None)
     assert build_dbos_config(settings, executor_id="worker-1")["name"] == "curate-d-local"
-
-
-def test_the_configuration_never_carries_the_conductor_key(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Neither the configured key nor DBOS's own variable reaches DBOS's configuration.
-
-    Given a key, DBOS would replace the stable executor identity with a random one and skip
-    startup recovery.
-    """
-    monkeypatch.setenv("CURATE_D_CONDUCTOR_ENABLED", "true")
-    monkeypatch.setenv("CURATE_D_CONDUCTOR_KEY", "curate-d-key")
-    monkeypatch.setenv("CURATE_D_CONDUCTOR_URL", "wss://conductor.example/conductor/v1alpha1")
-    monkeypatch.setenv("DBOS_CONDUCTOR_KEY", "dbos-env-key")
-    monkeypatch.setenv(EXECUTOR_ID_ENV, "worker-cpu-0")
-    config = build_dbos_config(Settings(), profile=WorkerProfile.CPU)
-    assert "conductor_key" not in config
-    assert "conductor_url" not in config
-    assert config["executor_id"] == "worker-cpu-0"
-    assert config["conductor_executor_metadata"] == {
-        "profile": "cpu",
-        "executor_id": "worker-cpu-0",
-    }
-    assert "curate-d-key" not in repr(config)
-    assert "dbos-env-key" not in repr(config)
-
-
-def test_executor_metadata_is_omitted_without_a_profile() -> None:
-    """Processes that name no profile report no Conductor metadata."""
-    config = build_dbos_config(Settings(), executor_id="worker-1")
-    assert "conductor_executor_metadata" not in config
 
 
 def test_the_configured_executor_id_wins(monkeypatch: pytest.MonkeyPatch) -> None:

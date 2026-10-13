@@ -23,7 +23,6 @@ from dbos import DBOS, DBOSClient, DBOSConfig
 
 from curate_d.config import DeploymentEnvironment, Settings
 from curate_d.runtime.identity import resolve_executor_id
-from curate_d.runtime.profiles import WorkerProfile
 
 APPLICATION_NAME = "curate-d"
 """The base name: DBOS's per-environment name extends it, and advisory-lock keys use it bare."""
@@ -32,11 +31,11 @@ APPLICATION_NAME = "curate-d"
 def application_name(environment: DeploymentEnvironment | None) -> str:
     """Return the name DBOS runs under in an environment, `curate-d-local` when unset.
 
-    DBOS owns every workflow, queue, schedule and version under this name, and Conductor
-    lists an application's workflows by it, so the name registered in Conductor must be
-    this one. Each environment is a separate Conductor application, hence one name per
-    environment. Queue and schedule names are unique across applications, so a deployment
-    that forgets its environment fails at startup instead of idling as another application.
+    DBOS owns every workflow, queue, schedule and version under this name. Queue and
+    schedule names are unique across applications, so environments sharing a system
+    database would collide under one name; hence one name per environment, and a
+    deployment that forgets its environment fails at startup instead of idling as another
+    application.
     """
     return f"{APPLICATION_NAME}-{(environment or DeploymentEnvironment.LOCAL).value}"
 
@@ -94,26 +93,14 @@ def system_database_url(settings: Settings) -> str:
     return str(settings.ledger_database_url)
 
 
-def build_dbos_config(
-    settings: Settings,
-    *,
-    executor_id: str | None = None,
-    profile: WorkerProfile | None = None,
-) -> DBOSConfig:
+def build_dbos_config(settings: Settings, *, executor_id: str | None = None) -> DBOSConfig:
     """Return the configuration a worker launches DBOS with.
-
-    Never sets `conductor_key` or `conductor_url`: given a key, DBOS would replace the
-    executor identity with a random one and skip startup recovery. The Conductor
-    connection is opened after launch instead (see conductor.py).
 
     Args:
         settings: Application settings.
         executor_id: Recovery identity; resolved from the environment when omitted.
-        profile: The worker's profile, reported to Conductor as executor metadata.
-            Omitted outside workers, which leaves the metadata unset.
     """
-    resolved_executor_id = executor_id or resolve_executor_id()
-    config = DBOSConfig(
+    return DBOSConfig(
         name=application_name(settings.environment),
         application_version=APPLICATION_VERSION,
         system_database_url=system_database_url(settings),
@@ -121,27 +108,16 @@ def build_dbos_config(
         # A recovery identity, not a concurrency one: per-worker queue limits are counted
         # in each process's memory. A shared identity lets one pod's restart recover
         # workflows a live peer is running — see identity.py.
-        executor_id=resolved_executor_id,
+        executor_id=executor_id or resolve_executor_id(),
     )
-    if profile is not None:
-        config["conductor_executor_metadata"] = {
-            "profile": profile.value,
-            "executor_id": resolved_executor_id,
-        }
-    return config
 
 
-def configure(
-    settings: Settings,
-    *,
-    executor_id: str | None = None,
-    profile: WorkerProfile | None = None,
-) -> DBOS:
+def configure(settings: Settings, *, executor_id: str | None = None) -> DBOS:
     """Construct the DBOS singleton.
 
     Call from an entry point, never at import time — see the module docstring.
     """
-    return DBOS(config=build_dbos_config(settings, executor_id=executor_id, profile=profile))
+    return DBOS(config=build_dbos_config(settings, executor_id=executor_id))
 
 
 def client(settings: Settings) -> DBOSClient:

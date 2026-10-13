@@ -59,7 +59,7 @@ def io_worker(settings: Settings) -> Iterator[None]:
     DBOS.destroy()
     # Configured before the datasource: a destroyed instance still in DBOS's registry
     # counts as launched, so a datasource created first would be refused.
-    dbos_app.configure(settings, executor_id=EXECUTOR, profile=WorkerProfile.IO)
+    dbos_app.configure(settings, executor_id=EXECUTOR)
     prepare_services(settings, WorkerProfile.IO)
     DBOS.listen_queues([queue.value for queue in WorkerProfile.IO.queues])
     DBOS.launch()

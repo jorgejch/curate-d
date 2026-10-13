@@ -52,9 +52,7 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, object]]:
     monkeypatch.setattr(
         worker_main,
         "configure",
-        lambda settings, executor_id, profile: recorded.append(
-            ("configure", (executor_id, profile))
-        ),
+        lambda settings, executor_id: recorded.append(("configure", executor_id)),
     )
     monkeypatch.setattr(
         DBOS,
@@ -74,11 +72,6 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, object]]:
         worker_main,
         "apply_schedules",
         lambda profile, settings: recorded.append(("apply_schedules", profile)),
-    )
-    monkeypatch.setattr(
-        worker_main,
-        "start_conductor",
-        lambda settings, profile: recorded.append(("start_conductor", profile)),
     )
     monkeypatch.setattr(worker_main, "resolve_executor_id", lambda: "worker-io-0")
     monkeypatch.setattr(
@@ -120,7 +113,7 @@ def test_queues_are_registered_after_launch(calls: list[tuple[str, object]]) -> 
 
 @pytest.mark.parametrize("profile", list(WorkerProfile))
 def test_the_full_startup_sequence(calls: list[tuple[str, object]], profile: WorkerProfile) -> None:
-    """Take the lease, create services, configure, listen, launch, register, schedule, report."""
+    """Take the lease, create services, configure, listen, launch, register, schedule."""
     worker_main.run(Settings(), profile, block=False)
     assert [name for name, _ in calls] == [
         "register_version",
@@ -131,9 +124,7 @@ def test_the_full_startup_sequence(calls: list[tuple[str, object]], profile: Wor
         "launch",
         "register_all",
         "apply_schedules",
-        "start_conductor",
     ]
-    assert ("start_conductor", profile) in calls
 
 
 @pytest.mark.parametrize("profile", list(WorkerProfile))
@@ -149,16 +140,7 @@ def test_a_worker_listens_only_to_its_own_profile_queues(
 def test_the_executor_identity_is_passed_to_dbos(calls: list[tuple[str, object]]) -> None:
     """Per-worker limits are counted against it; a default would double the budget."""
     worker_main.run(Settings(), WorkerProfile.IO, block=False)
-    assert ("configure", ("worker-io-0", WorkerProfile.IO)) in calls
-
-
-@pytest.mark.parametrize("profile", list(WorkerProfile))
-def test_the_profile_is_passed_to_dbos(
-    calls: list[tuple[str, object]], profile: WorkerProfile
-) -> None:
-    """Conductor lists each executor with its profile, so DBOS must be configured with it."""
-    worker_main.run(Settings(), profile, block=False)
-    assert ("configure", ("worker-io-0", profile)) in calls
+    assert ("configure", "worker-io-0") in calls
 
 
 def test_a_blocking_worker_stops_when_signalled(
@@ -177,8 +159,6 @@ def test_a_blocking_worker_stops_when_signalled(
     worker_main.run(Settings(), WorkerProfile.IO, stop=stop, block=True)
 
     assert destroyed == [30], "in-flight workflows were not given time to finish"
-    # DBOS's destroy stops the Conductor thread start_conductor hands it.
-    assert [name for name, _ in calls][-1] == "start_conductor"
 
 
 def test_the_lease_is_held_before_launch_runs_startup_recovery(
@@ -225,21 +205,6 @@ def test_a_contended_identity_never_launches(
             lease_factory=locks.factory,
         )
     assert "launch" not in [name for name, _ in calls]
-    assert "start_conductor" not in [name for name, _ in calls]
-
-
-def test_a_failed_launch_never_reports_to_conductor(
-    calls: list[tuple[str, object]], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Conductor speaks to a launched executor; a failed launch opens no connection."""
-
-    def fail() -> None:
-        raise RuntimeError("launch failed")
-
-    monkeypatch.setattr(DBOS, "launch", fail)
-    with pytest.raises(RuntimeError, match="launch failed"):
-        worker_main.run(Settings(staging_s3_endpoint_url=None), WorkerProfile.IO, block=False)
-    assert "start_conductor" not in [name for name, _ in calls]
 
 
 def test_a_clean_shutdown_releases_the_lease_after_the_drain(

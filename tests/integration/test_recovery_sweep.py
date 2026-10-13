@@ -764,7 +764,6 @@ async def test_a_running_worker_keeps_its_version_from_the_sweep(
     previous_latest = await _latest_version(ledger_engine)
     worker_version_registered = worker_version in await _registered_versions(ledger_engine)
     monkeypatch.setattr(worker_main, "apply_schedules", lambda profile, settings: None)
-    monkeypatch.setattr(worker_main, "start_conductor", lambda settings, profile: None)
     monkeypatch.setattr(worker_main, "_install_shutdown_handler", lambda stop: None)
     monkeypatch.setattr(worker_main, "resolve_executor_id", lambda: LIVE_EXECUTOR)
 
@@ -772,8 +771,8 @@ async def test_a_running_worker_keeps_its_version_from_the_sweep(
     # Configured here, before `run` creates its datasource: a destroyed instance still in
     # DBOS's registry counts as launched, so a datasource created first would be refused.
     # A deployed worker is a fresh process and configures inside `run`.
-    configure(settings, executor_id=LIVE_EXECUTOR, profile=WorkerProfile.IO)
-    monkeypatch.setattr(worker_main, "configure", lambda settings, executor_id, profile: None)
+    configure(settings, executor_id=LIVE_EXECUTOR)
+    monkeypatch.setattr(worker_main, "configure", lambda settings, executor_id: None)
     stop = threading.Event()
     failures: list[BaseException] = []
 

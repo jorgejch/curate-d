@@ -22,13 +22,12 @@ transition and cleared on resume, so PENDING, ENQUEUED, and DELAYED rows survive
 regardless of age. Work parked across a long deployment is therefore never pruned out
 from under the recovery sweep in `sweep.py`.
 
-The collector is reached through DBOS internals because it has no public binding: it is
-exposed only to Conductor's retention command. Conductor can be connected, but the gate in
-`conductor.py` refuses that command, so this module stays the single owner of pruning and
-a console setting cannot add a second policy. The alternative — issuing the deletes here
-— would put this module in the business of tracking DBOS's schema across upgrades, which
-is strictly worse. A unit test pins the import so a DBOS upgrade that moves it fails
-loudly rather than silently disabling pruning.
+The collector is reached through DBOS internals because it has no public binding: DBOS
+exposes it only through Conductor's retention command, and curate.d does not connect to
+Conductor, so this module is the single owner of pruning. The alternative — issuing the
+deletes here — would put this module in the business of tracking DBOS's schema across
+upgrades, which is strictly worse. A unit test pins the import so a DBOS upgrade that
+moves it fails loudly rather than silently disabling pruning.
 
 The collector does not reach the ledger datasource's `datasource_outputs`, one row per
 datasource transaction per workflow, which lives in the ledger database rather than the
