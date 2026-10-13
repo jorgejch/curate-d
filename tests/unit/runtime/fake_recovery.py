@@ -3,7 +3,8 @@
 `FakeRecoveryControl` keeps workflow rows as DBOS reports them and applies forks,
 cancels, resumes and attribute updates the way DBOS does, recording every call. `FakeRegistrations`,
 `FakeVersionHolds` and `FakePromotionFence` stand in for the version registry, the
-exclusive version lock and the shared promotion fence.
+exclusive version lock and the shared promotion fence; `lose_after` makes a hold's session
+stop answering that it holds its lock.
 """
 
 from collections.abc import AsyncIterator, Mapping
@@ -16,7 +17,7 @@ from dbos import WorkflowStatus
 from sqlalchemy.exc import IntegrityError
 
 from curate_d.runtime.sweep import ENQUEUED, PENDING, PendingWorkflow
-from curate_d.runtime.version_lease import LockMode, VersionHold
+from curate_d.runtime.version_lease import FenceHold, LockMode, VersionHold
 
 EPOCH = datetime(2026, 10, 1, tzinfo=UTC)
 
@@ -227,6 +228,24 @@ class FakeRegistrations:
         return dict(self.entries)
 
 
+class _Probes:
+    """Answers whether a lock is still held: yes, until `lose_after` probes have answered."""
+
+    def __init__(self) -> None:
+        """Answer yes to every probe until told otherwise."""
+        self.count = 0
+        self.limit: int | None = None
+
+    def lose_after(self, probes: int) -> None:
+        """Answer no to every probe after the next `probes` ones."""
+        self.limit = self.count + probes
+
+    def answer(self, held: bool) -> bool:
+        """Count one probe and return whether the lock still counts as held."""
+        self.count += 1
+        return held and (self.limit is None or self.count <= self.limit)
+
+
 class FakeVersionHolds:
     """Exclusive version holds that succeed unless a version is held or failing.
 
@@ -245,6 +264,11 @@ class FakeVersionHolds:
         self.errors = dict(errors or {})
         self.events: list[str] = []
         self.held: set[str] = set()
+        self.probes = _Probes()
+
+    def lose_after(self, probes: int) -> None:
+        """Make every taken hold report its lock lost after the next `probes` checks."""
+        self.probes.lose_after(probes)
 
     def __call__(self, version: str) -> AbstractAsyncContextManager[VersionHold]:
         """Try to hold `version` exclusively for the duration of the block."""
@@ -261,7 +285,9 @@ class FakeVersionHolds:
         self.held.add(version)
         self.events.append(f"hold:{version}")
         try:
-            yield VersionHold(version, held=True)
+            yield VersionHold(
+                version, held=True, probe=lambda: self.probes.answer(version in self.held)
+            )
         finally:
             self.held.discard(version)
             self.events.append(f"release:{version}")
@@ -287,24 +313,29 @@ class FakePromotionFence:
         self.events = events if events is not None else []
         self.held = False
         self.attempts = 0
+        self.probes = _Probes()
 
-    def __call__(self) -> AbstractAsyncContextManager[bool]:
+    def lose_after(self, probes: int) -> None:
+        """Make a taken fence report itself lost after the next `probes` checks."""
+        self.probes.lose_after(probes)
+
+    def __call__(self) -> AbstractAsyncContextManager[FenceHold]:
         """Try once to hold the fence shared for the duration of the block."""
         return self._hold()
 
     @asynccontextmanager
-    async def _hold(self) -> AsyncIterator[bool]:
+    async def _hold(self) -> AsyncIterator[FenceHold]:
         """Yield whether the fence was taken, releasing a taken fence on every exit."""
         self.attempts += 1
         if self.error is not None:
             raise self.error
         if self.promoting:
-            yield False
+            yield FenceHold(held=False)
             return
         self.held = True
         self.events.append("fence:hold")
         try:
-            yield True
+            yield FenceHold(held=True, probe=lambda: self.probes.answer(self.held))
         finally:
             self.held = False
             self.events.append("fence:release")

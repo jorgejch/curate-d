@@ -40,6 +40,14 @@ latest mid-batch, and the rest of the batch still goes to the old target. That h
 itself: the old target registered before the new one, so the new target's sweeper forks
 those rows once the old target's workers are gone.
 
+DBOS commits each fork and cancel on its own connection, so losing a lock's session does
+not undo them. The sweep asks the fence's session, and the source version lock's, before
+each fork and again, once forked, before the original's cancel. Lost before the fork, the
+row fails and the batch stops, the rest skipped. Lost after it, the original is still
+cancelled, since two live lineages are worse, then the row fails and the batch stops; the
+next tick's RETIRE plan finishes whatever this one left. After every fork's cancel the
+original must read CANCELLED, or the row fails as an unverified lineage.
+
 A stale tick of the sweep's own schedule is cancelled under the same gates rather than
 forked or redispatched: the next tick does its work. A row whose queue is NULL, or names a
 queue no curate.d worker dequeues, is never forked or redispatched: DBOS sends a queue-less
@@ -71,12 +79,13 @@ from curate_d.observability.logging import get_logger
 from curate_d.runtime import version_lease
 from curate_d.runtime.lease import ExecutorLease
 from curate_d.runtime.queues import QueueName
-from curate_d.runtime.version_lease import VersionHold
+from curate_d.runtime.version_lease import FenceHold, VersionHold
 
 logger = get_logger(__name__)
 
 PENDING = "PENDING"
 ENQUEUED = "ENQUEUED"
+CANCELLED = "CANCELLED"
 
 RECOVERY_SCHEDULE_NAME: Final = "recovery-sweep"
 """The scheduled sweep's own schedule; its stale ticks are retired, never recovered."""
@@ -466,8 +475,34 @@ async def _confirmed_successor(control: RecoveryControl, original: str, successo
     return True
 
 
+type LockCheck = Callable[[], Awaitable[str | None]]
+"""Names the lock the sweep forks under that its session no longer holds, or None."""
+
+
+class _LockLostError(Exception):
+    """A lock the fork depends on was found lost; the sweep stops forking this tick."""
+
+    def __init__(self, reason: str, *, unverified_status: str | None = None) -> None:
+        """Record `reason`, and the status an already-cancelled original reads, if wrong."""
+        super().__init__(reason)
+        self.unverified_status = unverified_status
+
+
+class _LineageUnverifiedError(Exception):
+    """The original does not read CANCELLED after its successor's fork and its cancel."""
+
+
+async def _cancel_verified(control: RecoveryControl, original: str) -> str | None:
+    """Cancel `original` and return the status it reads afterwards, if not CANCELLED."""
+    await control.cancel(original)
+    after = await control.status(original)
+    if after is not None and after.status == CANCELLED:
+        return None
+    return "missing" if after is None else str(after.status)
+
+
 async def _recover_version(
-    control: RecoveryControl, workflow: PendingWorkflow, version: str
+    control: RecoveryControl, workflow: PendingWorkflow, version: str, *, lost: LockCheck
 ) -> tuple[str, bool]:
     """Commit or reuse one successor, then retire its source; never cancel on fork failure.
 
@@ -475,6 +510,10 @@ async def _recover_version(
     makes an insertion conflict recoverable. Other database errors still surface.
     Control errors also propagate, including cancellation failures after the successor
     has been committed.
+
+    `lost` is asked right before the fork and, if this call forked, again before the
+    cancel. Lost after the fork, the original is still cancelled: a successor already
+    exists, and two live lineages are worse than one unconfirmed fork.
 
     Returns:
         The successor ID and whether this call created it, rather than reusing a
@@ -486,6 +525,9 @@ async def _recover_version(
             the fork published no successor.
         IntegrityError: The fork violated a constraint other than the workflow primary
             key, or a primary-key conflict had no confirmed matching successor.
+        _LockLostError: A lock was found lost before the fork, which was then not made,
+            or after it, in which case the original was still cancelled.
+        _LineageUnverifiedError: The original does not read CANCELLED after its cancel.
     """
     original = workflow.workflow_id
     successor = recovery_successor_id(original)
@@ -504,11 +546,15 @@ async def _recover_version(
                     "inspect its existing lineage before recovering it"
                 )
         else:
+            start_step = await _fork_start_step(control, original)
+            lock = await lost()
+            if lock is not None:
+                raise _LockLostError(f"{lock} lost before fork")
             try:
                 await control.fork(
                     original,
                     successor,
-                    await _fork_start_step(control, original),
+                    start_step,
                     application_version=version,
                     queue_name=status.queue_name,
                     queue_partition_key=status.queue_partition_key,
@@ -523,7 +569,16 @@ async def _recover_version(
                     raise
             if not await _confirmed_successor(control, original, successor):
                 raise ValueError(f"fork of {original!r} did not publish its expected successor")
-    await control.cancel(original)
+    lock = await lost() if created else None
+    unverified = await _cancel_verified(control, original)
+    if lock is not None:
+        raise _LockLostError(
+            f"{lock} lost after fork; the original was cancelled", unverified_status=unverified
+        )
+    if unverified is not None:
+        raise _LineageUnverifiedError(
+            f"successor {successor!r} exists but the original reads {unverified!r} after its cancel"
+        )
     return successor, created
 
 
@@ -545,7 +600,7 @@ type VersionHolds = Callable[[str], AbstractAsyncContextManager[VersionHold]]
 """Tries once to hold one version's lock exclusively for the duration of a block."""
 type Registrations = Callable[[], Awaitable[Mapping[str, datetime]]]
 """Reads every registered version with its first registration time."""
-type PromotionFence = Callable[[], AbstractAsyncContextManager[bool]]
+type PromotionFence = Callable[[], AbstractAsyncContextManager[FenceHold]]
 """Tries once to hold the promotion fence shared for the duration of a block."""
 
 
@@ -698,6 +753,8 @@ class _Sweep:
         self.target = target
         self.leases = leases
         self.holds = holds
+        self.fence: FenceHold | None = None
+        """The promotion fence hold every fork and retirement runs under, once taken."""
         self.tally = _Tally()
 
     def fail_unfinished(self, ids: Sequence[str], reason: str) -> None:
@@ -822,10 +879,35 @@ class _Sweep:
             result=result.value,
         )
 
-    async def recover(self, entry: StrandedWorkflow) -> None:
-        """Fork or retire one row, or cancel it if it is a stale tick of this sweep."""
+    async def lost_lock(self, hold: VersionHold | None) -> str | None:
+        """Name the lock this sweep forks under that is no longer held, or return None.
+
+        The fence is checked first, then `hold`, the source version's lock, if any.
+        """
+        if self.fence is None or not await self.fence.still_held():
+            return "promotion fence"
+        if hold is not None and not await hold.still_held():
+            return "version lock"
+        return None
+
+    async def recover(self, entry: StrandedWorkflow, hold: VersionHold | None) -> bool:
+        """Fork or retire one row, or cancel it if it is a stale tick of this sweep.
+
+        Args:
+            entry: The row and its remedy.
+            hold: The source version's exclusive hold; None for version-less and
+                on-target rows, which take no version lock.
+
+        Returns:
+            False if a lock was found lost, in which case the caller forks and retires
+            nothing more this tick. True otherwise, failures included.
+        """
         workflow = entry.workflow
         original = workflow.workflow_id
+        prefix = (
+            f"recovering workflow {original!r} from version "
+            f"{workflow.application_version!r} onto {self.target!r} failed"
+        )
         try:
             if workflow.is_own_tick and not workflow.was_forked_from:
                 if await _retire_tick(self.control, workflow):
@@ -835,8 +917,10 @@ class _Sweep:
                         workflow_id=original,
                         from_version=workflow.application_version,
                     )
-                return
-            successor, created = await _recover_version(self.control, workflow, self.target)
+                return True
+            successor, created = await _recover_version(
+                self.control, workflow, self.target, lost=lambda: self.lost_lock(hold)
+            )
             if created:
                 self.tally.forked.append((original, successor))
             else:
@@ -848,13 +932,30 @@ class _Sweep:
                 from_version=workflow.application_version,
                 to_version=self.target,
             )
-        except Exception as error:  # One bad row must not strand the rest.
-            reason = (
-                f"recovering workflow {original!r} from version "
-                f"{workflow.application_version!r} onto {self.target!r} failed: {error}"
+        except _LockLostError as error:
+            self.tally.failed.append((original, f"{prefix}: {error}"))
+            logger.error(
+                "recovery_sweep.version_lock_lost",
+                workflow_id=original,
+                from_version=workflow.application_version,
+                reason=str(error),
             )
-            self.tally.failed.append((original, reason))
+            if error.unverified_status is not None:
+                logger.error(
+                    "recovery_sweep.lineage_unverified",
+                    workflow_id=original,
+                    status=error.unverified_status,
+                )
+            return False
+        except _LineageUnverifiedError as error:
+            self.tally.failed.append((original, f"{prefix}: {error}"))
+            logger.error(
+                "recovery_sweep.lineage_unverified", workflow_id=original, reason=str(error)
+            )
+        except Exception as error:  # One bad row must not strand the rest.
+            self.tally.failed.append((original, f"{prefix}: {error}"))
             logger.error("recovery_sweep.fork_failed", workflow_id=original, error=str(error))
+        return True
 
     async def recover_version(self, version: str, entries: list[StrandedWorkflow]) -> bool:
         """Fork or retire one source version's rows under its exclusive lock.
@@ -864,10 +965,11 @@ class _Sweep:
         after the target, which recovers whatever this batch leaves on the target.
 
         Returns:
-            False if the latest version changed after the lock was taken, in which case
-            nothing more is forked or retired by this sweep. True allows the next source
-            version to proceed, even if this version was locked elsewhere or failed;
-            failures are recorded in the tally.
+            False if the latest version changed after the lock was taken, or a lock was
+            found lost mid-batch, in which case nothing more is forked or retired by this
+            sweep and the version's remaining rows are skipped. True allows the next
+            source version to proceed, even if this version was locked elsewhere or
+            failed; failures are recorded in the tally.
         """
         ids = [entry.workflow.workflow_id for entry in entries]
         try:
@@ -893,8 +995,12 @@ class _Sweep:
                         rows=len(entries),
                     )
                     return False
-                for entry in entries:
-                    await self.recover(entry)
+                for index, entry in enumerate(entries):
+                    if not await self.recover(entry, hold):
+                        self.tally.skipped.extend(
+                            rest.workflow.workflow_id for rest in entries[index + 1 :]
+                        )
+                        return False
         except Exception as error:  # A lock that cannot be taken forks nothing of it.
             self.fail_unfinished(ids, f"holding version {version!r} for recovery failed: {error}")
             logger.error("recovery_sweep.version_lock_failed", version=version, error=str(error))
@@ -942,8 +1048,11 @@ class _Sweep:
             return
 
         # The sweeper runs the target and holds its shared lease, so the target is live.
-        for entry in unlocked:
-            await self.recover(entry)
+        for index, entry in enumerate(unlocked):
+            if not await self.recover(entry, None):
+                # `ids` lists the unlocked rows first, then every version's.
+                self.tally.skipped.extend(ids[index + 1 :])
+                return
 
         target_registered = registry.get(self.target)
         remaining = list(by_version.items())
@@ -1007,7 +1116,8 @@ async def run_recovery_sweep(
         registrations: Reads the version registry. Defaults to `version_lease.registrations`.
         promotion_fence: Tries once to hold the promotion fence shared. Every fork and
             retirement runs under it; refused, they are all skipped this tick, while
-            dead-executor redispatches still run. Defaults to
+            dead-executor redispatches still run. Found lost before or after a fork, the
+            rest of the forks and retirements are skipped. Defaults to
             `version_lease.hold_fence_shared` on the configured database.
 
     Returns:
@@ -1072,7 +1182,8 @@ async def run_recovery_sweep(
     ids = [entry.workflow.workflow_id for entry in versioned]
     try:
         async with fence() as fenced:
-            if fenced:
+            if fenced.held:
+                sweep.fence = fenced
                 await sweep.recover_fenced(unlocked, by_version, registry)
             else:
                 sweep.tally.skipped.extend(ids)

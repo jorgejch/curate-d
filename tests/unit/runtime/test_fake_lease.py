@@ -189,11 +189,13 @@ async def test_the_promotion_fence_releases_on_every_exit_and_refuses_while_prom
     fence = FakePromotionFence()
     with pytest.raises(RuntimeError):
         async with fence() as fenced:
-            assert fenced and fence.held
+            assert fenced.held and fence.held
+            assert await fenced.still_held()
             raise RuntimeError("fork failed")
     assert not fence.held
     assert fence.events == ["fence:hold", "fence:release"]
     fence.promoting = True
     async with fence() as fenced:
-        assert not fenced
+        assert not fenced.held
+        assert not await fenced.still_held()
     assert fence.attempts == 2

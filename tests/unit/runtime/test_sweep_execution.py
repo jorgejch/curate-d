@@ -47,6 +47,11 @@ UNROUTED_QUEUES = [None, "_dbos_internal_queue", "retired-queue"]
 """No queue, DBOS's internal queue, and a queue no curate.d worker dequeues."""
 
 
+async def _kept() -> str | None:
+    """Report every lock still held."""
+    return None
+
+
 @pytest.fixture
 def locks() -> FakeLockServer:
     """Return the lock server both the sweep and the simulated executors lease from."""
@@ -311,7 +316,7 @@ async def test_unrelated_id_collision_never_cancels_source() -> None:
     """A successor ID held by another workflow is a failure, not a repair."""
     control = FakeRecoveryControl([workflow_status(ORIGINAL), workflow_status(SUCCESSOR)])
     with pytest.raises(ValueError, match="unrelated workflow"):
-        await sweep._recover_version(control, WORKFLOW, "v2")
+        await sweep._recover_version(control, WORKFLOW, "v2", lost=_kept)
     assert control.writes() == []
 
 
@@ -323,7 +328,7 @@ async def test_a_committed_successor_is_reused_and_the_source_retired() -> None:
             workflow_status(SUCCESSOR, status="ENQUEUED", version="v2", forked_from=ORIGINAL),
         ]
     )
-    assert await sweep._recover_version(control, WORKFLOW, "v3") == (SUCCESSOR, False)
+    assert await sweep._recover_version(control, WORKFLOW, "v3", lost=_kept) == (SUCCESSOR, False)
     assert control.writes() == [("cancel", ORIGINAL)]
 
 
@@ -331,7 +336,7 @@ async def test_an_existing_manual_fork_requires_lineage_review() -> None:
     """A hand fork's successor is not the recovery successor; leave the original alone."""
     control = FakeRecoveryControl([workflow_status(ORIGINAL, was_forked_from=True)])
     with pytest.raises(ValueError, match="inspect its existing lineage"):
-        await sweep._recover_version(control, WORKFLOW, "v2")
+        await sweep._recover_version(control, WORKFLOW, "v2", lost=_kept)
     assert control.writes() == []
 
 
@@ -339,7 +344,7 @@ async def test_a_cancelled_snapshot_is_not_forked_back_to_life() -> None:
     """A row finished after planning stays finished."""
     control = FakeRecoveryControl([workflow_status(ORIGINAL, status="CANCELLED")])
     with pytest.raises(ValueError, match="no longer eligible"):
-        await sweep._recover_version(control, WORKFLOW, "v2")
+        await sweep._recover_version(control, WORKFLOW, "v2", lost=_kept)
     assert control.writes() == []
 
 
@@ -350,7 +355,7 @@ async def test_only_a_workflow_primary_key_conflict_can_be_repaired() -> None:
         "insert", {}, SQLiteIntegrityError("some other constraint failed")
     )
     with pytest.raises(IntegrityError):
-        await sweep._recover_version(control, WORKFLOW, "v2")
+        await sweep._recover_version(control, WORKFLOW, "v2", lost=_kept)
     assert ("cancel", ORIGINAL) not in control.calls
 
 
@@ -363,7 +368,7 @@ async def test_an_unconfirmed_duplicate_insert_does_not_cancel_source() -> None:
         SQLiteIntegrityError("UNIQUE constraint failed: workflow_status.workflow_uuid"),
     )
     with pytest.raises(IntegrityError):
-        await sweep._recover_version(control, WORKFLOW, "v2")
+        await sweep._recover_version(control, WORKFLOW, "v2", lost=_kept)
     assert ("cancel", ORIGINAL) not in control.calls
 
 
@@ -373,7 +378,7 @@ async def test_fork_resumes_after_last_checkpoint_with_original_routing() -> Non
         [workflow_status(ORIGINAL, queue_name="transfer-large", queue_partition_key="provider-1")],
         steps={ORIGINAL: [1, 4]},
     )
-    assert await sweep._recover_version(control, WORKFLOW, "v2") == (SUCCESSOR, True)
+    assert await sweep._recover_version(control, WORKFLOW, "v2", lost=_kept) == (SUCCESSOR, True)
     assert control.writes() == [("fork", ORIGINAL, SUCCESSOR, "5"), ("cancel", ORIGINAL)]
     successor = control.rows[SUCCESSOR]
     assert (successor.queue_name, successor.queue_partition_key) == ("transfer-large", "provider-1")
@@ -919,6 +924,90 @@ async def test_an_empty_sweep_never_reads_the_registry_or_takes_locks(
     assert locks.sessions == []
 
 
+# Lock loss around a fork.
+
+
+async def test_a_fence_lost_before_the_first_fork_forks_nothing() -> None:
+    """The fence's own session is asked before each fork; lost, the batch stops unwritten."""
+    control = FakeRecoveryControl([workflow_status("a"), workflow_status("b")])
+    fence = FakePromotionFence()
+    fence.lose_after(0)
+    with capture_logs() as events:
+        outcome = await _sweep(control, fence=fence)
+    assert outcome.forked == ()
+    assert [workflow_id for workflow_id, _ in outcome.failed] == ["a"]
+    assert "promotion fence lost before fork" in outcome.failed[0][1]
+    assert outcome.skipped == ("b",)
+    assert control.writes() == []
+    [event] = [event for event in events if event["event"] == "recovery_sweep.version_lock_lost"]
+    assert event["log_level"] == "error"
+
+
+async def test_a_version_lock_lost_before_a_fork_forks_nothing_more() -> None:
+    """Earlier rows keep their forks; the row that found the loss and the rest are left."""
+    control = FakeRecoveryControl([workflow_status("a"), workflow_status("b")])
+    holds = FakeVersionHolds()
+    # One check before a's fork and one before its cancel; b's first check finds it lost.
+    holds.lose_after(2)
+    outcome = await _sweep(control, holds=holds)
+    assert outcome.forked == (("a", recovery_successor_id("a")),)
+    assert outcome.failed == (
+        (
+            "b",
+            "recovering workflow 'b' from version 'v1' onto 'v2' failed: "
+            "version lock lost before fork",
+        ),
+    )
+    assert ("fork", "b", recovery_successor_id("b"), "1") not in control.writes()
+    assert control.rows["b"].status == "PENDING"
+    assert holds.held == set()
+
+
+async def test_a_version_lock_lost_after_a_fork_still_cancels_the_original() -> None:
+    """Two live lineages are worse than one unconfirmed fork; the rest of the sweep stops."""
+    control = FakeRecoveryControl(
+        [workflow_status("a"), workflow_status("b"), workflow_status("c", version="v0")]
+    )
+    holds = FakeVersionHolds()
+    holds.lose_after(1)
+    with capture_logs() as events:
+        outcome = await _sweep(
+            control, holds=holds, registry=FakeRegistrations(registered("v0", "v1", "v2"))
+        )
+    assert control.writes() == [("fork", "a", recovery_successor_id("a"), "1"), ("cancel", "a")]
+    assert control.rows["a"].status == "CANCELLED"
+    assert outcome.forked == ()
+    assert [workflow_id for workflow_id, _ in outcome.failed] == ["a"]
+    assert "version lock lost after fork; the original was cancelled" in outcome.failed[0][1]
+    assert outcome.skipped == ("b", "c")
+    assert [event["event"] for event in events if event["log_level"] == "error"] == [
+        "recovery_sweep.version_lock_lost"
+    ]
+    assert holds.events == ["hold:v1", "release:v1"]
+
+
+async def test_an_original_that_survives_its_cancel_fails_as_an_unverified_lineage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The successor exists, so the original must read CANCELLED; the batch goes on."""
+    control = FakeRecoveryControl([workflow_status("a"), workflow_status("b")])
+    cancel = control.cancel
+
+    async def ignore_a(workflow_id: str) -> None:
+        """Cancel every row but `a`, as a cancel that never landed would."""
+        if workflow_id != "a":
+            await cancel(workflow_id)
+
+    monkeypatch.setattr(control, "cancel", ignore_a)
+    with capture_logs() as events:
+        outcome = await _sweep(control)
+    assert [workflow_id for workflow_id, _ in outcome.failed] == ["a"]
+    assert "reads 'PENDING' after its cancel" in outcome.failed[0][1]
+    assert outcome.forked == (("b", recovery_successor_id("b")),)
+    [event] = [event for event in events if event["event"] == "recovery_sweep.lineage_unverified"]
+    assert event["log_level"] == "error"
+
+
 # The promotion fence.
 
 
@@ -1082,7 +1171,7 @@ async def test_recovery_resumes_after_the_highest_checkpoint(
     """An empty or unordered checkpoint listing never skips or repeats committed work."""
     control = FakeRecoveryControl([workflow_status(ORIGINAL)], steps={ORIGINAL: step_ids})
 
-    assert await sweep._recover_version(control, WORKFLOW, "v2") == (SUCCESSOR, True)
+    assert await sweep._recover_version(control, WORKFLOW, "v2", lost=_kept) == (SUCCESSOR, True)
     assert control.writes() == [
         ("fork", ORIGINAL, SUCCESSOR, str(start_step)),
         ("cancel", ORIGINAL),
@@ -1115,11 +1204,14 @@ async def test_a_concurrent_successor_repairs_only_a_workflow_id_conflict(
     fork = AsyncMock(side_effect=concurrent_fork)
     monkeypatch.setattr(control, "fork", fork)
     if workflow_id_conflict:
-        assert await sweep._recover_version(control, WORKFLOW, "v2") == (SUCCESSOR, False)
+        assert await sweep._recover_version(control, WORKFLOW, "v2", lost=_kept) == (
+            SUCCESSOR,
+            False,
+        )
         assert control.writes() == [("cancel", ORIGINAL)]
     else:
         with pytest.raises(IntegrityError) as raised:
-            await sweep._recover_version(control, WORKFLOW, "v2")
+            await sweep._recover_version(control, WORKFLOW, "v2", lost=_kept)
         assert raised.value is error
         assert control.writes() == []
         assert control.rows[ORIGINAL].status == "PENDING"
@@ -1135,7 +1227,7 @@ async def test_a_fork_that_publishes_no_successor_never_cancels_its_source(
     monkeypatch.setattr(control, "fork", fork)
 
     with pytest.raises(ValueError, match="did not publish its expected successor"):
-        await sweep._recover_version(control, WORKFLOW, "v2")
+        await sweep._recover_version(control, WORKFLOW, "v2", lost=_kept)
     fork.assert_awaited_once()
     assert control.writes() == []
     assert control.rows[ORIGINAL].status == "PENDING"
