@@ -14,13 +14,12 @@ from uuid import uuid4
 
 import pytest
 from dbos import DBOS, ScheduleInput, WorkflowHandleAsync
-from dbos._utils import GlobalParams
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from curate_d.config import Settings
 from curate_d.runtime.datasource import create_ledger_datasource
-from curate_d.runtime.dbos_app import build_dbos_config
+from curate_d.runtime.dbos_app import application_name, build_dbos_config
 from curate_d.runtime.retention import (
     prune_datasource_checkpoints,
     prune_workflow_history,
@@ -85,7 +84,7 @@ async def _seed_workflow(
 ) -> None:
     """Insert a workflow_status row as DBOS would leave it.
 
-    A terminal seed needs `completed_at`: the collector keys on it, and DBOS sets it on
+    A terminal seed needs `completed_at`: the prune keys on it, and DBOS sets it on
     every terminal transition.
     """
     async with engine.begin() as connection:
@@ -99,7 +98,7 @@ async def _seed_workflow(
             ),
             {
                 "id": workflow_id,
-                "app": GlobalParams.app_name,
+                "app": application_name(Settings().environment),
                 "status": status,
                 "created": _epoch_ms(created_at),
                 "completed": None if completed_at is None else _epoch_ms(completed_at),
@@ -296,7 +295,7 @@ async def test_the_applied_window_is_reported_back(
 async def test_the_checkpoints_of_a_pruned_workflow_are_removed(
     dbos_with_datasource: None, ledger_engine: AsyncEngine, settings_with_retention: Settings
 ) -> None:
-    """DBOS's collector leaves them behind; nothing else in DBOS 3.1 ever would."""
+    """Deleting a workflow leaves them behind; nothing in DBOS removes them but a rewind."""
     workflow_id = f"retention-checkpoint-old-{uuid4()}"
     aged = NOW - timedelta(days=RETENTION_DAYS + 1)
     await _seed_workflow(
@@ -306,7 +305,7 @@ async def test_the_checkpoints_of_a_pruned_workflow_are_removed(
 
     await prune_workflow_history(settings_with_retention, now=NOW)
 
-    assert not await _exists(ledger_engine, workflow_id), "the collector did not run"
+    assert not await _exists(ledger_engine, workflow_id), "the prune did not run"
     assert not await _has_checkpoint(ledger_engine, workflow_id)
 
 
