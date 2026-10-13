@@ -76,9 +76,7 @@ and audit log all in one instance.
 
 Durable execution is [DBOS](https://docs.dbos.dev/) 3.2, chosen as a library rather than a
 service so that ledger writes go through a datasource transaction and are exactly-once
-across crashes and replays. An optional connection to DBOS Conductor, off by default, shows
-workflows in the DBOS Console, read-only: every write from the Console is refused
-([guide](docs/conductor.md)).
+across crashes and replays.
 
 Designed for Kubernetes. No GPU on any node — all local
 inference is CPU-only.
@@ -126,7 +124,7 @@ is measured against the unit suite alone; integration coverage does not count to
 
 [`CLAUDE.md`](CLAUDE.md) (also [`AGENTS.md`](AGENTS.md)) holds the conventions agents
 follow here. Before designing or changing anything that touches DBOS — a workflow, step,
-queue, schedule, datasource, client or Conductor call — load the **`dbos-python` skill**
+queue, schedule, datasource or client call — load the **`dbos-python` skill**
 from [dbos-inc/agent-skills](https://github.com/dbos-inc/agent-skills). It carries DBOS's
 own patterns, conventions and architecture guidance; `CLAUDE.md` lists where this repo
 departs from it. The skill is vendored in `.agents/skills/dbos-python`, linked from
@@ -159,7 +157,7 @@ RustFS; OVH is verified separately against the real buckets.
   tests/integration/  tests that need the local stack: Postgres, RustFS and the rclone sidecar
   migrations/       Alembic migrations for the ledger schema
   docker/           container image build
-  docs/             staging, Conductor and reset guides, verification records, diagrams
+  docs/             staging and reset guides, verification records, diagrams
   infrastructure/   local stack config and operator scripts; deployment manifests
                     are kept outside this repository
   .github/          image publishing and unit-test workflows
