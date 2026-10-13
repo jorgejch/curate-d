@@ -12,26 +12,33 @@ from structlog.testing import CapturingLogger
 from curate_d.config import Settings
 from curate_d.runtime.dbos_app import application_version
 from curate_d.runtime.profiles import WorkerProfile
-from curate_d.runtime.schedule_authority import StoredSchedule
-from curate_d.worker import main as worker_main
+from curate_d.runtime.schedule_authority import (
+    ScheduleAuthorityUnavailableError,
+    StoredSchedule,
+)
+from curate_d.worker import schedules as worker_schedules
 from curate_d.workflows.registry import declared_schedule_names, schedules_for
 
 _SETTLE_SECONDS = 5.0
 
 
 def _entry(name: str, cron: str = "0 0 * * *") -> ScheduleInput:
-    """A schedule declaration as the fake store reads it: a name and a cron."""
+    """Return a schedule declaration as the fake store reads it: a name and a cron."""
     return cast(ScheduleInput, {"schedule_name": name, "schedule": cron})
 
 
 @contextmanager
-def _worker_logs(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[dict[str, object]]]:
-    """Record what the worker module logs in the block, each entry with its event name."""
+def _worker_logs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[list[dict[str, object]]]:
+    """Record what the schedules module logs in the block, with each event's name and level."""
     sink = CapturingLogger()
-    monkeypatch.setattr(worker_main, "logger", sink)
+    monkeypatch.setattr(worker_schedules, "logger", sink)
     entries: list[dict[str, object]] = []
     yield entries
-    entries.extend({"event": call.args[0], **call.kwargs} for call in sink.calls)
+    entries.extend(
+        {"event": call.args[0], "level": call.method_name, **call.kwargs} for call in sink.calls
+    )
 
 
 class _WorkerVersion:
@@ -41,6 +48,7 @@ class _WorkerVersion:
         self._store = store
 
     def __get__(self, _instance: object, _owner: type) -> str:
+        """Return the version of the worker on the calling thread."""
         return self._store.worker().version
 
 
@@ -51,77 +59,55 @@ class _Worker(threading.local):
     declared: list[ScheduleInput] | None = None
 
 
-class _BackendLostError(Exception):
-    """The fake transaction's backend ended; every later statement and the commit fail."""
+class _Authority:
+    """One worker's hold on the authority, writing as DBOS does: each write commits at once.
 
-
-class _Transaction:
-    """One worker's authority: the lock plus writes staged until the commit.
-
-    Mirrors the PostgreSQL transaction: reads see committed rows and this transaction's
-    own writes, nothing is visible to other workers before the commit, and losing the
-    backend releases the lock and discards the staged writes.
+    Losing the authority releases the lock to the next worker but stops nothing: the
+    writes that follow still land, as DBOS's writes on its own pool do.
     """
 
     def __init__(self, store: "_SharedSchedules") -> None:
         self._store = store
-        self._rows = dict(store.rows)
-        self._applied = False
-        self._deleted: list[str] = []
         self.lost = False
 
-    def _statement(self) -> None:
-        if self.lost:
-            raise _BackendLostError
-
     def latest_version(self) -> str:
-        self._statement()
+        """Return the shared latest version, then run the store's pause hook."""
         latest = self._store.latest
         self._store.pause(self)
         return latest
 
     def apply(self, schedules: list[ScheduleInput]) -> None:
-        self._statement()
+        """Commit each declaration's cron under its name."""
         for entry in schedules:
-            self._rows[entry["schedule_name"]] = entry["schedule"]
-        self._applied = True
+            self._store.rows[entry["schedule_name"]] = entry["schedule"]
+        self._store.applied.append(self._store.worker().version)
+        self._store.after_apply(self)
 
     def stored(self) -> list[StoredSchedule]:
-        self._statement()
-        return [StoredSchedule(name, "wf") for name in sorted(self._rows)]
+        """Return the committed rows."""
+        return [StoredSchedule(name, "wf") for name in sorted(self._store.rows)]
 
     def delete(self, name: str) -> None:
-        self._statement()
-        self._deleted.append(name)
-        self._rows.pop(name, None)
+        """Commit the deletion of `name`."""
+        self._store.deleted.append(name)
+        self._store.rows.pop(name, None)
+
+    def still_held(self) -> bool:
+        """Return whether this hold has not been lost."""
+        return not self.lost
 
     def lose(self) -> None:
-        """End the backend: the lock goes at once, the staged writes with it."""
+        """Lose the session: the lock goes to the next worker at once."""
         self.lost = True
-        self._store.authority.release()
-
-    def commit(self) -> None:
-        self._statement()
-        self._store.before_commit(self)
-        self._statement()
-        self._store.rows = self._rows
-        self._store.deleted.extend(self._deleted)
-        if self._applied:
-            self._store.applied.append(self._store.worker().version)
-        self._store.authority.release()
-
-    def rollback(self) -> None:
-        if not self.lost:
-            self._store.authority.release()
+        self._store.lock.release()
 
 
 class _SharedSchedules:
     """DBOS's schedule rows, latest version and the authority lock, shared by workers.
 
     Each thread acts as one worker, with its own version and declarations. `pause` runs
-    inside a worker's transaction right after it reads the latest version, which is where
-    a worker can stall after passing the check; `before_commit` runs once its writes are
-    staged and not yet committed.
+    right after a worker reads the latest version, which is where a worker can stall
+    after passing the check; `after_apply` runs once its upserts have committed.
     """
 
     def __init__(self, *stored: str, latest: str = "1.0.0") -> None:
@@ -129,12 +115,14 @@ class _SharedSchedules:
         self.latest = latest
         self.applied: list[str] = []
         self.deleted: list[str] = []
-        self.pause: Callable[[_Transaction], None] = lambda _txn: None
-        self.before_commit: Callable[[_Transaction], None] = lambda _txn: None
-        self.authority = threading.Lock()
+        self.pause: Callable[[_Authority], None] = lambda _hold: None
+        self.after_apply: Callable[[_Authority], None] = lambda _hold: None
+        self.lock = threading.Lock()
+        self.holds = 0
         self._worker = _Worker()
 
     def worker(self) -> _Worker:
+        """Return the calling thread's worker."""
         return self._worker
 
     @contextmanager
@@ -146,44 +134,52 @@ class _SharedSchedules:
         yield
 
     @contextmanager
-    def _schedule_authority(self) -> Iterator[_Transaction]:
-        self.authority.acquire()
-        txn = _Transaction(self)
+    def _schedule_authority(self, _settings: Settings) -> Iterator[_Authority]:
+        """Hold the lock for the block, unless the hold is lost first."""
+        self.lock.acquire()
+        self.holds += 1
+        hold = _Authority(self)
         try:
-            yield txn
-        except BaseException:
-            txn.rollback()
-            raise
-        txn.commit()
+            yield hold
+        finally:
+            if not hold.lost:
+                self.lock.release()
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> "_SharedSchedules":
-        """Substitute this store for the authority transaction and the declarations."""
+        """Substitute this store for the authority and the declarations."""
 
         def declared_for(profile: WorkerProfile, settings: Settings) -> list[ScheduleInput]:
+            """Return the worker's own declarations, or the real ones."""
             own = self._worker.declared
             if own is None or profile is not WorkerProfile.IO:
                 return schedules_for(profile, settings)
             return own
 
         def names_declared(settings: Settings) -> frozenset[str]:
+            """Return the names the worker's build declares."""
             own = self._worker.declared
             if own is None:
                 return declared_schedule_names(settings)
             return frozenset(entry["schedule_name"] for entry in own)
 
         monkeypatch.setattr(DBOS, "application_version", _WorkerVersion(self))
-        monkeypatch.setattr(worker_main, "schedules_for", declared_for)
-        monkeypatch.setattr(worker_main, "declared_schedule_names", names_declared)
-        monkeypatch.setattr(worker_main, "schedule_authority", self._schedule_authority)
+        monkeypatch.setattr(worker_schedules, "schedules_for", declared_for)
+        monkeypatch.setattr(worker_schedules, "declared_schedule_names", names_declared)
+        monkeypatch.setattr(worker_schedules, "schedule_authority", self._schedule_authority)
         return self
+
+
+def _unverified(logs: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Return the unverified-reconciliation reports among `logs`."""
+    return [log for log in logs if log["event"] == "worker.schedule_reconciliation_unverified"]
 
 
 def test_only_the_io_profile_applies_schedules(monkeypatch: pytest.MonkeyPatch) -> None:
     """The CPU profile applies nothing; the I/O profile applies its list."""
     store = _SharedSchedules().install(monkeypatch)
-    worker_main.apply_schedules(WorkerProfile.CPU, Settings())
+    worker_schedules.apply_schedules(WorkerProfile.CPU, Settings())
     assert store.applied == []
-    worker_main.apply_schedules(WorkerProfile.IO, Settings())
+    worker_schedules.apply_schedules(WorkerProfile.IO, Settings())
     assert set(store.rows) == declared_schedule_names(Settings())
     assert schedules_for(WorkerProfile.CPU, Settings()) == []
 
@@ -198,19 +194,21 @@ def test_no_two_declared_schedules_share_a_name() -> None:
 def test_applying_after_every_restart_leaves_one_row_per_schedule(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Restarts re-apply the same names and delete none of them."""
+    """Restarts re-apply the same names, delete none of them and report nothing amiss."""
     store = _SharedSchedules().install(monkeypatch)
-    for _ in range(3):
-        worker_main.apply_schedules(WorkerProfile.IO, Settings())
+    with _worker_logs(monkeypatch) as logs:
+        for _ in range(3):
+            worker_schedules.apply_schedules(WorkerProfile.IO, Settings())
     assert set(store.rows) == declared_schedule_names(Settings())
     assert store.deleted == []
+    assert _unverified(logs) == []
 
 
 def test_a_schedule_no_longer_declared_is_deleted(monkeypatch: pytest.MonkeyPatch) -> None:
     """A dropped or renamed pass stops firing once the latest version starts."""
     store = _SharedSchedules("retired-pass").install(monkeypatch)
     with _worker_logs(monkeypatch) as logs:
-        worker_main.apply_schedules(WorkerProfile.IO, Settings())
+        worker_schedules.apply_schedules(WorkerProfile.IO, Settings())
     assert store.deleted == ["retired-pass"]
     assert set(store.rows) == declared_schedule_names(Settings())
     assert [log["schedule"] for log in logs if log["event"] == "worker.schedule_deleted"] == [
@@ -221,8 +219,8 @@ def test_a_schedule_no_longer_declared_is_deleted(monkeypatch: pytest.MonkeyPatc
 def test_the_cpu_profile_deletes_no_schedule(monkeypatch: pytest.MonkeyPatch) -> None:
     """It declares none, so it takes no part in reconciliation."""
     store = _SharedSchedules("retired-pass").install(monkeypatch)
-    store.pause = lambda _txn: pytest.fail("the CPU profile took the schedule authority")
-    worker_main.apply_schedules(WorkerProfile.CPU, Settings())
+    worker_schedules.apply_schedules(WorkerProfile.CPU, Settings())
+    assert store.holds == 0
     assert store.applied == []
     assert store.deleted == []
 
@@ -233,12 +231,13 @@ def test_an_older_version_leaves_a_newer_ones_schedules_alone(
     """A replica restarting on the old version mid-rollout neither retires nor rewrites."""
     store = _SharedSchedules("added-by-the-newer-version", latest="1.1.0").install(monkeypatch)
     with store.acting_as("1.0.0"), _worker_logs(monkeypatch) as logs:
-        worker_main.apply_schedules(WorkerProfile.IO, Settings())
+        worker_schedules.apply_schedules(WorkerProfile.IO, Settings())
     assert store.applied == []
     assert store.deleted == []
     assert set(store.rows) == {"added-by-the-newer-version"}
     left = [log for log in logs if log["event"] == "worker.schedules_left_to_latest_version"]
     assert [(log["version"], log["latest_version"]) for log in left] == [("1.0.0", "1.1.0")]
+    assert _unverified(logs) == []
 
 
 def test_an_older_dev_build_of_the_same_release_keeps_a_newer_builds_schedule(
@@ -251,13 +250,13 @@ def test_an_older_dev_build_of_the_same_release_keeps_a_newer_builds_schedule(
     older_declares = [_entry("kept-pass")]
     newer_declares = [_entry("kept-pass"), _entry("added-pass")]
     with store.acting_as(older, older_declares):
-        worker_main.apply_schedules(WorkerProfile.IO, Settings())
+        worker_schedules.apply_schedules(WorkerProfile.IO, Settings())
 
     store.latest = newer  # the newer build's first worker registers its version
     with store.acting_as(newer, newer_declares):
-        worker_main.apply_schedules(WorkerProfile.IO, Settings())
+        worker_schedules.apply_schedules(WorkerProfile.IO, Settings())
     with store.acting_as(older, older_declares):  # an older replica restarts
-        worker_main.apply_schedules(WorkerProfile.IO, Settings())
+        worker_schedules.apply_schedules(WorkerProfile.IO, Settings())
 
     assert store.deleted == []
     assert set(store.rows) == {"kept-pass", "added-pass"}
@@ -267,19 +266,20 @@ def test_an_older_dev_build_of_the_same_release_keeps_a_newer_builds_schedule(
 def _run_as(store: _SharedSchedules, version: str, declared: list[ScheduleInput]) -> None:
     """Reconcile as a worker on `version` declaring `declared`."""
     with store.acting_as(version, declared):
-        worker_main.apply_schedules(WorkerProfile.IO, Settings())
+        worker_schedules.apply_schedules(WorkerProfile.IO, Settings())
 
 
-def test_a_worker_that_stalls_after_its_check_cannot_overwrite_a_newer_version(
+def test_a_worker_that_stalls_after_its_check_holds_off_a_newer_version(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The check and the writes are one critical section across workers."""
+    """While the authority is held, the check and the writes are one critical section."""
     store = _SharedSchedules(latest="1.0.0").install(monkeypatch)
     older = [_entry("changed-pass", "0 0 * * *")]
     newer = [_entry("changed-pass", "30 1 * * *"), _entry("added-pass", "0 2 * * *")]
     checked, resume = threading.Event(), threading.Event()
 
-    def stall_the_older_worker(_txn: _Transaction) -> None:
+    def stall_the_older_worker(_hold: _Authority) -> None:
+        """Stall the older worker once, right after its check."""
         if store.worker().version == "1.0.0":
             checked.set()
             assert resume.wait(_SETTLE_SECONDS)
@@ -303,58 +303,183 @@ def test_a_worker_that_stalls_after_its_check_cannot_overwrite_a_newer_version(
     assert store.rows == {"changed-pass": "30 1 * * *", "added-pass": "0 2 * * *"}
 
 
-@pytest.mark.parametrize("lost_at", ["after the check", "before the commit"])
-def test_a_worker_that_loses_its_backend_writes_nothing_after_a_newer_version(
-    monkeypatch: pytest.MonkeyPatch, lost_at: str
-) -> None:
-    """Losing the backend loses the lock and every pending write together, so none lands later."""
+def _stale_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[_SharedSchedules, list[ScheduleInput], list[dict[str, object]]]:
+    """Let an older worker lose its authority after its check and write over a newer one.
+
+    Returns:
+        The store, the newer version's declarations and what the older worker logged.
+    """
     store = _SharedSchedules("retired-pass", "changed-pass", latest="1.0.0").install(monkeypatch)
     older = [_entry("changed-pass", "0 0 * * *"), _entry("older-only-pass")]
     newer = [_entry("changed-pass", "30 1 * * *"), _entry("retired-pass"), _entry("added-pass")]
     stalled, resume = threading.Event(), threading.Event()
-    failures: list[BaseException] = []
 
-    def stall_and_lose(txn: _Transaction) -> None:
-        if store.worker().version == "1.0.0":
-            txn.lose()  # an idle-in-transaction timeout, say, while the worker is stalled
+    def stall_and_lose(hold: _Authority) -> None:
+        """Lose the older worker's session while it is stalled after its check."""
+        if store.worker().version == "1.0.0" and not hold.lost:
+            hold.lose()  # a terminated session, say, while the worker is stalled
             stalled.set()
             assert resume.wait(_SETTLE_SECONDS)
 
-    if lost_at == "after the check":
-        store.pause = stall_and_lose
-    else:
-        store.before_commit = stall_and_lose
-
-    def run_older() -> None:
-        try:
-            _run_as(store, "1.0.0", older)
-        except _BackendLostError as failure:
-            failures.append(failure)
-
+    store.pause = stall_and_lose
     with _worker_logs(monkeypatch) as logs:
-        old_worker = threading.Thread(target=run_older)
+        old_worker = threading.Thread(target=_run_as, args=(store, "1.0.0", older))
         old_worker.start()
         assert stalled.wait(_SETTLE_SECONDS)
 
         # The newer version registers and gets the authority the older worker lost.
         store.latest = "1.1.0"
         _run_as(store, "1.1.0", newer)
-        newer_rows = dict(store.rows)
-
         resume.set()
         old_worker.join(_SETTLE_SECONDS)
-
     assert not old_worker.is_alive()
-    assert len(failures) == 1, "the older worker carried on without its authority"
-    assert store.applied == ["1.1.0"]
-    assert (
-        store.rows
-        == newer_rows
-        == {
-            "changed-pass": "30 1 * * *",
-            "retired-pass": "0 0 * * *",
-            "added-pass": "0 0 * * *",
-        }
+    return store, newer, logs
+
+
+def test_a_worker_that_loses_its_authority_reports_its_writes_unverified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DBOS commits the stale writes; the worker cannot stop them, so it says so at ERROR."""
+    store, _newer, logs = _stale_write(monkeypatch)
+    assert store.applied == ["1.1.0", "1.0.0"]
+    assert store.rows["changed-pass"] == "0 0 * * *", "the stale write did not land"
+    [report] = _unverified(logs)
+    assert report["level"] == "error"
+    assert (report["version"], report["latest_before"], report["latest_after"]) == (
+        "1.0.0",
+        "1.0.0",
+        "1.1.0",
     )
-    assert store.deleted == []
-    assert not [log for log in logs if log["event"] == "worker.schedule_deleted"]
+    assert report["held"] is False
+    assert report["applied"] == ["changed-pass", "older-only-pass"]
+    assert report["deleted"] == ["added-pass", "retired-pass"]
+
+
+def test_the_next_reconciliation_on_the_latest_version_repairs_a_stale_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Detect, then heal: the newer worker's next pass restores its own declarations."""
+    store, newer, _logs = _stale_write(monkeypatch)
+    with _worker_logs(monkeypatch) as logs:
+        _run_as(store, "1.1.0", newer)
+    assert store.rows == {
+        "changed-pass": "30 1 * * *",
+        "retired-pass": "0 0 * * *",
+        "added-pass": "0 0 * * *",
+    }
+    assert _unverified(logs) == []
+
+
+def test_a_promotion_during_the_writes_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The lock still held is not enough: a newer latest makes the writes another's to make."""
+    store = _SharedSchedules(latest="1.0.0").install(monkeypatch)
+
+    def promote(_hold: _Authority) -> None:
+        """Promote another version once the upserts have committed."""
+        store.latest = "1.1.0"
+
+    store.after_apply = promote
+    with _worker_logs(monkeypatch) as logs:
+        worker_schedules.apply_schedules(WorkerProfile.IO, Settings())
+    [report] = _unverified(logs)
+    assert (report["latest_before"], report["latest_after"], report["held"]) == (
+        "1.0.0",
+        "1.1.0",
+        True,
+    )
+
+
+def test_the_reconciler_reapplies_every_interval_until_stopped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Not at start, since startup just applied; then once per interval until the stop."""
+    applied = threading.Semaphore(0)
+    calls: list[WorkerProfile] = []
+
+    def record(profile: WorkerProfile, settings: Settings) -> None:
+        """Count one reconciliation."""
+        calls.append(profile)
+        applied.release()
+
+    monkeypatch.setattr(worker_schedules, "apply_schedules", record)
+    stop = threading.Event()
+    reconciler = worker_schedules.ScheduleReconciler(
+        WorkerProfile.IO, Settings(), stop=stop, interval_seconds=0.3
+    )
+    reconciler.start()
+    assert calls == []
+    assert applied.acquire(timeout=_SETTLE_SECONDS)
+    assert applied.acquire(timeout=_SETTLE_SECONDS)
+    stop.set()
+    assert reconciler.join(_SETTLE_SECONDS)
+    assert set(calls) == {WorkerProfile.IO}
+
+
+def test_the_reconciler_waits_one_interval_before_its_first_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stop within the first interval ends the thread with nothing reconciled."""
+    calls: list[WorkerProfile] = []
+    monkeypatch.setattr(
+        worker_schedules, "apply_schedules", lambda profile, settings: calls.append(profile)
+    )
+    stop = threading.Event()
+    reconciler = worker_schedules.ScheduleReconciler(WorkerProfile.IO, Settings(), stop=stop)
+    reconciler.start()
+    stop.set()
+    assert reconciler.join(_SETTLE_SECONDS)
+    assert calls == []
+
+
+def test_a_failed_pass_is_logged_and_the_next_one_still_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unavailable authority warns, a defect errors, and neither ends the healing loop."""
+    failures: list[Exception] = [
+        ScheduleAuthorityUnavailableError("held elsewhere"),
+        RuntimeError("a defect"),
+    ]
+    healed = threading.Event()
+
+    def flaky(profile: WorkerProfile, settings: Settings) -> None:
+        """Fail with each queued failure in turn, then succeed."""
+        if failures:
+            raise failures.pop(0)
+        healed.set()
+
+    monkeypatch.setattr(worker_schedules, "apply_schedules", flaky)
+    stop = threading.Event()
+    with _worker_logs(monkeypatch) as logs:
+        reconciler = worker_schedules.ScheduleReconciler(
+            WorkerProfile.IO, Settings(), stop=stop, interval_seconds=0.05
+        )
+        reconciler.start()
+        assert healed.wait(_SETTLE_SECONDS)
+        stop.set()
+        assert reconciler.join(_SETTLE_SECONDS)
+    failed = [log for log in logs if log["event"] == "worker.schedule_reconciliation_failed"]
+    assert [(log["level"], log["error_type"]) for log in failed] == [
+        ("warning", "ScheduleAuthorityUnavailableError"),
+        ("error", "RuntimeError"),
+    ]
+
+
+def test_the_cpu_profile_starts_no_reconciler() -> None:
+    """It declares no schedule, so it has nothing to heal; the I/O profile has a thread."""
+    stop = threading.Event()
+    assert (
+        worker_schedules.start_schedule_reconciler(WorkerProfile.CPU, Settings(), stop=stop) is None
+    )
+    reconciler = worker_schedules.start_schedule_reconciler(WorkerProfile.IO, Settings(), stop=stop)
+    assert reconciler is not None
+    stop.set()
+    assert reconciler.join(_SETTLE_SECONDS)
+
+
+def test_the_interval_defaults_to_ten_minutes_and_must_be_positive() -> None:
+    """A zero interval would spin; the default bounds drift to one interval."""
+    assert Settings().schedule_reconciliation_interval_seconds == 600
+    with pytest.raises(ValueError, match="greater than 0"):
+        Settings(schedule_reconciliation_interval_seconds=0)

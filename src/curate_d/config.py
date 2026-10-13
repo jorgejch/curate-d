@@ -291,6 +291,14 @@ class Settings(BaseSettings):
         "retired version and re-enqueues work of executors that never return. Five fields, "
         "or six with seconds first, as DBOS reads them.",
     )
+    schedule_reconciliation_interval_seconds: float = Field(
+        default=600,
+        gt=0,
+        description="How often an I/O worker re-applies its persisted schedules after "
+        "startup. DBOS's schedule writes commit outside the schedule authority, so this "
+        "is what repairs rows a worker wrote after losing it, and how a promoted "
+        "version's workers apply their schedules without a restart.",
+    )
     content_staging_root: Path = Field(
         default=Path("/var/lib/curate-d/staging"),
         description="Not read anywhere: content staging is S3-backed (see staging_s3_*).",
@@ -377,9 +385,9 @@ class Settings(BaseSettings):
     def _recovery_sweep_schedule_is_a_cron(cls, value: str) -> str:
         """Reject a cron DBOS would refuse, before the lease and the launch.
 
-        The check is the one DBOS's schedule row builder applies (`stored_form`): failing
-        here stops a worker at settings load, where `apply_schedules` would instead fail
-        after launch and crash-loop every I/O worker.
+        The check is the same check DBOS applies: failing here stops a worker at settings
+        load, where `apply_schedules` would instead fail after launch and crash-loop every
+        I/O worker.
         """
         if not croniter.is_valid(value, second_at_beginning=True):
             raise ValueError(f"recovery_sweep_schedule {value!r} is not a valid cron expression")

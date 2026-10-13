@@ -16,13 +16,12 @@ import os
 import signal
 import sys
 import threading
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import Callable, Coroutine
 from contextlib import suppress
-from dataclasses import dataclass
 from types import FrameType
 from typing import Final, Protocol, runtime_checkable
 
-from dbos import DBOS, ScheduleInput
+from dbos import DBOS
 from dbos._dbos import _get_dbos_instance
 from dbos._error import DBOSException
 from sqlalchemy.exc import SQLAlchemyError
@@ -44,11 +43,6 @@ from curate_d.runtime.identity import resolve_executor_id
 from curate_d.runtime.lease import ExecutorLease, ExecutorLeaseLostError
 from curate_d.runtime.profiles import WorkerProfile, resolve_profile
 from curate_d.runtime.queues import register_all
-from curate_d.runtime.schedule_authority import (
-    ScheduleAuthority,
-    StoredSchedule,
-    schedule_authority,
-)
 from curate_d.runtime.services import Services, StagingAccess, install
 from curate_d.runtime.version_lease import register_version
 from curate_d.staging.errors import StagingError, StagingNotReadyError, StagingRoleMismatchError
@@ -62,7 +56,12 @@ from curate_d.staging.factories import (
     run_idle_cleanup,
 )
 from curate_d.staging.object_store import S3ClientFactory
-from curate_d.workflows.registry import declared_schedule_names, schedules_for
+from curate_d.worker.schedules import (
+    RECONCILER_STOP_SECONDS,
+    ScheduleReconciler,
+    apply_schedules,
+    start_schedule_reconciler,
+)
 
 logger = get_logger(__name__)
 
@@ -567,95 +566,6 @@ def prepare_services(
     return services
 
 
-@dataclass(frozen=True, slots=True)
-class Reconciliation:
-    """What one schedule reconciliation wrote, once its transaction commits.
-
-    Attributes:
-        latest_version: DBOS's latest application version, read under the authority.
-        applied: Whether this worker was on that version and so applied its schedules.
-        deleted: The stored schedules it deleted because no profile declares them.
-    """
-
-    latest_version: str
-    applied: bool
-    deleted: tuple[StoredSchedule, ...] = ()
-
-
-def reconcile_schedules(
-    authority: ScheduleAuthority,
-    *,
-    version: str,
-    schedules: Sequence[ScheduleInput],
-    declared: frozenset[str],
-) -> Reconciliation:
-    """Apply `schedules` and delete stored ones outside `declared`, if `version` is the latest.
-
-    Every read and write goes through `authority`, so all of it commits with the
-    transaction that holds the lock or none of it does.
-    """
-    latest = authority.latest_version()
-    if latest != version:
-        return Reconciliation(latest_version=latest, applied=False)
-    authority.apply(schedules)
-    retired = tuple(stored for stored in authority.stored() if stored.name not in declared)
-    for stored in retired:
-        authority.delete(stored.name)
-    return Reconciliation(latest_version=latest, applied=True, deleted=retired)
-
-
-def apply_schedules(profile: WorkerProfile, settings: Settings) -> None:
-    """Upsert this profile's persisted schedules, then delete undeclared ones. Call after launch.
-
-    A stored schedule (this application's, or one no application has claimed, as
-    `DBOS.list_schedules` returns them) that no profile declares any more is deleted, so
-    a renamed or dropped pass stops firing instead of ticking a workflow nobody runs. Only
-    a profile that applies schedules deletes any, and it keeps every profile's names, not
-    just its own. A crash before the commit leaves the deletions for the next start.
-
-    Schedule rows are shared by every version of the application, so only a worker on the
-    deployment's latest version (DBOS's, by registration time) touches them: DBOS enqueues
-    every tick on that version, so its declarations are the ones that count. A replica of
-    an older version restarting mid-rollout would otherwise delete a schedule the newer
-    one added or rewrite one it changed, and the newer workers apply only at startup.
-    Every build is its own version: a dev image carries its build in the version
-    (`dbos_app.application_version`), so an older dev build is never the latest either.
-
-    The version check, the upsert and the deletions run in one system-database
-    transaction holding a lock shared by every worker (`runtime/schedule_authority.py`).
-    A worker that passes the check and stalls keeps the next one waiting; one whose
-    backend is lost meanwhile loses the lock and its pending writes together, so it
-    cannot apply or delete after a newer version has registered and applied its own.
-    Outcomes are logged after the commit, so a logged deletion happened.
-
-    Promotion only changes which version is latest; it applies nothing. After a rollback,
-    promote the restored version with `python -m curate_d.runtime.promote <version>`
-    before its workers start, or restart them afterwards. Workers never promote
-    themselves: one cannot tell a rollback from newer replicas crash-looping mid-rollout.
-
-    Raises:
-        ScheduleAuthorityUnavailableError: Another worker held the lock past the timeout.
-        sqlalchemy.exc.DBAPIError: The transaction failed, its backend lost included;
-            nothing it wrote was committed.
-    """
-    schedules = schedules_for(profile, settings)
-    if not schedules:
-        return
-    declared = declared_schedule_names(settings)
-    with schedule_authority() as authority:
-        outcome = reconcile_schedules(
-            authority, version=DBOS.application_version, schedules=schedules, declared=declared
-        )
-    if not outcome.applied:
-        logger.warning(
-            "worker.schedules_left_to_latest_version",
-            version=DBOS.application_version,
-            latest_version=outcome.latest_version,
-        )
-    for stored in outcome.deleted:
-        logger.info("worker.schedule_deleted", schedule=stored.name, workflow=stored.workflow)
-
-
 def _install_shutdown_handler(stop: threading.Event) -> None:
     """Set `stop` on SIGTERM or SIGINT so Kubernetes gets a clean drain rather than a kill."""
 
@@ -703,9 +613,9 @@ def run(
         profile: Which half of the pipeline this process serves.
         stop: Set to begin a drain. A fresh event with signal handlers installed on it
             when omitted.
-        block: False returns once the worker is serving, tearing staging back down and
-            releasing the lease on the way out. For tests; a deployed worker always
-            blocks.
+        block: False returns once the worker is serving, stopping the schedule
+            reconciler, tearing staging back down and releasing the lease on the way
+            out. For tests; a deployed worker always blocks.
         staging_factory: Builds the staging supervisor, substituted by tests that must
             not open an event loop.
         lease_factory: Builds the executor and version lease; a lease on the configured
@@ -744,6 +654,7 @@ def run(
     # is no second backend for it to try.
     staging = _start_staging(settings, profile, staging_factory)
     lease: ExecutorLease | None = None
+    reconciler: ScheduleReconciler | None = None
     launched = False
     drained = False
     try:
@@ -767,6 +678,7 @@ def run(
         launched = True
         register_all()
         apply_schedules(profile, settings)
+        reconciler = start_schedule_reconciler(profile, settings, stop=shutdown)
 
         logger.info("worker.ready", profile=profile.value, executor_id=executor_id)
         if not block:
@@ -779,6 +691,11 @@ def run(
                 f"lost the executor lease for {executor_id!r}; stopping without draining"
             )
     finally:
+        # Before the drain: the reconciler writes through DBOS, which the drain destroys.
+        # Not waited for once the lease is lost: stopping at once matters more.
+        shutdown.set()
+        if reconciler is not None:
+            reconciler.join(0 if lease_lost.is_set() else RECONCILER_STOP_SECONDS)
         try:
             # Let workflows already in flight finish rather than orphaning them as PENDING
             # on a version this deployment is about to retire.

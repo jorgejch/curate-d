@@ -4,8 +4,9 @@ DBOS registers a version again without retiming it, so a build deployed a second
 rollback or by rolling forward to it, stays non-latest: schedule ticks and version-less
 enqueues then go to a version nothing runs, and the recovery sweep targets it. Run this
 before the target build's workers start, so they apply their schedules at startup; run
-afterwards, the workers need a restart. A first deploy needs none: its first launch
-registers it as latest.
+afterwards, they re-apply them within `schedule_reconciliation_interval_seconds`, and a
+restart applies them at once. A first deploy needs none: its first launch registers it as
+latest.
 
 Workers never promote themselves: a worker cannot tell a rollback from newer replicas
 crash-looping mid-rollout, and a wrong promotion persists until someone promotes again.

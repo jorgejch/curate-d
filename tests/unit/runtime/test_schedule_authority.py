@@ -1,32 +1,31 @@
-"""The schedule authority's key, and the DBOS internals it writes schedules through.
+"""The schedule authority: its key, its lock's life, and the DBOS calls it writes through.
 
-The transaction itself runs against PostgreSQL in tests/integration/test_schedule_authority.py.
-What is pinned here is what a DBOS upgrade could change underneath it: the row
-`DBOS.apply_schedules` builds, which `stored_form` reproduces so it can write on the
-authority's connection, and the internal signatures that writing relies on.
+The lock runs against an in-memory lock server here and against PostgreSQL in
+tests/integration/test_schedule_authority.py.
 """
 
-import inspect
-from collections.abc import Iterator
-from contextlib import contextmanager
-from datetime import datetime
-from types import SimpleNamespace
+import re
+from pathlib import Path
 from typing import cast
 
+import psycopg
 import pytest
-from dbos import DBOS, ScheduleInput
-from dbos import _dbos as dbos_internals
-from dbos._schemas.system_database import SystemSchema
-from dbos._serialization import DefaultSerializer
-from dbos._sys_db import SystemDatabase, WorkflowSchedule
+from dbos import DBOS, ScheduleInput, VersionInfo, WorkflowSchedule
 
 from curate_d.config import Settings
 from curate_d.runtime import schedule_authority as authority_module
+from curate_d.runtime.dbos_app import APPLICATION_NAME
 from curate_d.runtime.lease import lease_key
-from curate_d.runtime.profiles import WorkerProfile
-from curate_d.runtime.schedule_authority import schedule_authority_key, stored_form
-from curate_d.workflows import retention
-from curate_d.workflows.registry import schedules_for
+from curate_d.runtime.schedule_authority import (
+    ScheduleAuthorityUnavailableError,
+    StoredSchedule,
+    schedule_authority,
+    schedule_authority_key,
+)
+from curate_d.worker import schedules as schedules_module
+from tests.unit.runtime.fake_lease import FakeLockServer, FakeSession
+
+KEY = schedule_authority_key(APPLICATION_NAME)
 
 
 def test_the_key_is_pinned() -> None:
@@ -43,119 +42,131 @@ def test_the_key_is_stable_and_apart_from_the_executor_lease() -> None:
     assert -(2**63) <= key < 2**63
 
 
-class _RecordingSystemDatabase:
-    """The parts of DBOS's system database that building and upserting a schedule touch."""
-
-    def __init__(self) -> None:
-        self.serializer = DefaultSerializer()
-        self.upserted: list[WorkflowSchedule] = []
-
-    @property
-    def engine(self) -> "_RecordingSystemDatabase":
-        return self
-
-    @contextmanager
-    def begin(self) -> Iterator[object]:
-        yield object()
-
-    def upsert_schedule(self, schedule: WorkflowSchedule, conn: object = None) -> None:
-        self.upserted.append(schedule)
-
-    def get_queue(self, name: str) -> object | None:
-        return None if name == "undeclared-queue" else object()
-
-
 @pytest.fixture
-def system_database(monkeypatch: pytest.MonkeyPatch) -> _RecordingSystemDatabase:
-    """Stand a recording system database in for a launched DBOS, for both builders."""
-    sys_db = _RecordingSystemDatabase()
-    instance = SimpleNamespace(
-        _registry=dbos_internals._get_or_create_dbos_registry(), _sys_db=sys_db
+def server() -> FakeLockServer:
+    """Return an in-memory lock server standing in for the DBOS system database."""
+    return FakeLockServer()
+
+
+def test_the_authority_is_held_for_the_block_and_given_back_after(
+    server: FakeLockServer,
+) -> None:
+    """The lock is taken before the block runs, then unlocked and its session closed."""
+    with schedule_authority(Settings(), connect=server.connect, timeout_seconds=7) as authority:
+        assert server.mode(KEY) == "exclusive"
+        assert authority.still_held()
+    assert server.waits == [7]
+    assert server.mode(KEY) is None
+    assert [session.closed for session in server.sessions] == [True]
+
+
+def test_a_held_authority_times_out_naming_its_holder(server: FakeLockServer) -> None:
+    """A stuck holder fails the waiting worker visibly, and its session is closed."""
+    holder = server.connect()
+    assert holder.try_lock(KEY)
+    with (
+        pytest.raises(ScheduleAuthorityUnavailableError, match=r"over 0\.3s: pid 42 \(fake\)"),
+        schedule_authority(Settings(), connect=server.connect, timeout_seconds=0.3),
+    ):
+        pytest.fail("the block ran without the authority")
+    assert server.holders[KEY] is holder
+    assert server.sessions[-1].closed
+
+
+def test_a_failing_block_still_gives_the_authority_back(server: FakeLockServer) -> None:
+    """An exception from the block unlocks and closes the session before propagating."""
+    with (
+        pytest.raises(RuntimeError, match="reconciliation failed"),
+        schedule_authority(Settings(), connect=server.connect),
+    ):
+        raise RuntimeError("reconciliation failed")
+    assert server.mode(KEY) is None
+    assert server.sessions[0].closed
+
+
+def test_a_session_broken_in_the_block_is_closed_without_raising(server: FakeLockServer) -> None:
+    """Unlocking a dead session fails, and must not replace the block's own outcome."""
+    with schedule_authority(Settings(), connect=server.connect):
+        server.sessions[0].close()
+    assert server.sessions[0].closed
+    assert server.mode(KEY) is None
+
+
+def test_a_lost_lock_reads_as_lost(server: FakeLockServer) -> None:
+    """A terminated session's lock is gone; `still_held` must say so, not assume."""
+    with schedule_authority(Settings(), connect=server.connect) as authority:
+        del server.holders[KEY]
+        assert not authority.still_held()
+
+
+def test_a_failed_probe_reads_as_lost(server: FakeLockServer) -> None:
+    """A session that cannot answer cannot vouch for its lock."""
+    with schedule_authority(Settings(), connect=server.connect) as authority:
+        server.fail_probes = True
+        assert not authority.still_held()
+
+
+def test_a_session_that_cannot_open_raises_before_the_block(server: FakeLockServer) -> None:
+    """No session, no authority: the block never runs."""
+    server.refuse_connections = 1
+    with (
+        pytest.raises(psycopg.OperationalError),
+        schedule_authority(Settings(), connect=server.connect),
+    ):
+        pytest.fail("the block ran without a session")
+
+
+def test_the_default_session_is_dedicated_and_named_for_the_executor(
+    monkeypatch: pytest.MonkeyPatch, server: FakeLockServer
+) -> None:
+    """The authority opens its own connection, named so a stuck holder can be traced."""
+    opened: list[tuple[str, str]] = []
+
+    def connect_session(conninfo: str, *, application_name: str) -> FakeSession:
+        """Record how the session was asked for, then open a fake one."""
+        opened.append((conninfo, application_name))
+        return server.connect()
+
+    monkeypatch.setattr(authority_module, "connect_session", connect_session)
+    monkeypatch.setattr(authority_module, "lease_conninfo", lambda settings: "postgresql://db")
+    monkeypatch.setattr(DBOS, "executor_id", "worker-io-0")
+    with schedule_authority(Settings()):
+        pass
+    assert opened == [("postgresql://db", "curate-d schedule authority worker-io-0")]
+
+
+def test_the_authority_reads_and_writes_through_dbos_public_schedule_api(
+    monkeypatch: pytest.MonkeyPatch, server: FakeLockServer
+) -> None:
+    """Latest version, upsert, listing and deletion are DBOS's own calls, nothing private."""
+    calls: list[tuple[str, object]] = []
+    stored = cast(
+        WorkflowSchedule, {"schedule_name": "kept", "workflow_name": "curate_d.prune_history"}
     )
-    monkeypatch.setattr(dbos_internals, "_get_dbos_instance", lambda: instance)
-    monkeypatch.setattr(authority_module, "_get_dbos_instance", lambda: instance)
-    return sys_db
+    monkeypatch.setattr(
+        DBOS,
+        "get_latest_application_version",
+        lambda: cast(VersionInfo, {"version_name": "1.1.0"}),
+    )
+    monkeypatch.setattr(DBOS, "apply_schedules", lambda entries: calls.append(("apply", entries)))
+    monkeypatch.setattr(DBOS, "list_schedules", lambda: [stored])
+    monkeypatch.setattr(DBOS, "delete_schedule", lambda name: calls.append(("delete", name)))
+    entry = cast(ScheduleInput, {"schedule_name": "kept", "schedule": "0 0 * * *"})
+
+    with schedule_authority(Settings(), connect=server.connect) as authority:
+        assert authority.latest_version() == "1.1.0"
+        authority.apply((entry,))
+        assert authority.stored() == [StoredSchedule("kept", "curate_d.prune_history")]
+        authority.delete("retired")
+
+    assert calls == [("apply", [entry]), ("delete", "retired")]
 
 
-def _without_id(row: WorkflowSchedule) -> dict[str, object]:
-    """Strip a built row of its fresh UUID, which the upsert keeps from an existing row anyway."""
-    return {field: value for field, value in row.items() if field != "schedule_id"}
+_INTERNALS = re.compile(r"\bdbos\._|_get_dbos_instance|_sys_db|_registry|GlobalParams")
 
 
-def _every_option() -> ScheduleInput:
-    """Return a declaration exercising each optional field."""
-    return {
-        "schedule_name": "every-option",
-        "workflow_fn": retention.prune_history,
-        "schedule": "0 30 2 * * *",
-        "context": {"batch": 3},
-        "automatic_backfill": True,
-        "cron_timezone": "Europe/Berlin",
-        "queue_name": "maintenance",
-    }
-
-
-def test_stored_form_builds_the_row_dbos_apply_schedules_builds(
-    system_database: _RecordingSystemDatabase,
-) -> None:
-    """Pins DBOS 3.2's builder: an upgrade that changes it must fail here, not drift silently."""
-    entries = [*schedules_for(WorkerProfile.IO, Settings()), _every_option()]
-    DBOS.apply_schedules(entries)
-    built = [stored_form(index, entry) for index, entry in enumerate(entries)]
-    assert [_without_id(row) for row in built] == [
-        _without_id(row) for row in system_database.upserted
-    ]
-    assert set(built[0]) == set(WorkflowSchedule.__annotations__)
-
-
-def _unregistered(scheduled_time: datetime, context: object) -> None:
-    """Do nothing; no DBOS decorator registered this function."""
-
-
-@pytest.mark.parametrize(
-    "entry",
-    [
-        {"workflow_fn": retention.prune_history, "schedule": "0 0 * * *"},
-        {"schedule_name": "no-workflow", "schedule": "0 0 * * *"},
-        {"schedule_name": "no-cron", "workflow_fn": retention.prune_history},
-        {"schedule_name": "bad-cron", "workflow_fn": retention.prune_history, "schedule": "x"},
-        {
-            "schedule_name": "bad-zone",
-            "workflow_fn": retention.prune_history,
-            "schedule": "0 0 * * *",
-            "cron_timezone": "Mars/Olympus",
-        },
-        {"schedule_name": "unregistered", "workflow_fn": _unregistered, "schedule": "0 0 * * *"},
-        {
-            "schedule_name": "no-queue",
-            "workflow_fn": retention.prune_history,
-            "schedule": "0 0 * * *",
-            "queue_name": "undeclared-queue",
-        },
-    ],
-    ids=["name", "workflow", "cron", "bad-cron", "zone", "unregistered", "queue"],
-)
-def test_stored_form_refuses_what_dbos_apply_schedules_refuses(
-    system_database: _RecordingSystemDatabase, entry: dict[str, object]
-) -> None:
-    """Same exception type and message, so a bad declaration reads the same either way."""
-    declaration = cast(ScheduleInput, entry)
-    with pytest.raises(Exception) as from_dbos:
-        DBOS.apply_schedules([declaration])
-    with pytest.raises(type(from_dbos.value)) as from_ours:
-        stored_form(0, declaration)
-    assert str(from_ours.value) == str(from_dbos.value)
-    assert system_database.upserted == []
-
-
-@pytest.mark.parametrize("method", ["upsert_schedule", "list_schedules", "delete_schedule"])
-def test_the_system_database_writes_schedules_on_a_callers_connection(method: str) -> None:
-    """Pins a DBOS internal: without `conn` these would commit outside the authority."""
-    assert "conn" in inspect.signature(getattr(SystemDatabase, method)).parameters
-
-
-def test_the_version_lookup_internals_still_exist() -> None:
-    """Pins DBOS internals the latest-version read on the authority's connection uses."""
-    columns = SystemSchema.application_versions.c
-    assert {"version_name", "version_timestamp", "application_name"} <= set(columns.keys())
-    assert callable(SystemDatabase._name_filter)
+@pytest.mark.parametrize("module", [authority_module, schedules_module])
+def test_the_module_imports_no_dbos_internals(module: object) -> None:
+    """Schedule reconciliation uses DBOS's public API only, so an upgrade cannot break it."""
+    source = Path(cast(str, getattr(module, "__file__", ""))).read_text(encoding="utf-8")
+    assert not _INTERNALS.findall(source)

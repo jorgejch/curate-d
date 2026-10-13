@@ -73,6 +73,26 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, object]]:
         "apply_schedules",
         lambda profile, settings: recorded.append(("apply_schedules", profile)),
     )
+
+    class _Reconciler:
+        """Record when the worker stops waiting for its schedule reconciler."""
+
+        def __init__(self, stop: threading.Event) -> None:
+            self._stop = stop
+
+        def join(self, timeout: float) -> bool:
+            """Record the join and whether the worker's stop event was set first."""
+            recorded.append(("reconciler_joined", self._stop.is_set()))
+            return True
+
+    def start_reconciler(
+        profile: WorkerProfile, settings: Settings, *, stop: threading.Event
+    ) -> _Reconciler:
+        """Record the start and return a reconciler that records its join."""
+        recorded.append(("start_schedule_reconciler", profile))
+        return _Reconciler(stop)
+
+    monkeypatch.setattr(worker_main, "start_schedule_reconciler", start_reconciler)
     monkeypatch.setattr(worker_main, "resolve_executor_id", lambda: "worker-io-0")
     monkeypatch.setattr(
         worker_main,
@@ -124,7 +144,33 @@ def test_the_full_startup_sequence(calls: list[tuple[str, object]], profile: Wor
         "launch",
         "register_all",
         "apply_schedules",
+        "start_schedule_reconciler",
+        "reconciler_joined",
     ]
+
+
+def test_the_reconciler_is_stopped_before_the_drain(
+    calls: list[tuple[str, object]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It writes through DBOS, so it must be stopped and joined before DBOS is destroyed."""
+    monkeypatch.setattr(
+        DBOS,
+        "destroy",
+        lambda workflow_completion_timeout_sec: calls.append(("destroy", None)),
+    )
+    stop = threading.Event()
+    stop.set()
+    worker_main.run(Settings(), WorkerProfile.IO, stop=stop, block=True)
+    names = [name for name, _ in calls]
+    assert names.index("apply_schedules") < names.index("start_schedule_reconciler")
+    assert names.index("reconciler_joined") < names.index("destroy")
+    assert ("reconciler_joined", True) in calls, "joined without being told to stop"
+
+
+def test_a_non_blocking_return_stops_the_reconciler(calls: list[tuple[str, object]]) -> None:
+    """A worker returning early sets its stop event, so the reconciler thread ends too."""
+    worker_main.run(Settings(), WorkerProfile.IO, block=False)
+    assert calls[-1] == ("reconciler_joined", True)
 
 
 @pytest.mark.parametrize("profile", list(WorkerProfile))

@@ -22,7 +22,7 @@ from curate_d.config import Settings
 from curate_d.runtime import dbos_app, promote
 from curate_d.runtime.dbos_app import build_dbos_config, system_database_url
 from curate_d.runtime.profiles import WorkerProfile
-from curate_d.worker import main as worker_main
+from curate_d.worker import schedules as worker_schedules
 
 pytestmark = pytest.mark.integration
 
@@ -168,12 +168,12 @@ def test_schedules_apply_and_tick_on_the_promoted_version(
         }
     ]
     everything_else = frozenset(stored["schedule_name"] for stored in DBOS.list_schedules())
-    monkeypatch.setattr(worker_main, "schedules_for", lambda profile, settings: declared)
+    monkeypatch.setattr(worker_schedules, "schedules_for", lambda profile, settings: declared)
     monkeypatch.setattr(
-        worker_main, "declared_schedule_names", lambda settings: everything_else | {name}
+        worker_schedules, "declared_schedule_names", lambda settings: everything_else | {name}
     )
 
-    worker_main.apply_schedules(WorkerProfile.IO, settings)
+    worker_schedules.apply_schedules(WorkerProfile.IO, settings)
 
     assert [
         stored["schedule_name"] for stored in DBOS.list_schedules(schedule_name_prefix=PREFIX)
