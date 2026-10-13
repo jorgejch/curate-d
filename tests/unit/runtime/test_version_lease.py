@@ -349,6 +349,36 @@ async def test_a_close_failure_does_not_replace_the_exclusive_hold_result(
     assert server.mode(KEY) is None
 
 
+async def test_a_held_version_lock_vouches_for_itself_through_its_own_session() -> None:
+    """Held while the session holds it; lost once the lock goes or the session breaks."""
+    server = FakeLockServer()
+    async with hold_exclusive(Settings(), "v1", connect=server.connect) as hold:
+        assert await hold.still_held()
+        server.sessions[-1].unlock(KEY)
+        assert not await hold.still_held()
+        assert server.sessions[-1].try_lock(KEY)
+        server.fail_probes = True
+        assert not await hold.still_held()
+
+
+async def test_a_refused_version_hold_is_never_still_held() -> None:
+    """A hold that was not taken has nothing to vouch for."""
+    server = FakeLockServer()
+    assert server.connect().try_lock_shared(KEY)
+    async with hold_exclusive(Settings(), "v1", connect=server.connect) as hold:
+        assert not hold.held
+        assert not await hold.still_held()
+
+
+async def test_a_held_fence_vouches_for_itself_through_its_own_session() -> None:
+    """The fence hold asks its session; a closed session is a lost fence."""
+    server = FakeLockServer()
+    async with hold_fence_shared(Settings(), connect=server.connect) as fenced:
+        assert await fenced.still_held()
+        server.sessions[-1].close()
+        assert not await fenced.still_held()
+
+
 # The promotion fence.
 
 
@@ -369,7 +399,8 @@ async def test_sweeps_share_the_fence_and_release_it_after_their_block() -> None
         hold_fence_shared(Settings(), connect=server.connect) as first,
         hold_fence_shared(Settings(), connect=server.connect) as second,
     ):
-        assert first and second
+        assert first.held and second.held
+        assert await first.still_held() and await second.still_held()
         assert len(server.shared[FENCE]) == 2
     assert server.mode(FENCE) is None
     assert all(session.closed for session in server.sessions)
@@ -380,7 +411,8 @@ async def test_a_promotion_holding_the_fence_refuses_a_sweep() -> None:
     server = FakeLockServer()
     assert server.connect().try_lock(FENCE)
     async with hold_fence_shared(Settings(), connect=server.connect) as fenced:
-        assert not fenced
+        assert not fenced.held
+        assert not await fenced.still_held()
     assert server.sessions[-1].closed
     assert server.mode(FENCE) == "exclusive"
 
@@ -390,7 +422,7 @@ async def test_the_shared_fence_is_released_when_its_block_raises() -> None:
     server = FakeLockServer()
     with pytest.raises(RuntimeError, match="fork failed"):
         async with hold_fence_shared(Settings(), connect=server.connect) as fenced:
-            assert fenced
+            assert fenced.held
             raise RuntimeError("fork failed")
     assert server.mode(FENCE) is None
 

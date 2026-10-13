@@ -2,11 +2,11 @@
 
 `runtime/sweep.py` holds the sweep and its gates; this module runs it on a persisted
 schedule, on the I/O profile's `maintenance` queue. The sweep runs in one step. Its DBOS
-calls inside that step (forks, cancels, re-enqueues, status reads) are not checkpointed,
-so a re-executed step repeats the whole sweep: safe because every fork is keyed by the
-deterministic successor ID and every cancel and re-enqueue is gated on a re-read status
-or on executor ownership. That departs from the dbos-python skill's rule against starting
-workflows from a step, and CLAUDE.md records it.
+calls inside that step (forks, cancels, resumes, attribute updates, status reads) are not
+checkpointed, so a re-executed step repeats the whole sweep: safe because every fork is
+keyed by the deterministic successor ID, every cancel is gated on a re-read status, and
+every resume on a re-read status under the dead executor's lease. That departs from the
+dbos-python skill's rule against starting workflows from a step, and CLAUDE.md records it.
 
 The step returns the outcome as plain values, so its checkpoint pickles no class of ours.
 """

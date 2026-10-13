@@ -17,6 +17,11 @@ sweep holds it shared, taken once without waiting, across every fork and retirem
 (`hold_fence_shared`); promotion, the only way latest moves backwards, holds it exclusively
 across the change, waiting a bounded time (`hold_fence_exclusive`).
 
+DBOS commits a fork on its own connection, not on the lock's, so a lock lost mid-sweep
+does not undo the writes made under it. Each hold can therefore ask its own session
+whether it still holds the lock (`VersionHold.still_held`, `FenceHold.still_held`); the
+sweep asks before and after every fork and stops once either answer is no.
+
 The locks are keyed by `version_lease_key` and `promotion_fence_key` in the database
 holding the DBOS system tables, under the executor lease's connection settings and pooler
 constraint (lease.py).
@@ -25,7 +30,7 @@ constraint (lease.py).
 import asyncio
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from typing import Final, LiteralString, Protocol
@@ -50,6 +55,7 @@ from curate_d.runtime.lease import (
 )
 
 __all__ = [
+    "FenceHold",
     "LockMode",
     "PromotionFenceTimeoutError",
     "StandaloneVersionLease",
@@ -83,6 +89,21 @@ class LockMode(StrEnum):
     """Another sweep recovering that version."""
 
 
+type HoldProbe = Callable[[], bool]
+"""Asks the lock's own session whether it still holds the lock; may raise if it broke."""
+
+
+async def _still_held(held: bool, probe: HoldProbe | None) -> bool:
+    """Return whether a taken lock is still held, per its session; a broken session is a loss."""
+    if not held or probe is None:
+        return False
+    try:
+        return await asyncio.to_thread(probe)
+    except Exception as error:  # Any failure to vouch for the lock is a loss.
+        logger.warning("version_lease.probe_failed", error_type=type(error).__name__)
+        return False
+
+
 @dataclass(frozen=True)
 class VersionHold:
     """The outcome of one attempt to hold a version's lock exclusively."""
@@ -91,6 +112,31 @@ class VersionHold:
     held: bool
     holder_mode: LockMode | None = None
     """The mode another session holds the lock in, when refused and visible."""
+    probe: HoldProbe | None = field(default=None, repr=False, compare=False)
+    """Asks the holding session whether it still holds the lock; None when not held."""
+
+    async def still_held(self) -> bool:
+        """Return whether the lock is still held, asking its session.
+
+        False when it was never taken, carries no probe, or the session cannot answer.
+        """
+        return await _still_held(self.held, self.probe)
+
+
+@dataclass(frozen=True)
+class FenceHold:
+    """The outcome of one attempt to hold the promotion fence shared."""
+
+    held: bool
+    probe: HoldProbe | None = field(default=None, repr=False, compare=False)
+    """Asks the holding session whether it still holds the fence; None when not held."""
+
+    async def still_held(self) -> bool:
+        """Return whether the fence is still held, asking its session.
+
+        False when it was never taken, carries no probe, or the session cannot answer.
+        """
+        return await _still_held(self.held, self.probe)
 
 
 class VersionRegistryError(RuntimeError):
@@ -116,6 +162,10 @@ class ExclusiveLockSession(Protocol):
         """Return the mode another session holds `key` in: `exclusive`, `shared` or None."""
         ...
 
+    def holds(self, key: int) -> bool:
+        """Return whether this session still holds the lock on `key`."""
+        ...
+
     def close(self) -> None:
         """Close the session, releasing every lock it holds."""
         ...
@@ -126,6 +176,10 @@ class SharedFenceSession(Protocol):
 
     def try_lock_shared(self, key: int) -> bool:
         """Take the shared lock on `key` without waiting; return whether it was taken."""
+        ...
+
+    def holds(self, key: int) -> bool:
+        """Return whether this session still holds the lock on `key`."""
         ...
 
     def unlock_shared(self, key: int) -> None:
@@ -224,8 +278,9 @@ async def hold_exclusive(
     """Try once to hold `version`'s lock exclusively, on a dedicated connection.
 
     Yields a held `VersionHold` until the block exits, or a refused one naming the mode
-    another session holds, if visible. On exit, attempt to release any acquired lock and
-    close the session, suppressing cleanup errors.
+    another session holds, if visible. A held one's `still_held` asks this session. On
+    exit, attempt to release any acquired lock and close the session, suppressing cleanup
+    errors.
 
     Args:
         settings: Resolved configuration naming the system database.
@@ -247,7 +302,7 @@ async def hold_exclusive(
             )
             return
         try:
-            yield VersionHold(version, held=True)
+            yield VersionHold(version, held=True, probe=lambda: session.holds(key))
         finally:
             try:
                 await asyncio.to_thread(session.unlock, key)
@@ -275,12 +330,13 @@ async def hold_fence_shared(
     *,
     connect: Callable[[], SharedFenceSession] | None = None,
     application_name: str = APPLICATION_NAME,
-) -> AsyncIterator[bool]:
+) -> AsyncIterator[FenceHold]:
     """Try once to hold the promotion fence shared, on a dedicated connection.
 
-    Yields whether it was taken, and holds it until the block exits. A promotion holding
-    the fence, or waiting for it, refuses it. On exit, attempt to release it and close
-    the session, suppressing cleanup errors.
+    Yields a `FenceHold` saying whether it was taken, and holds it until the block exits;
+    a held one's `still_held` asks this session. A promotion holding the fence, or waiting
+    for it, refuses it. On exit, attempt to release it and close the session, suppressing
+    cleanup errors.
 
     Args:
         settings: Resolved configuration naming the system database.
@@ -295,10 +351,10 @@ async def hold_fence_shared(
     session = await asyncio.to_thread(connect or (lambda: _connect_fence(settings, "sweep")))
     try:
         if not await asyncio.to_thread(session.try_lock_shared, key):
-            yield False
+            yield FenceHold(held=False)
             return
         try:
-            yield True
+            yield FenceHold(held=True, probe=lambda: session.holds(key))
         finally:
             try:
                 await asyncio.to_thread(session.unlock_shared, key)

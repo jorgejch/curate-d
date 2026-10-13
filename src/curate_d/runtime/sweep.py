@@ -1,9 +1,10 @@
 """Recover retired executors and versions without creating competing workflow lineages.
 
-Pending work owned by a retired executor can be re-enqueued in place, on its own queue.
-Pending or queued work pinned to a retired version needs a fork, retaining its queue and
-provider partition. Delayed work is left to DBOS's scheduler; once due it becomes
-ENQUEUED and is eligible for the next sweep. Forking a DELAYED row would drop its delay.
+Pending work owned by a retired executor is redispatched in place: resumed onto its own
+queue under its existing ID (`_redispatch`). Pending or queued work pinned to a retired
+version needs a fork, retaining its queue and provider partition. Delayed work is left to
+DBOS's scheduler; once due it becomes ENQUEUED and is eligible for the next sweep. Forking
+a DELAYED row would drop its delay.
 
 Each original gets one deterministic successor ID, independent of the target version.
 The DBOS primary key arbitrates simultaneous sweeps, and its fork transaction copies
@@ -13,8 +14,14 @@ even after another deployment or rollback. Later deployments recover the survivi
 instead of creating another sibling from an ancestor.
 
 Executor liveness is the executor lease (lease.py): an executor is dead only if the sweep
-can take its lease, and the sweep holds that lease while re-enqueueing the executor's
-rows, so the executor cannot start and run startup recovery on them mid-sweep.
+can take its lease, and the sweep holds that lease while redispatching the executor's
+rows, so the executor cannot start and run startup recovery on them mid-sweep. DBOS's
+resume is unconditional, so each redispatch re-reads the row first (still PENDING under the
+dead executor) and again afterwards (ENQUEUED, or already dequeued by a live worker); any
+other answer is a failure. Resume also resets DBOS's recovery-attempt counter, so the sweep
+counts its own redispatches of a row in the row's workflow attributes and stops at
+`MAX_SWEEP_REDISPATCHES` per application version: a row that kills its worker on every run
+is reported, not rescued forever.
 
 Version liveness is the version lease (version_lease.py). The target is DBOS's latest
 version, read when the sweep starts; only a sweeper running that version forks or
@@ -33,15 +40,24 @@ latest mid-batch, and the rest of the batch still goes to the old target. That h
 itself: the old target registered before the new one, so the new target's sweeper forks
 those rows once the old target's workers are gone.
 
+DBOS commits each fork and cancel on its own connection, so losing a lock's session does
+not undo them. The sweep asks the fence's session, and the source version lock's, before
+each fork and again, once forked, before the original's cancel. Lost before the fork, the
+row fails and the batch stops, the rest skipped. Lost after it, the original is still
+cancelled, since two live lineages are worse, then the row fails and the batch stops; the
+next tick's RETIRE plan finishes whatever this one left. After every fork's cancel the
+original must read CANCELLED, or the row fails as an unverified lineage.
+
 A stale tick of the sweep's own schedule is cancelled under the same gates rather than
-forked or re-enqueued: the next tick does its work. A row whose queue is NULL or DBOS's
-internal queue is never forked or re-enqueued, since every worker dequeues the internal
-queue and the row could run on the wrong profile; retiring one still cancels it.
+forked or redispatched: the next tick does its work. A row whose queue is NULL, or names a
+queue no curate.d worker dequeues, is never forked or redispatched: DBOS sends a queue-less
+resume to its internal queue, which every worker dequeues, so the row could run on the
+wrong profile. Retiring one still cancels it.
 
 DBOS calls made through `RecoveryControl` are not checkpointed when the sweep runs in a
 step: a re-run repeats the whole sweep, which is safe because every fork is keyed by the
-deterministic successor ID and every cancel and re-enqueue is gated on a re-read status or
-on executor ownership.
+deterministic successor ID, every cancel is gated on a re-read status, and every
+redispatch on a re-read status under the executor's lease.
 """
 
 import asyncio
@@ -55,8 +71,6 @@ from sqlite3 import IntegrityError as SQLiteIntegrityError
 from typing import Final, Protocol
 
 from dbos import DBOS, DBOSClient, SetWorkflowID, WorkflowStatus
-from dbos._dbos import _get_dbos_instance
-from dbos._utils import INTERNAL_QUEUE_NAME
 from psycopg.errors import UniqueViolation
 from sqlalchemy.exc import IntegrityError
 
@@ -64,15 +78,29 @@ from curate_d.config import Settings
 from curate_d.observability.logging import get_logger
 from curate_d.runtime import version_lease
 from curate_d.runtime.lease import ExecutorLease
-from curate_d.runtime.version_lease import VersionHold
+from curate_d.runtime.queues import QueueName
+from curate_d.runtime.version_lease import FenceHold, VersionHold
 
 logger = get_logger(__name__)
 
 PENDING = "PENDING"
 ENQUEUED = "ENQUEUED"
+CANCELLED = "CANCELLED"
 
 RECOVERY_SCHEDULE_NAME: Final = "recovery-sweep"
 """The scheduled sweep's own schedule; its stale ticks are retired, never recovered."""
+
+MAX_SWEEP_REDISPATCHES: Final = 10
+"""Redispatches of one row under one application version before the sweep stops resuming it."""
+
+REDISPATCH_COUNT_ATTRIBUTE: Final = "curate_d.recovery_redispatches"
+"""The workflow attribute counting the sweep's redispatches of a row."""
+
+REDISPATCH_VERSION_ATTRIBUTE: Final = "curate_d.recovery_redispatch_version"
+"""The workflow attribute naming the application version that count was recorded under."""
+
+_DEQUEUED_QUEUES: Final = frozenset(queue.value for queue in QueueName)
+"""The queues some curate.d worker dequeues; a fork or redispatch onto any other is refused."""
 
 
 class RecoveryAction(StrEnum):
@@ -252,8 +280,12 @@ class RecoveryControl(Protocol):
         """Return DBOS's latest application version for this application."""
         ...
 
-    async def reenqueue(self, workflow_id: str, executor_id: str) -> bool:
-        """Re-enqueue one PENDING row on its own queue if `executor_id` still owns it."""
+    async def reenqueue(self, workflow_id: str, *, queue_name: str) -> None:
+        """Resume `workflow_id` onto `queue_name`, unconditionally; `_redispatch` gates it."""
+        ...
+
+    async def set_attributes(self, workflow_id: str, attributes: dict[str, object]) -> None:
+        """Replace `workflow_id`'s workflow attributes with `attributes`."""
         ...
 
 
@@ -318,25 +350,23 @@ class DBOSRecoveryControl:
         """Return DBOS's latest application version for this application."""
         return (await DBOS.get_latest_application_version_async())["version_name"]
 
-    async def reenqueue(self, workflow_id: str, executor_id: str) -> bool:
-        """Re-enqueue one PENDING row on its own queue if `executor_id` still owns it.
+    async def reenqueue(self, workflow_id: str, *, queue_name: str) -> None:
+        """Resume `workflow_id` onto `queue_name`, unconditionally; `_redispatch` gates it.
 
-        DBOS keeps the row's queue (`coalesce(queue_name, <default>)`); the default is
-        never used, because the sweep refuses rows without a named queue first.
+        The queue is always named: a resume without one lands on DBOS's internal queue.
         """
-        return await asyncio.to_thread(
-            _get_dbos_instance()._sys_db.reenqueue_for_recovery,
-            workflow_id,
-            [executor_id],
-            INTERNAL_QUEUE_NAME,
-        )
+        await DBOS.resume_workflow_async(workflow_id, queue_name=queue_name)
+
+    async def set_attributes(self, workflow_id: str, attributes: dict[str, object]) -> None:
+        """Replace `workflow_id`'s workflow attributes with `attributes`."""
+        await DBOS.update_workflow_attributes_async(workflow_id, attributes)
 
 
 class ClientRecoveryControl:
     """`RecoveryControl` over a `DBOSClient`, for the operator sweep.
 
     `before_write` runs before every write, so a lost standalone version lease stops the
-    sweep before its next fork, cancel or re-enqueue.
+    sweep before its next fork, cancel, attribute update or redispatch.
     """
 
     def __init__(self, client: DBOSClient, *, before_write: Callable[[], None]) -> None:
@@ -393,19 +423,18 @@ class ClientRecoveryControl:
         """Return DBOS's latest application version for this application."""
         return (await self._client.get_latest_application_version_async())["version_name"]
 
-    async def reenqueue(self, workflow_id: str, executor_id: str) -> bool:
-        """Re-enqueue one PENDING row on its own queue if `executor_id` still owns it.
+    async def reenqueue(self, workflow_id: str, *, queue_name: str) -> None:
+        """Resume `workflow_id` onto `queue_name`, unconditionally; `_redispatch` gates it.
 
-        `DBOSClient` has no public re-enqueue; `_sys_db` is private and pinned in
-        test_sweep_execution.py.
+        The queue is always named: a resume without one lands on DBOS's internal queue.
         """
         self._before_write()
-        return await asyncio.to_thread(
-            self._client._sys_db.reenqueue_for_recovery,
-            workflow_id,
-            [executor_id],
-            INTERNAL_QUEUE_NAME,
-        )
+        await self._client.resume_workflow_async(workflow_id, queue_name=queue_name)
+
+    async def set_attributes(self, workflow_id: str, attributes: dict[str, object]) -> None:
+        """Replace `workflow_id`'s workflow attributes with `attributes`."""
+        self._before_write()
+        await self._client.update_workflow_attributes_async(workflow_id, attributes)
 
 
 async def _fork_start_step(control: RecoveryControl, workflow_id: str) -> int:
@@ -446,8 +475,34 @@ async def _confirmed_successor(control: RecoveryControl, original: str, successo
     return True
 
 
+type LockCheck = Callable[[], Awaitable[str | None]]
+"""Names the lock the sweep forks under that its session no longer holds, or None."""
+
+
+class _LockLostError(Exception):
+    """A lock the fork depends on was found lost; the sweep stops forking this tick."""
+
+    def __init__(self, reason: str, *, unverified_status: str | None = None) -> None:
+        """Record `reason`, and the status an already-cancelled original reads, if wrong."""
+        super().__init__(reason)
+        self.unverified_status = unverified_status
+
+
+class _LineageUnverifiedError(Exception):
+    """The original does not read CANCELLED after its successor's fork and its cancel."""
+
+
+async def _cancel_verified(control: RecoveryControl, original: str) -> str | None:
+    """Cancel `original` and return the status it reads afterwards, if not CANCELLED."""
+    await control.cancel(original)
+    after = await control.status(original)
+    if after is not None and after.status == CANCELLED:
+        return None
+    return "missing" if after is None else str(after.status)
+
+
 async def _recover_version(
-    control: RecoveryControl, workflow: PendingWorkflow, version: str
+    control: RecoveryControl, workflow: PendingWorkflow, version: str, *, lost: LockCheck
 ) -> tuple[str, bool]:
     """Commit or reuse one successor, then retire its source; never cancel on fork failure.
 
@@ -455,6 +510,10 @@ async def _recover_version(
     makes an insertion conflict recoverable. Other database errors still surface.
     Control errors also propagate, including cancellation failures after the successor
     has been committed.
+
+    `lost` is asked right before the fork and, if this call forked, again before the
+    cancel. Lost after the fork, the original is still cancelled: a successor already
+    exists, and two live lineages are worse than one unconfirmed fork.
 
     Returns:
         The successor ID and whether this call created it, rather than reusing a
@@ -466,6 +525,9 @@ async def _recover_version(
             the fork published no successor.
         IntegrityError: The fork violated a constraint other than the workflow primary
             key, or a primary-key conflict had no confirmed matching successor.
+        _LockLostError: A lock was found lost before the fork, which was then not made,
+            or after it, in which case the original was still cancelled.
+        _LineageUnverifiedError: The original does not read CANCELLED after its cancel.
     """
     original = workflow.workflow_id
     successor = recovery_successor_id(original)
@@ -484,11 +546,15 @@ async def _recover_version(
                     "inspect its existing lineage before recovering it"
                 )
         else:
+            start_step = await _fork_start_step(control, original)
+            lock = await lost()
+            if lock is not None:
+                raise _LockLostError(f"{lock} lost before fork")
             try:
                 await control.fork(
                     original,
                     successor,
-                    await _fork_start_step(control, original),
+                    start_step,
                     application_version=version,
                     queue_name=status.queue_name,
                     queue_partition_key=status.queue_partition_key,
@@ -503,7 +569,16 @@ async def _recover_version(
                     raise
             if not await _confirmed_successor(control, original, successor):
                 raise ValueError(f"fork of {original!r} did not publish its expected successor")
-    await control.cancel(original)
+    lock = await lost() if created else None
+    unverified = await _cancel_verified(control, original)
+    if lock is not None:
+        raise _LockLostError(
+            f"{lock} lost after fork; the original was cancelled", unverified_status=unverified
+        )
+    if unverified is not None:
+        raise _LineageUnverifiedError(
+            f"successor {successor!r} exists but the original reads {unverified!r} after its cancel"
+        )
     return successor, created
 
 
@@ -525,17 +600,110 @@ type VersionHolds = Callable[[str], AbstractAsyncContextManager[VersionHold]]
 """Tries once to hold one version's lock exclusively for the duration of a block."""
 type Registrations = Callable[[], Awaitable[Mapping[str, datetime]]]
 """Reads every registered version with its first registration time."""
-type PromotionFence = Callable[[], AbstractAsyncContextManager[bool]]
+type PromotionFence = Callable[[], AbstractAsyncContextManager[FenceHold]]
 """Tries once to hold the promotion fence shared for the duration of a block."""
 
 
-def _queue_refusal(workflow: PendingWorkflow) -> str | None:
-    """Return why a fork or re-enqueue of `workflow` would misroute it, if it would."""
-    if workflow.queue_name is None:
+def _queue_refusal(queue_name: str | None) -> str | None:
+    """Return why a fork or redispatch onto `queue_name` would misroute the row, if it would."""
+    if queue_name is None:
         return "it names no queue"
-    if workflow.queue_name == INTERNAL_QUEUE_NAME:
-        return "it names DBOS's internal queue"
+    if queue_name not in _DEQUEUED_QUEUES:
+        return f"it names {queue_name!r}, which no curate.d worker dequeues"
     return None
+
+
+def redispatch_count(status: WorkflowStatus) -> int:
+    """Return how often the sweep has redispatched this row under its current version.
+
+    A count recorded under another application version is zero: a fork copies the
+    attributes onto its successor, and a new build is when a crashing row may be fixed.
+    A missing or malformed count is zero too.
+    """
+    attributes = status.attributes or {}
+    if attributes.get(REDISPATCH_VERSION_ATTRIBUTE) != status.app_version:
+        return 0
+    count = attributes.get(REDISPATCH_COUNT_ATTRIBUTE)
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        return 0
+    return count
+
+
+class _Redispatch(StrEnum):
+    """What one gated redispatch did."""
+
+    REENQUEUED = "reenqueued"
+    """Resumed, and read back ENQUEUED on its own queue."""
+
+    DEQUEUED = "dequeued"
+    """Resumed, and already running on a live executor when read back."""
+
+    UNOWNED = "unowned"
+    """Not resumed: the re-read found it no longer PENDING under the dead executor."""
+
+
+class _RedispatchError(Exception):
+    """A redispatch refused or unverified, with the ERROR event the sweep logs for it."""
+
+    def __init__(self, reason: str, *, event: str) -> None:
+        """Record `reason` for the tally and `event` for the log."""
+        super().__init__(reason)
+        self.event = event
+
+
+async def _redispatch(
+    control: RecoveryControl, workflow: PendingWorkflow, executor_id: str
+) -> _Redispatch:
+    """Resume one row of a dead executor onto its own queue, gated and verified.
+
+    Call only while holding `executor_id`'s lease. DBOS's resume is unconditional, so the
+    row is re-read first and resumed only if still PENDING under `executor_id`, onto the
+    queue it names; the sweep's redispatch count is recorded on the row before the resume.
+    The row is read again afterwards to confirm the resume took.
+
+    Raises:
+        _RedispatchError: The re-read row names a queue no curate.d worker dequeues, it
+            reached `MAX_SWEEP_REDISPATCHES` under its version, or the read-back after
+            the resume is neither ENQUEUED nor PENDING on another executor.
+    """
+    workflow_id = workflow.workflow_id
+    status = await control.status(workflow_id)
+    if status is None or status.status != PENDING or status.executor_id != executor_id:
+        return _Redispatch.UNOWNED
+    queue_name = status.queue_name
+    if queue_name is None or queue_name not in _DEQUEUED_QUEUES:
+        raise _RedispatchError(
+            f"redispatch of {workflow_id!r} refused: {_queue_refusal(queue_name)}",
+            event="recovery_sweep.queue_refused",
+        )
+    count = redispatch_count(status)
+    if count >= MAX_SWEEP_REDISPATCHES:
+        raise _RedispatchError(
+            f"redispatch of {workflow_id!r} refused: redispatched {count} times under "
+            f"version {status.app_version!r}, the cap of {MAX_SWEEP_REDISPATCHES}",
+            event="recovery_sweep.redispatch_cap",
+        )
+    # Updating attributes replaces the whole mapping, so the row's others are kept.
+    await control.set_attributes(
+        workflow_id,
+        {
+            **(status.attributes or {}),
+            REDISPATCH_COUNT_ATTRIBUTE: count + 1,
+            REDISPATCH_VERSION_ATTRIBUTE: status.app_version,
+        },
+    )
+    await control.reenqueue(workflow_id, queue_name=queue_name)
+    after = await control.status(workflow_id)
+    if after is not None and after.status == ENQUEUED:
+        return _Redispatch.REENQUEUED
+    if after is not None and after.status == PENDING and after.executor_id != executor_id:
+        return _Redispatch.DEQUEUED
+    raise _RedispatchError(
+        f"redispatch of {workflow_id!r} unverified: it reads "
+        f"{None if after is None else after.status!r} under executor "
+        f"{None if after is None else after.executor_id!r} after the resume",
+        event="recovery_sweep.redispatch_unverified",
+    )
 
 
 @dataclass
@@ -585,6 +753,8 @@ class _Sweep:
         self.target = target
         self.leases = leases
         self.holds = holds
+        self.fence: FenceHold | None = None
+        """The promotion fence hold every fork and retirement runs under, once taken."""
         self.tally = _Tally()
 
     def fail_unfinished(self, ids: Sequence[str], reason: str) -> None:
@@ -602,7 +772,7 @@ class _Sweep:
         tally.failed.extend((workflow_id, reason) for workflow_id in ids if workflow_id not in done)
 
     def refuse_misrouted(self, entries: list[StrandedWorkflow]) -> list[StrandedWorkflow]:
-        """Fail fork and re-enqueue rows with no queue or DBOS's internal queue.
+        """Fail fork and redispatch rows with no queue, or one no curate.d worker dequeues.
 
         Return the remaining entries, including retirements and this sweep's own ticks,
         which bypass the queue check.
@@ -613,7 +783,7 @@ class _Sweep:
             refusal = (
                 None
                 if entry.action is RecoveryAction.RETIRE or workflow.is_own_tick
-                else _queue_refusal(workflow)
+                else _queue_refusal(workflow.queue_name)
             )
             if refusal is None:
                 kept.append(entry)
@@ -629,7 +799,7 @@ class _Sweep:
         return kept
 
     async def reenqueue_dead_executors(self, entries: list[StrandedWorkflow]) -> None:
-        """Re-enqueue, or retire if a stale tick, each dead executor's PENDING rows."""
+        """Redispatch, or retire if a stale tick, each dead executor's PENDING rows."""
         by_executor: dict[str | None, list[PendingWorkflow]] = {}
         for entry in entries:
             by_executor.setdefault(entry.workflow.executor_id, []).append(entry.workflow)
@@ -639,8 +809,8 @@ class _Sweep:
                 self.tally.failed.extend(
                     (
                         workflow.workflow_id,
-                        "re-enqueueing failed: DBOS cannot conditionally re-enqueue a row "
-                        "without an executor",
+                        "re-enqueueing refused: a row without an executor has no lease "
+                        "to prove its owner dead",
                     )
                     for workflow in workflows
                 )
@@ -674,39 +844,70 @@ class _Sweep:
                 await asyncio.to_thread(lease.release)
 
     async def _reenqueue_one(self, workflow: PendingWorkflow, executor_id: str) -> None:
-        """Re-enqueue one row of a dead executor, or retire it if it is a stale tick."""
+        """Redispatch one row of a dead executor, or retire it if it is a stale tick."""
+        workflow_id = workflow.workflow_id
         try:
             if workflow.is_own_tick:
                 if await _retire_tick(self.control, workflow):
-                    self.tally.retired_ticks.append(workflow.workflow_id)
+                    self.tally.retired_ticks.append(workflow_id)
                     logger.info(
-                        "recovery_sweep.retired_tick",
-                        workflow_id=workflow.workflow_id,
-                        executor=executor_id,
+                        "recovery_sweep.retired_tick", workflow_id=workflow_id, executor=executor_id
                     )
                 return
-            changed = await self.control.reenqueue(workflow.workflow_id, executor_id)
-            if changed:
-                self.tally.reenqueued.append(workflow.workflow_id)
-            logger.info(
-                "recovery_sweep.reenqueued",
-                workflow_id=workflow.workflow_id,
-                executor=executor_id,
-                queue=workflow.queue_name,
-                changed=changed,
-            )
-        except Exception as error:  # Reported per workflow, never swallowed.
-            self.tally.failed.append((workflow.workflow_id, f"re-enqueueing failed: {error}"))
+            result = await _redispatch(self.control, workflow, executor_id)
+        except _RedispatchError as error:
+            self.tally.failed.append((workflow_id, str(error)))
             logger.error(
-                "recovery_sweep.reenqueue_failed",
-                workflow_id=workflow.workflow_id,
-                error=str(error),
+                error.event, workflow_id=workflow_id, executor=executor_id, reason=str(error)
             )
+            return
+        except Exception as error:  # Reported per workflow, never swallowed.
+            self.tally.failed.append((workflow_id, f"re-enqueueing failed: {error}"))
+            logger.error(
+                "recovery_sweep.reenqueue_failed", workflow_id=workflow_id, error=str(error)
+            )
+            return
+        if result is _Redispatch.REENQUEUED:
+            self.tally.reenqueued.append(workflow_id)
+        elif result is _Redispatch.DEQUEUED:
+            self.tally.left_running += 1
+        logger.info(
+            "recovery_sweep.reenqueued",
+            workflow_id=workflow_id,
+            executor=executor_id,
+            queue=workflow.queue_name,
+            result=result.value,
+        )
 
-    async def recover(self, entry: StrandedWorkflow) -> None:
-        """Fork or retire one row, or cancel it if it is a stale tick of this sweep."""
+    async def lost_lock(self, hold: VersionHold | None) -> str | None:
+        """Name the lock this sweep forks under that is no longer held, or return None.
+
+        The fence is checked first, then `hold`, the source version's lock, if any.
+        """
+        if self.fence is None or not await self.fence.still_held():
+            return "promotion fence"
+        if hold is not None and not await hold.still_held():
+            return "version lock"
+        return None
+
+    async def recover(self, entry: StrandedWorkflow, hold: VersionHold | None) -> bool:
+        """Fork or retire one row, or cancel it if it is a stale tick of this sweep.
+
+        Args:
+            entry: The row and its remedy.
+            hold: The source version's exclusive hold; None for version-less and
+                on-target rows, which take no version lock.
+
+        Returns:
+            False if a lock was found lost, in which case the caller forks and retires
+            nothing more this tick. True otherwise, failures included.
+        """
         workflow = entry.workflow
         original = workflow.workflow_id
+        prefix = (
+            f"recovering workflow {original!r} from version "
+            f"{workflow.application_version!r} onto {self.target!r} failed"
+        )
         try:
             if workflow.is_own_tick and not workflow.was_forked_from:
                 if await _retire_tick(self.control, workflow):
@@ -716,8 +917,10 @@ class _Sweep:
                         workflow_id=original,
                         from_version=workflow.application_version,
                     )
-                return
-            successor, created = await _recover_version(self.control, workflow, self.target)
+                return True
+            successor, created = await _recover_version(
+                self.control, workflow, self.target, lost=lambda: self.lost_lock(hold)
+            )
             if created:
                 self.tally.forked.append((original, successor))
             else:
@@ -729,13 +932,30 @@ class _Sweep:
                 from_version=workflow.application_version,
                 to_version=self.target,
             )
-        except Exception as error:  # One bad row must not strand the rest.
-            reason = (
-                f"recovering workflow {original!r} from version "
-                f"{workflow.application_version!r} onto {self.target!r} failed: {error}"
+        except _LockLostError as error:
+            self.tally.failed.append((original, f"{prefix}: {error}"))
+            logger.error(
+                "recovery_sweep.version_lock_lost",
+                workflow_id=original,
+                from_version=workflow.application_version,
+                reason=str(error),
             )
-            self.tally.failed.append((original, reason))
+            if error.unverified_status is not None:
+                logger.error(
+                    "recovery_sweep.lineage_unverified",
+                    workflow_id=original,
+                    status=error.unverified_status,
+                )
+            return False
+        except _LineageUnverifiedError as error:
+            self.tally.failed.append((original, f"{prefix}: {error}"))
+            logger.error(
+                "recovery_sweep.lineage_unverified", workflow_id=original, reason=str(error)
+            )
+        except Exception as error:  # One bad row must not strand the rest.
+            self.tally.failed.append((original, f"{prefix}: {error}"))
             logger.error("recovery_sweep.fork_failed", workflow_id=original, error=str(error))
+        return True
 
     async def recover_version(self, version: str, entries: list[StrandedWorkflow]) -> bool:
         """Fork or retire one source version's rows under its exclusive lock.
@@ -745,10 +965,11 @@ class _Sweep:
         after the target, which recovers whatever this batch leaves on the target.
 
         Returns:
-            False if the latest version changed after the lock was taken, in which case
-            nothing more is forked or retired by this sweep. True allows the next source
-            version to proceed, even if this version was locked elsewhere or failed;
-            failures are recorded in the tally.
+            False if the latest version changed after the lock was taken, or a lock was
+            found lost mid-batch, in which case nothing more is forked or retired by this
+            sweep and the version's remaining rows are skipped. True allows the next
+            source version to proceed, even if this version was locked elsewhere or
+            failed; failures are recorded in the tally.
         """
         ids = [entry.workflow.workflow_id for entry in entries]
         try:
@@ -774,8 +995,12 @@ class _Sweep:
                         rows=len(entries),
                     )
                     return False
-                for entry in entries:
-                    await self.recover(entry)
+                for index, entry in enumerate(entries):
+                    if not await self.recover(entry, hold):
+                        self.tally.skipped.extend(
+                            rest.workflow.workflow_id for rest in entries[index + 1 :]
+                        )
+                        return False
         except Exception as error:  # A lock that cannot be taken forks nothing of it.
             self.fail_unfinished(ids, f"holding version {version!r} for recovery failed: {error}")
             logger.error("recovery_sweep.version_lock_failed", version=version, error=str(error))
@@ -823,8 +1048,11 @@ class _Sweep:
             return
 
         # The sweeper runs the target and holds its shared lease, so the target is live.
-        for entry in unlocked:
-            await self.recover(entry)
+        for index, entry in enumerate(unlocked):
+            if not await self.recover(entry, None):
+                # `ids` lists the unlocked rows first, then every version's.
+                self.tally.skipped.extend(ids[index + 1 :])
+                return
 
         target_registered = registry.get(self.target)
         remaining = list(by_version.items())
@@ -888,7 +1116,8 @@ async def run_recovery_sweep(
         registrations: Reads the version registry. Defaults to `version_lease.registrations`.
         promotion_fence: Tries once to hold the promotion fence shared. Every fork and
             retirement runs under it; refused, they are all skipped this tick, while
-            dead-executor re-enqueues still run. Defaults to
+            dead-executor redispatches still run. Found lost before or after a fork, the
+            rest of the forks and retirements are skipped. Defaults to
             `version_lease.hold_fence_shared` on the configured database.
 
     Returns:
@@ -953,7 +1182,8 @@ async def run_recovery_sweep(
     ids = [entry.workflow.workflow_id for entry in versioned]
     try:
         async with fence() as fenced:
-            if fenced:
+            if fenced.held:
+                sweep.fence = fenced
                 await sweep.recover_fenced(unlocked, by_version, registry)
             else:
                 sweep.tally.skipped.extend(ids)

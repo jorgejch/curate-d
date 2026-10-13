@@ -5,7 +5,7 @@ from unittest.mock import Mock
 
 import psycopg
 import pytest
-from dbos._error import DBOSException
+from dbos import error
 from sqlalchemy import exc as sa_exc
 from structlog.testing import capture_logs
 
@@ -26,7 +26,7 @@ class _Client:
         self.latest = latest
         self.read_back = read_back
         self.promoted: list[str] = []
-        self.refuse: DBOSException | None = None
+        self.refuse: error.DBOSException | None = None
         self.destroyed = False
 
     def list_application_versions(self) -> list[dict[str, str]]:
@@ -111,7 +111,7 @@ def test_a_mismatched_read_back_fails(client: _Client) -> None:
 
 def test_another_applications_version_fails(client: _Client) -> None:
     """DBOS refuses to retime a peer application's version; the command exits non-zero."""
-    client.refuse = DBOSException("Application version 'v1' is already registered by 'other'")
+    client.refuse = error.DBOSException("Application version 'v1' is already registered by 'other'")
     with capture_logs() as events:
         assert promote.main(["v1"]) == promote.EXIT_REFUSED
     assert [event["event"] for event in events] == ["promote.failed"]
@@ -197,13 +197,13 @@ def test_a_failed_database_clock_read_closes_its_connection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A clock query failure releases its connection and preserves the database error."""
-    error = psycopg.OperationalError("clock unavailable")
+    failure = psycopg.OperationalError("clock unavailable")
     connection = Mock()
-    connection.execute.side_effect = error
+    connection.execute.side_effect = failure
     monkeypatch.setattr(promote, "connect_dedicated", lambda *args, **kwargs: connection)
     with pytest.raises(psycopg.OperationalError) as raised:
         promote._database_now(Settings())
-    assert raised.value is error
+    assert raised.value is failure
     connection.close.assert_called_once_with()
 
 

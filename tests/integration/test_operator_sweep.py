@@ -4,7 +4,8 @@ No DBOS instance is launched: the sweep runs exactly as the module entry point d
 pod. The suite's version is the target, registered in DBOS and `lease_versions` and made
 latest for the test; a source version registered before it holds the seeded rows. The
 previous latest version is restored afterwards, and every test row and every registration
-the fixture added is deleted; a registration it found is kept.
+the fixture added is deleted; a registration it found is kept. Seeded rows sit on a queue
+no worker consumes, which `_admit_test_queue` adds to the queues the sweep routes onto.
 """
 
 import json
@@ -14,10 +15,9 @@ from uuid import uuid4
 import pytest
 import sqlalchemy as sa
 from dbos import DBOS
-from dbos._utils import GlobalParams
 
 from curate_d.config import Settings
-from curate_d.runtime import dbos_app, operator_sweep
+from curate_d.runtime import dbos_app, operator_sweep, sweep
 from curate_d.runtime.dbos_app import system_database_url
 from curate_d.runtime.identity import POD_NAME_ENV
 from curate_d.runtime.lease import ExecutorLease
@@ -28,6 +28,13 @@ pytestmark = pytest.mark.integration
 _RUN = uuid4().hex[:8]
 SOURCE = f"9.9.4-operator-{_RUN}"
 RETIRED_EXECUTOR = f"operator-retired-{_RUN}"
+UNCONSUMED_QUEUE = "operator-unconsumed"
+
+
+@pytest.fixture(autouse=True)
+def _admit_test_queue(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let the sweep fork onto the unconsumed test queue as onto curate.d's own."""
+    monkeypatch.setattr(sweep, "_DEQUEUED_QUEUES", sweep._DEQUEUED_QUEUES | {UNCONSUMED_QUEUE})
 
 
 def _app() -> str:
@@ -124,13 +131,14 @@ def _seed(engine: sa.Engine, workflow_id: str, *, executor_id: str, version: str
                 " (workflow_uuid, status, name, executor_id, application_version,"
                 "  application_name, inputs, serialization, queue_name)"
                 " VALUES (:id, 'PENDING', 'tests.operator.stranded', :executor, :version,"
-                "  :app, NULL, 'py_pickle', 'operator-unconsumed')"
+                "  :app, NULL, 'py_pickle', :queue)"
             ),
             {
                 "id": workflow_id,
                 "executor": executor_id,
                 "version": version,
-                "app": GlobalParams.app_name or _app(),
+                "app": _app(),
+                "queue": UNCONSUMED_QUEUE,
             },
         )
 
@@ -190,7 +198,7 @@ def test_a_matching_run_recovers_through_the_client(
     assert successor is not None
     assert successor["forked_from"] == workflow_id
     assert successor["application_version"] == target
-    assert successor["queue_name"] == "operator-unconsumed"
+    assert successor["queue_name"] == UNCONSUMED_QUEUE
     original = _row(system_engine, workflow_id)
     assert original is not None and original["status"] == "CANCELLED"
 

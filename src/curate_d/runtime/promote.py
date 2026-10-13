@@ -29,8 +29,7 @@ from datetime import datetime
 from typing import Final
 
 import psycopg
-from dbos import DBOSClient
-from dbos._error import DBOSException
+from dbos import DBOSClient, error
 from sqlalchemy.exc import SQLAlchemyError
 
 from curate_d.config import Settings, get_settings
@@ -136,7 +135,7 @@ def promote(
             database clock is invalid or differs by more than 1 s; nothing was written.
         PromotionFenceTimeoutError: A recovery sweep held the promotion fence past the
             timeout; nothing was written.
-        DBOSException: DBOS refused the promotion, as for another application's version.
+        error.DBOSException: DBOS refused the promotion, as for another application's version.
         SQLAlchemyError: The DBOS client failed to read or set the latest version.
         psycopg.Error: Reading the database clock or taking the fence failed before
             promotion.
@@ -213,14 +212,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             arguments.version,
             fence=lambda: hold_fence_exclusive(settings, timeout=arguments.fence_timeout),
         )
-    except PromotionFenceTimeoutError as error:
-        logger.error("promote.fenced", version=arguments.version, reason=str(error))
+    except PromotionFenceTimeoutError as failure:
+        logger.error("promote.fenced", version=arguments.version, reason=str(failure))
         return EXIT_FENCED
-    except PromotionRefusedError as error:
-        logger.error("promote.refused", version=arguments.version, reason=str(error))
+    except PromotionRefusedError as failure:
+        logger.error("promote.refused", version=arguments.version, reason=str(failure))
         return EXIT_REFUSED
-    except (DBOSException, SQLAlchemyError, psycopg.Error, PromotionReadBackError) as error:
-        logger.error("promote.failed", version=arguments.version, error=str(error))
+    except (error.DBOSException, SQLAlchemyError, psycopg.Error, PromotionReadBackError) as failure:
+        logger.error("promote.failed", version=arguments.version, error=str(failure))
         return EXIT_REFUSED
     finally:
         client.destroy()
