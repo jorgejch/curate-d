@@ -96,6 +96,9 @@ how it is made idempotent, whether it belongs in a workflow — against the `dbo
   or retires a version's rows only under that lock held exclusively, and only for a version
   registered before its target, DBOS's latest. Promoting a version is an operator command
   (`python -m curate_d.runtime.promote`, see `docs/recovery.md`); workers never promote.
+  The promotion fence (`version_lease.py`) keeps latest from moving backwards mid-sweep: the
+  sweep holds it shared, tried once, across every fork and retirement, and promotion holds it
+  exclusively, waiting a bounded time. Don't fork or retire outside it.
 - Conductor is read-only: the gate (`runtime/conductor.py`) passes read messages to DBOS's
   handler and refuses every write (cancel, resume, the schedule commands, delete, the forks,
   rewind, version promotion, backfill, recovery, retention, import), enqueuing and

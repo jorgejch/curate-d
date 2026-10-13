@@ -1,8 +1,9 @@
 """In-memory stand-ins for what the recovery sweep reads and writes in DBOS.
 
 `FakeRecoveryControl` keeps workflow rows as DBOS reports them and applies forks,
-cancels and re-enqueues the way DBOS does, recording every call. `FakeRegistrations` and
-`FakeVersionHolds` stand in for the version registry and the exclusive version lock.
+cancels and re-enqueues the way DBOS does, recording every call. `FakeRegistrations`,
+`FakeVersionHolds` and `FakePromotionFence` stand in for the version registry, the
+exclusive version lock and the shared promotion fence.
 """
 
 from collections.abc import AsyncIterator, Mapping
@@ -228,3 +229,46 @@ class FakeVersionHolds:
         finally:
             self.held.discard(version)
             self.events.append(f"release:{version}")
+
+
+class FakePromotionFence:
+    """The promotion fence, taken shared unless a promotion holds it or it fails.
+
+    Records `fence:hold` when taken and `fence:release` when its block exits, however it
+    exits, in `events`, which a test may share with `FakeVersionHolds` to check nesting.
+    """
+
+    def __init__(
+        self,
+        *,
+        promoting: bool = False,
+        error: Exception | None = None,
+        events: list[str] | None = None,
+    ) -> None:
+        """Refuse the fence while `promoting`; raise `error` on every attempt."""
+        self.promoting = promoting
+        self.error = error
+        self.events = events if events is not None else []
+        self.held = False
+        self.attempts = 0
+
+    def __call__(self) -> AbstractAsyncContextManager[bool]:
+        """Try once to hold the fence shared for the duration of the block."""
+        return self._hold()
+
+    @asynccontextmanager
+    async def _hold(self) -> AsyncIterator[bool]:
+        """Yield whether the fence was taken, releasing a taken fence on every exit."""
+        self.attempts += 1
+        if self.error is not None:
+            raise self.error
+        if self.promoting:
+            yield False
+            return
+        self.held = True
+        self.events.append("fence:hold")
+        try:
+            yield True
+        finally:
+            self.held = False
+            self.events.append("fence:release")

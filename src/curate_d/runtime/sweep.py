@@ -21,8 +21,17 @@ version, read when the sweep starts; only a sweeper running that version forks o
 retires. A non-target version's rows are forked or retired only if that version
 registered before the target, and only while the sweep holds its lock exclusively, which
 no live worker of it allows. A build that predates the lease never registered and is left
-alone. After taking a version's lock the sweep reads the latest version again, and stops
-forking if it changed.
+alone.
+
+Every fork and retirement runs under the promotion fence, held shared and taken once
+without waiting; a promotion holding it skips them all for this tick. Promotion is the only
+way latest moves backwards, so under the fence the target cannot be superseded by an older
+version, whose sweeper could never fork the rows back. The sweep re-reads the latest
+version once it holds the fence and again after taking each version's lock, and stops
+forking if it changed. A roll-forward is not fenced: a new build's first launch can make it
+latest mid-batch, and the rest of the batch still goes to the old target. That heals
+itself: the old target registered before the new one, so the new target's sweeper forks
+those rows once the old target's workers are gone.
 
 A stale tick of the sweep's own schedule is cancelled under the same gates rather than
 forked or re-enqueued: the next tick does its work. A row whose queue is NULL or DBOS's
@@ -121,7 +130,8 @@ class SweepOutcome:
     failed: tuple[tuple[str, str], ...] = ()
     """Pairs of (workflow identifier, failure reason)."""
     skipped: tuple[str, ...] = ()
-    """Fork and retire rows left because this sweeper is not on the target version."""
+    """Fork and retire rows left because this sweeper is not on the target version, the
+    latest version changed mid-sweep, or a promotion held the promotion fence."""
     unregistered: tuple[str, ...] = ()
     """Rows of a version that never registered in `lease_versions`."""
     newer_than_target: tuple[str, ...] = ()
@@ -518,6 +528,8 @@ type VersionHolds = Callable[[str], AbstractAsyncContextManager[VersionHold]]
 """Tries once to hold one version's lock exclusively for the duration of a block."""
 type Registrations = Callable[[], Awaitable[Mapping[str, datetime]]]
 """Reads every registered version with its first registration time."""
+type PromotionFence = Callable[[], AbstractAsyncContextManager[bool]]
+"""Tries once to hold the promotion fence shared for the duration of a block."""
 
 
 def _queue_refusal(workflow: PendingWorkflow) -> str | None:
@@ -577,6 +589,20 @@ class _Sweep:
         self.leases = leases
         self.holds = holds
         self.tally = _Tally()
+
+    def fail_unfinished(self, ids: Sequence[str], reason: str) -> None:
+        """Record `reason` as the failure of every row in `ids` the tally has not settled."""
+        tally = self.tally
+        done = {
+            *tally.retired,
+            *(original for original, _ in tally.forked),
+            *tally.retired_ticks,
+            *(workflow_id for workflow_id, _ in tally.failed),
+            *tally.skipped,
+            *tally.unregistered,
+            *tally.newer_than_target,
+        }
+        tally.failed.extend((workflow_id, reason) for workflow_id in ids if workflow_id not in done)
 
     def refuse_misrouted(self, entries: list[StrandedWorkflow]) -> list[StrandedWorkflow]:
         """Fail fork and re-enqueue rows with no queue or DBOS's internal queue.
@@ -717,6 +743,10 @@ class _Sweep:
     async def recover_version(self, version: str, entries: list[StrandedWorkflow]) -> bool:
         """Fork or retire one source version's rows under its exclusive lock.
 
+        Call only under the promotion fence. The latest version is re-read once the lock
+        is taken; under the fence it can only have moved forward, to a build registered
+        after the target, which recovers whatever this batch leaves on the target.
+
         Returns:
             False if the latest version changed after the lock was taken, in which case
             nothing more is forked or retired by this sweep. True allows the next source
@@ -750,16 +780,90 @@ class _Sweep:
                 for entry in entries:
                     await self.recover(entry)
         except Exception as error:  # A lock that cannot be taken forks nothing of it.
-            done = {
-                *self.tally.retired,
-                *(original for original, _ in self.tally.forked),
-                *self.tally.retired_ticks,
-                *(workflow_id for workflow_id, _ in self.tally.failed),
-            }
-            reason = f"holding version {version!r} for recovery failed: {error}"
-            self.tally.failed.extend((wid, reason) for wid in ids if wid not in done)
+            self.fail_unfinished(ids, f"holding version {version!r} for recovery failed: {error}")
             logger.error("recovery_sweep.version_lock_failed", version=version, error=str(error))
         return True
+
+    async def recover_fenced(
+        self,
+        unlocked: list[StrandedWorkflow],
+        by_version: Mapping[str, list[StrandedWorkflow]],
+        registry: Mapping[str, datetime],
+    ) -> None:
+        """Fork or retire every candidate, holding the promotion fence shared.
+
+        Re-read the latest version first: a promotion may have landed between the sweep's
+        first read and the fence. Then retire version-less and on-target rows, and recover
+        each older registered source version under its own lock.
+
+        Args:
+            unlocked: Version-less and on-target rows, which take no version lock.
+            by_version: Every other candidate, by source version.
+            registry: Each registered version's first registration time.
+        """
+        ids = [
+            entry.workflow.workflow_id
+            for entries in (unlocked, *by_version.values())
+            for entry in entries
+        ]
+        try:
+            latest = await self.control.latest_version()
+        except Exception as error:  # Unknown target: fork nothing, report every row.
+            self.fail_unfinished(
+                ids, f"re-reading the latest version under the promotion fence failed: {error}"
+            )
+            logger.error("recovery_sweep.latest_read_failed", error=str(error))
+            return
+        if latest != self.target:
+            self.tally.skipped.extend(ids)
+            logger.warning(
+                "recovery_sweep.skipped",
+                reason="the latest version changed mid-sweep",
+                target=self.target,
+                latest=latest,
+                rows=len(ids),
+            )
+            return
+
+        # The sweeper runs the target and holds its shared lease, so the target is live.
+        for entry in unlocked:
+            await self.recover(entry)
+
+        target_registered = registry.get(self.target)
+        remaining = list(by_version.items())
+        while remaining:
+            version, entries = remaining.pop(0)
+            version_ids = [entry.workflow.workflow_id for entry in entries]
+            registered_at = registry.get(version)
+            if registered_at is None:
+                self.tally.unregistered.extend(version_ids)
+                logger.warning(
+                    "recovery_sweep.unregistered_version", version=version, rows=len(version_ids)
+                )
+                continue
+            if target_registered is None:
+                reason = (
+                    f"target version {self.target!r} is not registered; its deploy order is unknown"
+                )
+                self.tally.failed.extend((wid, reason) for wid in version_ids)
+                logger.error(
+                    "recovery_sweep.target_unregistered", target=self.target, version=version
+                )
+                continue
+            if registered_at >= target_registered:
+                self.tally.newer_than_target.extend(version_ids)
+                logger.warning(
+                    "recovery_sweep.newer_than_target",
+                    version=version,
+                    target=self.target,
+                    rows=len(version_ids),
+                )
+                continue
+            if not await self.recover_version(version, entries):
+                self.tally.skipped.extend(
+                    entry.workflow.workflow_id for _, rest in remaining for entry in rest
+                )
+                break
 
 
 async def run_recovery_sweep(
@@ -770,6 +874,7 @@ async def run_recovery_sweep(
     lease_factory: LeaseFactory | None = None,
     version_holds: VersionHolds | None = None,
     registrations: Registrations | None = None,
+    promotion_fence: PromotionFence | None = None,
 ) -> SweepOutcome:
     """Recover pending and queued work that no live worker will claim.
 
@@ -784,6 +889,10 @@ async def run_recovery_sweep(
         version_holds: Tries to hold one version's lock exclusively. Defaults to
             `version_lease.hold_exclusive` on the configured database.
         registrations: Reads the version registry. Defaults to `version_lease.registrations`.
+        promotion_fence: Tries once to hold the promotion fence shared. Every fork and
+            retirement runs under it; refused, they are all skipped this tick, while
+            dead-executor re-enqueues still run. Defaults to
+            `version_lease.hold_fence_shared` on the configured database.
 
     Returns:
         What the sweep did, including per-workflow failures. One workflow that cannot be
@@ -792,8 +901,9 @@ async def run_recovery_sweep(
 
     Raises:
         Exception: The initial latest-version read, pending-row listing or registry read
-            failed; nothing was written. Errors re-reading the latest version under a
-            source lock are instead recorded as per-workflow failures.
+            failed; nothing was written. Errors taking the promotion fence, or re-reading
+            the latest version under it or under a source lock, are instead recorded as
+            per-workflow failures.
     """
     leases = lease_factory or (
         lambda executor_id: ExecutorLease.for_settings(
@@ -802,6 +912,7 @@ async def run_recovery_sweep(
     )
     holds = version_holds or (lambda version: version_lease.hold_exclusive(settings, version))
     read_registrations = registrations or (lambda: version_lease.registrations(settings))
+    fence = promotion_fence or (lambda: version_lease.hold_fence_shared(settings))
 
     target = await control.latest_version()
     pending = await control.list_pending()
@@ -839,35 +950,23 @@ async def run_recovery_sweep(
             )
         return sweep.tally.outcome()
 
-    # The sweeper runs the target and holds its shared lease, so the target is live.
-    for entry in unlocked:
-        await sweep.recover(entry)
+    if not versioned:
+        return sweep.tally.outcome()
 
-    target_registered = registry.get(target)
-    remaining = list(by_version.items())
-    while remaining:
-        version, entries = remaining.pop(0)
-        ids = [entry.workflow.workflow_id for entry in entries]
-        registered_at = registry.get(version)
-        if registered_at is None:
-            sweep.tally.unregistered.extend(ids)
-            logger.warning("recovery_sweep.unregistered_version", version=version, rows=len(ids))
-            continue
-        if target_registered is None:
-            reason = f"target version {target!r} is not registered; its deploy order is unknown"
-            sweep.tally.failed.extend((wid, reason) for wid in ids)
-            logger.error("recovery_sweep.target_unregistered", target=target, version=version)
-            continue
-        if registered_at >= target_registered:
-            sweep.tally.newer_than_target.extend(ids)
-            logger.warning(
-                "recovery_sweep.newer_than_target", version=version, target=target, rows=len(ids)
-            )
-            continue
-        if not await sweep.recover_version(version, entries):
-            sweep.tally.skipped.extend(
-                entry.workflow.workflow_id for _, rest in remaining for entry in rest
-            )
-            break
-
+    ids = [entry.workflow.workflow_id for entry in versioned]
+    try:
+        async with fence() as fenced:
+            if fenced:
+                await sweep.recover_fenced(unlocked, by_version, registry)
+            else:
+                sweep.tally.skipped.extend(ids)
+                logger.warning(
+                    "recovery_sweep.skipped",
+                    reason="a promotion is in progress",
+                    target=target,
+                    rows=len(ids),
+                )
+    except Exception as error:  # A fence that cannot be taken forks nothing.
+        sweep.fail_unfinished(ids, f"holding the promotion fence failed: {error}")
+        logger.error("recovery_sweep.fence_failed", error=str(error))
     return sweep.tally.outcome()

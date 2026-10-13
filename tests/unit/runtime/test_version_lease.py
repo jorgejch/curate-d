@@ -1,4 +1,4 @@
-"""The version registry, exclusive version holds and the standalone version lease.
+"""The version registry, exclusive version holds, the standalone version lease and the fence.
 
 The SQL runs against PostgreSQL in tests/integration/test_version_lease.py; what is checked
 here is what each piece does with its connection and its locks, on in-memory doubles.
@@ -14,12 +14,20 @@ import pytest
 
 from curate_d.config import Settings
 from curate_d.runtime import version_lease
-from curate_d.runtime.lease import ExecutorLeaseLostError, ExecutorLeaseUnavailableError
+from curate_d.runtime.lease import (
+    ExecutorLeaseLostError,
+    ExecutorLeaseUnavailableError,
+    lease_key,
+)
 from curate_d.runtime.version_lease import (
     LockMode,
+    PromotionFenceTimeoutError,
     StandaloneVersionLease,
     VersionRegistryError,
     hold_exclusive,
+    hold_fence_exclusive,
+    hold_fence_shared,
+    promotion_fence_key,
     register_version,
     registrations,
     version_lease_key,
@@ -27,6 +35,7 @@ from curate_d.runtime.version_lease import (
 from tests.unit.runtime.fake_lease import FakeLockServer
 
 KEY = version_lease_key("curate-d", "v1")
+FENCE = promotion_fence_key("curate-d")
 
 
 class _Cursor:
@@ -382,3 +391,94 @@ async def test_a_released_standalone_lease_refuses_writes_and_permits_recovery()
     async with hold_exclusive(Settings(), "v1", connect=server.connect) as hold:
         assert hold.held
     assert all(session.closed for session in server.sessions)
+
+
+# The promotion fence.
+
+
+def test_the_fence_key_is_its_own() -> None:
+    """The fence never aliases an executor or version key spelled like its name."""
+    assert FENCE not in {
+        lease_key("curate-d", "latest-version"),
+        version_lease_key("curate-d", "latest-version"),
+    }
+    assert promotion_fence_key("curate-d") == FENCE
+    assert promotion_fence_key("other") != FENCE
+
+
+async def test_sweeps_share_the_fence_and_release_it_after_their_block() -> None:
+    """Two sweeps hold it together; each session is closed once its block exits."""
+    server = FakeLockServer()
+    async with (
+        hold_fence_shared(Settings(), connect=server.connect) as first,
+        hold_fence_shared(Settings(), connect=server.connect) as second,
+    ):
+        assert first and second
+        assert len(server.shared[FENCE]) == 2
+    assert server.mode(FENCE) is None
+    assert all(session.closed for session in server.sessions)
+
+
+async def test_a_promotion_holding_the_fence_refuses_a_sweep() -> None:
+    """The sweep's one attempt is refused without waiting."""
+    server = FakeLockServer()
+    assert server.connect().try_lock(FENCE)
+    async with hold_fence_shared(Settings(), connect=server.connect) as fenced:
+        assert not fenced
+    assert server.sessions[-1].closed
+    assert server.mode(FENCE) == "exclusive"
+
+
+async def test_the_shared_fence_is_released_when_its_block_raises() -> None:
+    """A sweep that fails mid-batch still lets a promotion through."""
+    server = FakeLockServer()
+    with pytest.raises(RuntimeError, match="fork failed"):
+        async with hold_fence_shared(Settings(), connect=server.connect) as fenced:
+            assert fenced
+            raise RuntimeError("fork failed")
+    assert server.mode(FENCE) is None
+
+
+async def test_a_shared_fence_error_raises_and_holds_nothing() -> None:
+    """An unreachable database surfaces before any block runs."""
+    server = FakeLockServer()
+    server.refuse_connections = 1
+    with pytest.raises(psycopg.OperationalError):
+        async with hold_fence_shared(Settings(), connect=server.connect):
+            pytest.fail("the block must not run")
+    assert server.mode(FENCE) is None
+
+
+def test_a_promotion_holds_the_fence_exclusively_for_its_block() -> None:
+    """The fence is held across the block, waited for with the given timeout, then freed."""
+    server = FakeLockServer()
+    with hold_fence_exclusive(Settings(), timeout=7.5, connect=server.connect):
+        assert server.mode(FENCE) == "exclusive"
+    assert server.waits == [7.5]
+    assert server.mode(FENCE) is None
+    assert all(session.closed for session in server.sessions)
+
+
+def test_a_sweep_holding_the_fence_times_out_a_promotion() -> None:
+    """The block never runs, the session is closed, and the sweep keeps its hold."""
+    server = FakeLockServer()
+    sweep = server.connect()
+    assert sweep.try_lock_shared(FENCE)
+    with (
+        pytest.raises(PromotionFenceTimeoutError, match="after 2s"),
+        hold_fence_exclusive(Settings(), timeout=2, connect=server.connect),
+    ):
+        pytest.fail("the block must not run")
+    assert server.sessions[-1].closed
+    assert server.mode(FENCE) == "shared"
+
+
+def test_the_exclusive_fence_is_released_when_its_block_raises() -> None:
+    """A failed promotion still lets the next sweep take the fence."""
+    server = FakeLockServer()
+    with (
+        pytest.raises(RuntimeError, match="promotion failed"),
+        hold_fence_exclusive(Settings(), timeout=1, connect=server.connect),
+    ):
+        raise RuntimeError("promotion failed")
+    assert server.mode(FENCE) is None

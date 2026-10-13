@@ -11,6 +11,7 @@ from dbos._sys_db import WorkflowStatuses
 from dbos._utils import INTERNAL_QUEUE_NAME
 from psycopg.errors import UniqueViolation
 from sqlalchemy.exc import IntegrityError
+from structlog.testing import capture_logs
 
 from curate_d.config import Settings
 from curate_d.runtime import sweep
@@ -28,6 +29,7 @@ from curate_d.runtime.sweep import (
 from curate_d.runtime.version_lease import LockMode
 from tests.unit.runtime.fake_lease import FakeLockServer
 from tests.unit.runtime.fake_recovery import (
+    FakePromotionFence,
     FakeRecoveryControl,
     FakeRegistrations,
     FakeVersionHolds,
@@ -53,6 +55,7 @@ async def _sweep(
     registry: FakeRegistrations | None = None,
     holds: FakeVersionHolds | None = None,
     locks: FakeLockServer | None = None,
+    fence: FakePromotionFence | None = None,
 ) -> SweepOutcome:
     """Run the sweep as a sweeper on `own`, over in-memory collaborators."""
     return await run_recovery_sweep(
@@ -62,6 +65,7 @@ async def _sweep(
         lease_factory=(locks or FakeLockServer()).lease,
         version_holds=holds or FakeVersionHolds(),
         registrations=registry or FakeRegistrations(registered("v1", "v2")),
+        promotion_fence=fence or FakePromotionFence(),
     )
 
 
@@ -369,7 +373,7 @@ async def test_a_target_change_after_the_lock_stops_forking() -> None:
     """The sweep re-reads latest under the lock and stops if it moved."""
     control = FakeRecoveryControl(
         [workflow_status("a", version="v1"), workflow_status("b", version="v0")],
-        latest=["v2", "v3"],
+        latest=["v2", "v2", "v3"],
     )
     holds = FakeVersionHolds()
     outcome = await _sweep(
@@ -714,7 +718,7 @@ async def test_an_ownerless_pending_row_is_reported_not_reenqueued(locks: FakeLo
 
 
 async def test_equal_registration_times_do_not_establish_deploy_order() -> None:
-    """A tied timestamp cannot authorize recovery of either version's rows."""
+    """A source registered at the target's own time is not older, so its rows are left."""
     timestamp = registered("v1")["v1"]
     control = FakeRecoveryControl([workflow_status(ORIGINAL)])
     holds = FakeVersionHolds()
@@ -732,7 +736,7 @@ async def test_a_target_change_after_one_version_preserves_completed_recovery() 
     """A new target stops subsequent source groups without losing the earlier tally."""
     control = FakeRecoveryControl(
         [workflow_status(name, version=name) for name in ("v0", "v1", "v2")],
-        latest=["v3", "v3", "v4"],
+        latest=["v3", "v3", "v3", "v4"],
     )
     holds = FakeVersionHolds()
     outcome = await _sweep(
@@ -751,7 +755,7 @@ async def test_a_target_change_after_one_version_preserves_completed_recovery() 
 
 
 async def test_a_failed_row_does_not_strand_other_rows_of_its_version() -> None:
-    """The source lock stays available for remaining rows after a checkpoint read fails."""
+    """A failed checkpoint read fails only its row; the version's other rows still recover."""
     control = FakeRecoveryControl([workflow_status("bad"), workflow_status("good")])
     control.errors[("step_ids", "bad")] = OSError("checkpoint read failed")
     holds = FakeVersionHolds()
@@ -868,6 +872,162 @@ async def test_an_empty_sweep_never_reads_the_registry_or_takes_locks(
     assert registry.reads == 0
     assert holds.events == []
     assert locks.sessions == []
+
+
+# The promotion fence.
+
+
+async def test_a_promotion_in_progress_skips_forks_and_retirements_but_not_reenqueues(
+    locks: FakeLockServer,
+) -> None:
+    """A promotion holding the fence may move latest backwards, so nothing is forked."""
+    control = FakeRecoveryControl(
+        [
+            workflow_status("fork-me", version="v1"),
+            workflow_status("retire-me", version="v2", was_forked_from=True),
+            workflow_status("orphan", version="v2", executor_id="worker-9"),
+        ]
+    )
+    fence = FakePromotionFence(promoting=True)
+    holds = FakeVersionHolds()
+    with capture_logs() as events:
+        outcome = await _sweep(control, holds=holds, locks=locks, fence=fence)
+    assert outcome == SweepOutcome(reenqueued=("orphan",), skipped=("fork-me", "retire-me"))
+    assert control.writes() == [("reenqueue", "orphan", "worker-9")]
+    assert holds.events == []
+    assert fence.attempts == 1
+    [skipped] = [event for event in events if event["event"] == "recovery_sweep.skipped"]
+    assert skipped["reason"] == "a promotion is in progress"
+    assert skipped["log_level"] == "warning"
+
+
+async def test_the_fence_is_held_across_every_fork_and_retirement() -> None:
+    """Taken once before the first write and released after the last version lock."""
+    control = FakeRecoveryControl(
+        [
+            workflow_status("retire-me", version="v2", was_forked_from=True),
+            workflow_status(
+                recovery_successor_id("retire-me"),
+                status="ENQUEUED",
+                version="v2",
+                forked_from="retire-me",
+            ),
+            workflow_status("a", version="v0"),
+            workflow_status("b", version="v1"),
+        ]
+    )
+    holds = FakeVersionHolds()
+    fence = FakePromotionFence(events=holds.events)
+    fenced_writes: list[bool] = []
+    fork, cancel = control.fork, control.cancel
+
+    async def fork_fenced(*args: object, **kwargs: object) -> None:
+        """Record whether the fence is held, then fork."""
+        fenced_writes.append(fence.held)
+        await fork(*args, **kwargs)  # type: ignore[arg-type]
+
+    async def cancel_fenced(workflow_id: str) -> None:
+        """Record whether the fence is held, then cancel."""
+        fenced_writes.append(fence.held)
+        await cancel(workflow_id)
+
+    control.fork, control.cancel = fork_fenced, cancel_fenced  # type: ignore[method-assign]
+    outcome = await _sweep(
+        control,
+        registry=FakeRegistrations(registered("v0", "v1", "v2")),
+        holds=holds,
+        fence=fence,
+    )
+    assert outcome.retired == ("retire-me",)
+    assert [original for original, _ in outcome.forked] == ["a", "b"]
+    assert len(fenced_writes) == 5 and all(fenced_writes)
+    assert holds.events == [
+        "fence:hold",
+        "hold:v0",
+        "release:v0",
+        "hold:v1",
+        "release:v1",
+        "fence:release",
+    ]
+    assert fence.attempts == 1
+
+
+async def test_a_promotion_before_the_fence_is_seen_under_it() -> None:
+    """Latest is re-read once the fence is held; a rollback since the first read forks nothing."""
+    control = FakeRecoveryControl(
+        [
+            workflow_status("a", version="v1"),
+            workflow_status("retire-me", version="v2", was_forked_from=True),
+        ],
+        latest=["v2", "v1"],
+    )
+    holds = FakeVersionHolds()
+    fence = FakePromotionFence()
+    outcome = await _sweep(control, holds=holds, fence=fence)
+    assert outcome == SweepOutcome(skipped=("retire-me", "a"))
+    assert control.writes() == []
+    assert holds.events == []
+    assert fence.events == ["fence:hold", "fence:release"]
+
+
+async def test_a_fence_error_fails_every_fork_and_retirement_but_not_reenqueues(
+    locks: FakeLockServer,
+) -> None:
+    """Unknown promotion state forks nothing; the rows are reported, re-enqueues still run."""
+    control = FakeRecoveryControl(
+        [
+            workflow_status("fork-me", version="v1"),
+            workflow_status("orphan", version="v2", executor_id="worker-9"),
+        ]
+    )
+    outcome = await _sweep(
+        control, locks=locks, fence=FakePromotionFence(error=OSError("fence unavailable"))
+    )
+    assert outcome.reenqueued == ("orphan",)
+    assert [workflow_id for workflow_id, _ in outcome.failed] == ["fork-me"]
+    assert "holding the promotion fence failed" in outcome.failed[0][1]
+    assert control.writes() == [("reenqueue", "orphan", "worker-9")]
+
+
+async def test_a_latest_read_failure_under_the_fence_fails_every_candidate() -> None:
+    """Without a confirmed target nothing is forked, and every candidate is reported."""
+    control = FakeRecoveryControl([workflow_status("a", version="v1")])
+    fence = FakePromotionFence()
+    original = control.latest_version
+    reads = 0
+
+    async def fail_second_read() -> str:
+        """Answer the first read, then fail."""
+        nonlocal reads
+        reads += 1
+        if reads > 1:
+            raise OSError("latest unavailable")
+        return await original()
+
+    control.latest_version = fail_second_read  # type: ignore[method-assign]
+    outcome = await _sweep(control, fence=fence)
+    assert [workflow_id for workflow_id, _ in outcome.failed] == ["a"]
+    assert "under the promotion fence" in outcome.failed[0][1]
+    assert control.writes() == []
+    assert fence.events == ["fence:hold", "fence:release"]
+
+
+async def test_a_sweeper_off_the_target_never_takes_the_fence() -> None:
+    """Only a sweeper that may fork needs the fence."""
+    control = FakeRecoveryControl([workflow_status("parked", version="v1")], latest="v3")
+    fence = FakePromotionFence()
+    outcome = await _sweep(control, own="v2", fence=fence)
+    assert outcome.skipped == ("parked",)
+    assert fence.attempts == 0
+
+
+async def test_a_sweep_with_only_reenqueues_never_takes_the_fence(locks: FakeLockServer) -> None:
+    """Re-enqueues do not depend on latest, so they never wait on a promotion."""
+    control = FakeRecoveryControl([workflow_status("orphan", version="v2", executor_id="w-9")])
+    fence = FakePromotionFence(promoting=True)
+    outcome = await _sweep(control, locks=locks, fence=fence)
+    assert outcome == SweepOutcome(reenqueued=("orphan",))
+    assert fence.attempts == 0
 
 
 @pytest.mark.parametrize("adapter", ["launched", "client"])
@@ -1061,7 +1221,7 @@ async def test_a_fork_that_publishes_no_successor_never_cancels_its_source(
 
 
 async def test_a_retry_repairs_failed_cancellation_without_forking_again() -> None:
-    """A retry after deployment retires the ancestor and preserves its committed successor."""
+    """A retry after a rollback retires the ancestor without forking it a second time."""
     control = FakeRecoveryControl([workflow_status(ORIGINAL)])
     control.errors[("cancel", ORIGINAL)] = OSError("cancel unavailable")
     holds = FakeVersionHolds()
@@ -1138,7 +1298,7 @@ async def test_conditional_reenqueue_does_not_claim_a_row_changed_after_listing(
 async def test_a_latest_version_read_failure_under_one_lock_allows_other_versions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Unknown liveness fails every row of that source while another source still recovers."""
+    """An unreadable latest version fails that source's rows; the next source still recovers."""
     control = FakeRecoveryControl(
         [
             workflow_status("a", version="v0"),
@@ -1149,7 +1309,7 @@ async def test_a_latest_version_read_failure_under_one_lock_allows_other_version
     monkeypatch.setattr(
         control,
         "latest_version",
-        AsyncMock(side_effect=["v2", OSError("latest unavailable"), "v2"]),
+        AsyncMock(side_effect=["v2", "v2", OSError("latest unavailable"), "v2"]),
     )
     holds = FakeVersionHolds()
     outcome = await _sweep(

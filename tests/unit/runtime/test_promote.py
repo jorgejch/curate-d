@@ -7,10 +7,16 @@ from unittest.mock import Mock
 import psycopg
 import pytest
 from dbos._error import DBOSException
+from sqlalchemy import exc as sa_exc
 from structlog.testing import capture_logs
 
 from curate_d.config import Settings
-from curate_d.runtime import dbos_app, promote
+from curate_d.runtime import dbos_app, promote, version_lease
+from curate_d.runtime.dbos_app import APPLICATION_NAME
+from curate_d.runtime.lease import promotion_fence_key
+from tests.unit.runtime.fake_lease import FakeLockServer
+
+FENCE = promotion_fence_key(APPLICATION_NAME)
 
 
 class _Client:
@@ -41,7 +47,20 @@ class _Client:
 
 
 @pytest.fixture
-def client(monkeypatch: pytest.MonkeyPatch) -> _Client:
+def fence_locks(monkeypatch: pytest.MonkeyPatch) -> FakeLockServer:
+    """Serve the promotion fence's sessions from an in-memory lock server."""
+    server = FakeLockServer()
+
+    def hold(settings: Settings, *, timeout: float) -> object:
+        """Hold the real fence over `server`."""
+        return version_lease.hold_fence_exclusive(settings, timeout=timeout, connect=server.connect)
+
+    monkeypatch.setattr(promote, "hold_fence_exclusive", hold)
+    return server
+
+
+@pytest.fixture
+def client(monkeypatch: pytest.MonkeyPatch, fence_locks: FakeLockServer) -> _Client:
     """Serve promote's DBOS calls from memory, with the database clock in step."""
     fake = _Client(["v1", "v2"], latest="v2")
     monkeypatch.setattr(dbos_app, "client", lambda settings: fake)
@@ -155,8 +174,8 @@ def test_a_version_read_failure_closes_the_client_without_promoting(
     """A database outage before the promotion cannot be reported as success."""
 
     def fail() -> None:
-        """Simulate a failed version lookup."""
-        raise psycopg.OperationalError("version lookup failed")
+        """Simulate a failed version lookup, as DBOSClient raises it."""
+        raise sa_exc.OperationalError("SELECT", {}, Exception("version lookup failed"))
 
     monkeypatch.setattr(client, operation, fail)
     assert promote.main(["v1"]) == promote.EXIT_REFUSED
@@ -194,8 +213,13 @@ def test_a_failed_database_clock_read_closes_its_connection(
 def test_a_post_promotion_read_failure_reports_failure_without_undoing_the_write(
     client: _Client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A read outage after promotion cannot be reported as success or rolled back silently."""
-    read = Mock(side_effect=[{"version_name": "v2"}, psycopg.OperationalError("read back failed")])
+    """A failed read-back exits non-zero and leaves the written promotion in place."""
+    read = Mock(
+        side_effect=[
+            {"version_name": "v2"},
+            sa_exc.OperationalError("SELECT", {}, Exception("read back failed")),
+        ]
+    )
     monkeypatch.setattr(client, "get_latest_application_version", read)
 
     with capture_logs() as events:
@@ -235,3 +259,60 @@ def test_an_empty_version_catalog_refuses_before_checking_the_clock(
     assert client.promoted == []
     assert client.destroyed
     assert "0 versions" in events[0]["reason"]
+
+
+def test_the_change_runs_under_the_exclusive_fence(
+    client: _Client, fence_locks: FakeLockServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No sweep can fork onto the replaced version while latest moves; the fence is freed after."""
+    modes: list[str | None] = []
+    set_latest = client.set_latest_application_version
+
+    def observe(version: str) -> None:
+        """Record the fence's mode at the moment of the change."""
+        modes.append(fence_locks.mode(FENCE))
+        set_latest(version)
+
+    monkeypatch.setattr(client, "set_latest_application_version", observe)
+    assert promote.main(["v1"]) == 0
+    assert modes == ["exclusive"]
+    assert fence_locks.waits == [promote.FENCE_TIMEOUT_SECONDS]
+    assert fence_locks.mode(FENCE) is None
+
+
+def test_the_fence_timeout_is_configurable(client: _Client, fence_locks: FakeLockServer) -> None:
+    """--fence-timeout bounds the wait for a running sweep."""
+    assert promote.main(["--fence-timeout", "5", "v1"]) == 0
+    assert fence_locks.waits == [5.0]
+
+
+def test_a_sweep_holding_the_fence_times_out_without_promoting(
+    client: _Client, fence_locks: FakeLockServer
+) -> None:
+    """A sweep mid-batch keeps latest where it is; the command exits with its own code."""
+    sweep = fence_locks.connect()
+    assert sweep.try_lock_shared(FENCE)
+    with capture_logs() as events:
+        assert promote.main(["v1"]) == promote.EXIT_FENCED
+    assert client.promoted == []
+    assert client.latest == "v2"
+    assert client.destroyed
+    assert [event["event"] for event in events] == ["promote.fenced"]
+    assert "promotion fence" in events[0]["reason"]
+    assert fence_locks.mode(FENCE) == "shared"
+
+
+def test_a_refused_version_never_takes_the_fence(
+    client: _Client, fence_locks: FakeLockServer
+) -> None:
+    """Pre-write refusals come before the fence, so they never wait on a sweep."""
+    assert promote.main(["v9"]) == promote.EXIT_REFUSED
+    assert fence_locks.sessions == []
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "soon"])
+def test_a_fence_timeout_must_be_a_positive_number(value: str) -> None:
+    """argparse refuses a non-positive or non-numeric timeout before anything connects."""
+    with pytest.raises(SystemExit) as raised:
+        promote.main(["--fence-timeout", value, "v1"])
+    assert raised.value.code == 2

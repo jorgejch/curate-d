@@ -37,7 +37,7 @@ drops the lock; an emptied reset query hands the lock to the next client.
 
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from hashlib import sha256
 from typing import Final, LiteralString, Protocol, Self
 
@@ -57,6 +57,9 @@ _KEY_DOMAIN: Final = b"curate-d/executor-lease/v1"
 # The version lease's own domain: an executor identity and a version spelled alike must
 # still name different locks.
 _VERSION_KEY_DOMAIN: Final = b"curate-d/version-lease/v1"
+# The promotion fence's own domain, with a fixed name: one fence per application.
+_PROMOTION_FENCE_DOMAIN: Final = b"curate-d/promotion-fence/v1"
+_PROMOTION_FENCE_NAME: Final = "latest-version"
 
 # libpq settings on the lease connection. Idle probes start after 10s and give up after
 # three unanswered 5s intervals; tcp_user_timeout bounds a probe whose bytes the server
@@ -113,6 +116,15 @@ def version_lease_key(application_name: str, version: str) -> int:
     return _advisory_key(_VERSION_KEY_DOMAIN, application_name, version)
 
 
+def promotion_fence_key(application_name: str) -> int:
+    """Return the signed 64-bit advisory-lock key fencing promotion against the sweep.
+
+    Derived like `lease_key` under its own domain, so it collides with an executor or
+    version key only on a 64-bit hash collision.
+    """
+    return _advisory_key(_PROMOTION_FENCE_DOMAIN, application_name, _PROMOTION_FENCE_NAME)
+
+
 class LeaseSession(Protocol):
     """One database session able to hold advisory locks."""
 
@@ -151,6 +163,9 @@ _TRY_LOCK: Final = "SELECT pg_try_advisory_lock(%(key)s)"
 _UNLOCK: Final = "SELECT pg_advisory_unlock(%(key)s)"
 _TRY_LOCK_SHARED: Final = "SELECT pg_try_advisory_lock_shared(%(key)s)"
 _UNLOCK_SHARED: Final = "SELECT pg_advisory_unlock_shared(%(key)s)"
+_LOCK: Final = "SELECT pg_advisory_lock(%(key)s)"
+# Session-wide (is_local false): autocommit has no transaction to scope it to.
+_SET_LOCK_TIMEOUT: Final = "SELECT set_config('lock_timeout', %(timeout)s, false)"
 # pg_locks reports a bigint advisory key as classid = high 32 bits, objid = low 32 bits.
 _HOLDS: Final = """
     SELECT EXISTS (
@@ -192,7 +207,7 @@ class PostgresLeaseSession:
     def __init__(self, connection: psycopg.Connection[TupleRow]) -> None:
         self._connection = connection
 
-    def _scalar(self, query: LiteralString, params: dict[str, int]) -> object:
+    def _scalar(self, query: LiteralString, params: Mapping[str, int | str]) -> object:
         """Run `query` and return the first column of its single row."""
         row = self._connection.execute(query, params).fetchone()
         return None if row is None else row[0]
@@ -204,6 +219,22 @@ class PostgresLeaseSession:
     def try_lock_shared(self, key: int) -> bool:
         """Take the shared session lock on `key` without waiting; return whether it was taken."""
         return self._scalar(_TRY_LOCK_SHARED, {"key": key}) is True
+
+    def lock_within(self, key: int, timeout: float) -> bool:
+        """Wait up to `timeout` seconds for the session lock on `key`; return whether taken.
+
+        The wait is PostgreSQL's `lock_timeout`, reset afterwards. A waiting exclusive
+        request also refuses later shared `try` requests on the key, so it is not starved.
+        """
+        milliseconds = max(1, round(timeout * 1000))
+        self._scalar(_SET_LOCK_TIMEOUT, {"timeout": f"{milliseconds}ms"})
+        try:
+            self._scalar(_LOCK, {"key": key})
+        except psycopg.errors.LockNotAvailable:
+            return False
+        finally:
+            self._scalar(_SET_LOCK_TIMEOUT, {"timeout": "0"})
+        return True
 
     def holds(self, key: int) -> bool:
         """Return whether this session still holds the lock on `key`, per pg_locks."""

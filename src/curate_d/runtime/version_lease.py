@@ -12,13 +12,19 @@ lock exclusively (`hold_exclusive`), which no live holder of either mode allows,
 if the version registered before the sweep's target. A build that predates the lease is
 unregistered, holds nothing, and so is never mistaken for a dead version.
 
-The lock is keyed by `version_lease_key` in the database holding the DBOS system tables,
-under the executor lease's connection settings and pooler constraint (lease.py).
+The promotion fence keeps DBOS's latest version from moving backwards under a sweep. The
+sweep holds it shared, taken once without waiting, across every fork and retirement
+(`hold_fence_shared`); promotion, the only way latest moves backwards, holds it exclusively
+across the change, waiting a bounded time (`hold_fence_exclusive`).
+
+The locks are keyed by `version_lease_key` and `promotion_fence_key` in the database
+holding the DBOS system tables, under the executor lease's connection settings and pooler
+constraint (lease.py).
 """
 
 import asyncio
-from collections.abc import AsyncIterator, Callable, Mapping
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -39,15 +45,20 @@ from curate_d.runtime.lease import (
     connect_dedicated,
     connect_session,
     lease_conninfo,
+    promotion_fence_key,
     version_lease_key,
 )
 
 __all__ = [
     "LockMode",
+    "PromotionFenceTimeoutError",
     "StandaloneVersionLease",
     "VersionHold",
     "VersionRegistryError",
     "hold_exclusive",
+    "hold_fence_exclusive",
+    "hold_fence_shared",
+    "promotion_fence_key",
     "register_version",
     "registrations",
     "standalone_version_lease",
@@ -86,6 +97,10 @@ class VersionRegistryError(RuntimeError):
     """`lease_versions` could not be written or read; the cause is chained."""
 
 
+class PromotionFenceTimeoutError(RuntimeError):
+    """The promotion fence stayed held, by a sweep, past the wait; nothing was promoted."""
+
+
 class ExclusiveLockSession(Protocol):
     """A dedicated session able to take one lock exclusively and see who else holds it."""
 
@@ -99,6 +114,38 @@ class ExclusiveLockSession(Protocol):
 
     def holder_mode(self, key: int) -> str | None:
         """Return the mode another session holds `key` in: `exclusive`, `shared` or None."""
+        ...
+
+    def close(self) -> None:
+        """Close the session, releasing every lock it holds."""
+        ...
+
+
+class SharedFenceSession(Protocol):
+    """A dedicated session able to take one lock shared without waiting."""
+
+    def try_lock_shared(self, key: int) -> bool:
+        """Take the shared lock on `key` without waiting; return whether it was taken."""
+        ...
+
+    def unlock_shared(self, key: int) -> None:
+        """Release this session's shared lock on `key`."""
+        ...
+
+    def close(self) -> None:
+        """Close the session, releasing every lock it holds."""
+        ...
+
+
+class ExclusiveFenceSession(Protocol):
+    """A dedicated session able to wait a bounded time for one lock, exclusively."""
+
+    def lock_within(self, key: int, timeout: float) -> bool:
+        """Wait up to `timeout` seconds for the lock on `key`; return whether it was taken."""
+        ...
+
+    def unlock(self, key: int) -> None:
+        """Release this session's lock on `key`."""
         ...
 
     def close(self) -> None:
@@ -214,6 +261,101 @@ async def hold_exclusive(
             await asyncio.to_thread(session.close)
         except Exception as error:  # A broken session has already released its lock.
             logger.debug("version_lease.close_failed", error_type=type(error).__name__)
+
+
+def _connect_fence(settings: Settings, purpose: str) -> PostgresLeaseSession:
+    """Open the dedicated session one side holds the promotion fence on."""
+    return connect_session(
+        lease_conninfo(settings), application_name=f"{APPLICATION_NAME} promotion fence {purpose}"
+    )
+
+
+@asynccontextmanager
+async def hold_fence_shared(
+    settings: Settings,
+    *,
+    connect: Callable[[], SharedFenceSession] | None = None,
+    application_name: str = APPLICATION_NAME,
+) -> AsyncIterator[bool]:
+    """Try once to hold the promotion fence shared, on a dedicated connection.
+
+    Yields whether it was taken, and holds it until the block exits. A promotion holding
+    the fence, or waiting for it, refuses it. On exit, attempt to release it and close
+    the session, suppressing cleanup errors. Exceptions from the caller's block propagate.
+
+    Args:
+        settings: Resolved configuration naming the system database.
+        connect: Opens the session; a dedicated connection to the system database when
+            omitted. Substituted by tests that must not connect.
+        application_name: The DBOS application name, part of the lock key.
+
+    Raises:
+        psycopg.Error: Connecting or taking the lock failed.
+    """
+    key = promotion_fence_key(application_name)
+    session = await asyncio.to_thread(connect or (lambda: _connect_fence(settings, "sweep")))
+    try:
+        if not await asyncio.to_thread(session.try_lock_shared, key):
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            try:
+                await asyncio.to_thread(session.unlock_shared, key)
+            except Exception as error:  # Closing the session below releases it regardless.
+                logger.warning("promotion_fence.unlock_failed", error_type=type(error).__name__)
+    finally:
+        try:
+            await asyncio.to_thread(session.close)
+        except Exception as error:  # A broken session has already released its lock.
+            logger.debug("promotion_fence.close_failed", error_type=type(error).__name__)
+
+
+@contextmanager
+def hold_fence_exclusive(
+    settings: Settings,
+    *,
+    timeout: float,
+    connect: Callable[[], ExclusiveFenceSession] | None = None,
+    application_name: str = APPLICATION_NAME,
+) -> Iterator[None]:
+    """Hold the promotion fence exclusively for the block, waiting up to `timeout` seconds.
+
+    While it waits, a sweep's shared attempt is refused, so sweeps cannot starve it. On
+    exit, attempt to release it and close the session, suppressing cleanup errors.
+
+    Args:
+        settings: Resolved configuration naming the system database.
+        timeout: Seconds to wait for sweeps holding the fence to finish.
+        connect: Opens the session; a dedicated connection to the system database when
+            omitted. Substituted by tests that must not connect.
+        application_name: The DBOS application name, part of the lock key.
+
+    Raises:
+        PromotionFenceTimeoutError: A sweep still held the fence after `timeout` seconds.
+        psycopg.Error: Connecting or waiting for the lock failed.
+    """
+    key = promotion_fence_key(application_name)
+    session = (connect or (lambda: _connect_fence(settings, "promote")))()
+    try:
+        if not session.lock_within(key, timeout):
+            raise PromotionFenceTimeoutError(
+                f"a recovery sweep still held the promotion fence after {timeout:g}s; "
+                f"nothing was promoted. Retry once it finishes, or with a longer --fence-timeout"
+            )
+        try:
+            yield
+        finally:
+            try:
+                session.unlock(key)
+            except Exception as error:  # Closing the session below releases it regardless.
+                logger.warning("promotion_fence.unlock_failed", error_type=type(error).__name__)
+    finally:
+        try:
+            session.close()
+        except Exception as error:  # A broken session has already released its lock.
+            logger.debug("promotion_fence.close_failed", error_type=type(error).__name__)
 
 
 class StandaloneVersionLease(ExecutorLease):

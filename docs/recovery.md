@@ -24,7 +24,8 @@ The sweep never touches a version that some process still runs.
 | Target | The target is DBOS's latest version, read when the sweep starts. Only a sweeper running the target forks or retires. | A sweeper on another version counts those rows as `skipped` and still re-enqueues dead executors' rows. |
 | Registration | A version's rows are forked only if it registered in `lease_versions` before the target. Workers register before launch. | Unregistered: `recovery_sweep.unregistered_version`. Registered after the target, as after a rollback: `recovery_sweep.newer_than_target`. Both are left alone. |
 | Version lock | The sweep forks or retires a version's rows only while it holds that version's lock exclusively. Every live worker holds its version shared. | Held: `recovery_sweep.version_live`, with the mode held (`shared` for live workers, `exclusive` for another sweep). A lock error puts the rows in `failed`. |
-| Latest re-read | Once it holds a version's lock, the sweep reads the latest version again. | If it changed, nothing more is forked, and the rest is counted as `skipped`. |
+| Promotion fence | Every fork and retirement runs under the promotion fence, held shared and tried once without waiting. Promotion holds it exclusively. | A promotion holds it or waits for it: every fork and retire row is `skipped` (`recovery_sweep.skipped`, reason `a promotion is in progress`); dead executors' rows are still re-enqueued. A fence error puts the rows in `failed`. |
+| Latest re-read | Once it holds the fence, and again once it holds each version's lock, the sweep reads the latest version again. | If it changed, nothing more is forked, and the rest is counted as `skipped`. |
 | Executor lock | A PENDING row is re-enqueued only while the sweep holds its executor's lease. | Live executor: `left_running`. Unknown liveness: `failed`. |
 | Queue | A row whose queue is NULL or DBOS's internal queue is never forked or re-enqueued, because every worker dequeues the internal queue. | `recovery_sweep.queue_refused`, in `failed`. Retiring such a row still cancels it. |
 
@@ -56,8 +57,18 @@ kubectl -n <namespace> exec statefulset/curate-d-worker-io -- python -m curate_d
   - it refuses a version DBOS does not list for this application;
   - it refuses a local clock more than 1 s off the database's, because DBOS stamps the
     promotion with the caller's clock;
+  - it changes the latest version only while it holds the promotion fence exclusively, so no
+    sweep forks onto the version it replaced; it waits up to `--fence-timeout` seconds
+    (default 120) for a sweep mid-batch, and new sweeps skip their forks while it waits;
   - it logs the version it replaced;
   - it exits non-zero unless the latest version reads back as `<version>`.
+
+  | Exit | Meaning |
+  | --- | --- |
+  | `0` | Promoted; the latest version reads back as `<version>`. |
+  | `1` | Refused, failed, or read back as another version. A read-back mismatch happens after the write. |
+  | `2` | Invalid arguments. |
+  | `3` | A recovery sweep held the promotion fence past `--fence-timeout`; nothing was written. Retry. |
 - **When not to promote:**
   - a first deploy of a new build, which its first launch registers as latest;
   - a rollout still in progress, because the newer replicas may only be crash-looping.
@@ -65,6 +76,14 @@ kubectl -n <namespace> exec statefulset/curate-d-worker-io -- python -m curate_d
 Workers never promote themselves. A worker can't tell a rollback from newer replicas
 crash-looping mid-rollout (the I/O and CPU StatefulSets roll independently), and a wrong
 promotion persists until someone promotes again.
+
+The fence matters on a rollback. A sweep forks only versions registered before its target, so
+had it kept forking onto the replaced newer build after the promotion, the restored build's
+sweeper could never fork that work back, and it would wait for the roll-forward. A roll-forward
+is not fenced: a new build's first launch makes it latest without promotion, and a sweep
+mid-batch finishes forking onto the old target. That heals itself, because the old target
+registered before the new one: the new build's sweeper forks those rows once the old build's
+workers are gone.
 
 After a rollback, the newer build's rows are `newer_than_target` and stay put. Rolling forward,
 then promoting that build if it isn't latest, lets its workers resume them through startup
@@ -143,7 +162,8 @@ These are left to the follow-up `harden-recovery-sweep`.
 
 - **Unfenced writes.** Forks, cancels and re-enqueues commit on DBOS's own connections, not on
   the lock's session. A lost lock backend can therefore let a source-version worker start
-  mid-sweep. The lease monitor polls every 5 s, so a loss can also precede its detection.
+  mid-sweep, and a lost promotion fence backend can let a promotion land mid-batch. The lease
+  monitor polls every 5 s, so a loss can also precede its detection.
 - **No replay compatibility check.** A fork onto code that can't replay the original's
   checkpoints isn't prevented. Review a version bump for replay compatibility.
 - **The fork boundary.** A fork copies step outputs only. A ledger transaction that committed

@@ -7,6 +7,7 @@ from curate_d.runtime.sweep import ENQUEUED, RecoveryControl
 from curate_d.runtime.version_lease import LockMode
 from tests.unit.runtime.fake_lease import FakeLockServer
 from tests.unit.runtime.fake_recovery import (
+    FakePromotionFence,
     FakeRecoveryControl,
     FakeRegistrations,
     FakeVersionHolds,
@@ -149,3 +150,29 @@ async def test_version_holds_raise_on_a_lock_error() -> None:
     with pytest.raises(OSError):
         async with holds("v1"):
             pytest.fail("the block must not run")
+
+
+def test_a_bounded_wait_answers_as_a_try_and_records_its_timeout() -> None:
+    """Nothing is released during a fake wait, so a shared holder refuses it."""
+    server = FakeLockServer()
+    shared, waiter = server.connect(), server.connect()
+    assert shared.try_lock_shared(KEY)
+    assert not waiter.lock_within(KEY, 3.0)
+    shared.unlock_shared(KEY)
+    assert waiter.lock_within(KEY, 4.0)
+    assert server.waits == [3.0, 4.0]
+
+
+async def test_the_promotion_fence_releases_on_every_exit_and_refuses_while_promoting() -> None:
+    """A taken fence is released even when its block raises; a promotion refuses it."""
+    fence = FakePromotionFence()
+    with pytest.raises(RuntimeError):
+        async with fence() as fenced:
+            assert fenced and fence.held
+            raise RuntimeError("fork failed")
+    assert not fence.held
+    assert fence.events == ["fence:hold", "fence:release"]
+    fence.promoting = True
+    async with fence() as fenced:
+        assert not fenced
+    assert fence.attempts == 2

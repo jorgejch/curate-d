@@ -4,7 +4,8 @@ Models both lock modes: many sessions may hold a key shared, and an exclusive ho
 excludes every other session in either mode, as PostgreSQL's advisory locks do.
 Exclusive locks record `lease-acquired` and `lease-released`; shared locks record
 `version-shared-acquired` and `version-shared-released`, so a test can tell an executor
-key's events from a version key's.
+key's events from a version key's. A bounded wait (`lock_within`) never waits: it answers
+as a `try_lock` would at the end of its timeout, with nothing released in between.
 """
 
 import threading
@@ -30,6 +31,8 @@ class FakeLockServer:
         """Lock attempts to refuse, as if another session held the key."""
         self.fail_probes = False
         """Make every `holds` check fail, as a dropped connection would."""
+        self.waits: list[float] = []
+        """The timeout of every bounded wait, in order."""
         self._mutex = threading.Lock()
 
     def connect(self) -> "FakeSession":
@@ -85,6 +88,11 @@ class FakeSession:
         if holder is self:
             self.server.events.append("lease-acquired")
         return holder is self
+
+    def lock_within(self, key: int, timeout: float) -> bool:
+        """Answer as a wait that nothing released before `timeout` would."""
+        self.server.waits.append(timeout)
+        return self.try_lock(key)
 
     def try_lock_shared(self, key: int) -> bool:
         self._check()
