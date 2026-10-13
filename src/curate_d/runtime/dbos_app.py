@@ -120,17 +120,23 @@ def configure(settings: Settings, *, executor_id: str | None = None) -> DBOS:
     return DBOS(config=build_dbos_config(settings, executor_id=executor_id))
 
 
-def client(settings: Settings) -> DBOSClient:
+def client(settings: Settings, *, retry_connection_errors: bool = True) -> DBOSClient:
     """Build a client of the workflow system database, for processes that do not run workflows.
 
     The control plane enqueues work, reads workflow outcomes and adjusts queue limits
     through it; it never launches DBOS, so it neither recovers nor executes anything.
     Lazy, so building one needs no database: a control plane starting during a database
     outage stays live, and readiness reports the outage.
+
+    Args:
+        settings: Resolved configuration.
+        retry_connection_errors: False raises a lost connection instead of blocking until
+            it recovers, for a caller with a deadline such as a worker's shutdown.
     """
     return DBOSClient(
         system_database_url=system_database_url(settings),
         dbos_system_schema=SYSTEM_SCHEMA,
         application_name=application_name(settings.environment),
         lazy=True,
+        retry_connection_errors=retry_connection_errors,
     )

@@ -12,11 +12,11 @@ import threading
 
 import pytest
 from dbos import DBOS
-from dbos._dbos import _get_dbos_instance
+from sqlalchemy.exc import OperationalError
+from structlog.testing import capture_logs
 
 from curate_d.config import Settings
 from curate_d.runtime import dbos_app
-from curate_d.runtime.dbos_app import configure
 from curate_d.runtime.identity import EXECUTOR_ID_ENV, POD_NAME_ENV, ExecutorIdentityError
 from curate_d.runtime.lease import (
     ExecutorLease,
@@ -97,6 +97,59 @@ def locks() -> FakeLockServer:
     return FakeLockServer()
 
 
+class _DrainClient:
+    """Answer the drain's PENDING query from a fixed list, or fail as a lost database would."""
+
+    def __init__(self) -> None:
+        """Start with nothing left running and no failure."""
+        self.pending: list[str] = []
+        self.failure: Exception | None = None
+        self.queries: list[dict[str, object]] = []
+        self.retries: list[bool] = []
+        self.destroyed = 0
+
+    def list_workflows(
+        self,
+        *,
+        status: str,
+        executor_id: list[str],
+        limit: int,
+        load_input: bool,
+        load_output: bool,
+    ) -> list[str]:
+        """Record the query and return up to `limit` pending rows, or raise the failure."""
+        self.queries.append(
+            {
+                "status": status,
+                "executor_id": executor_id,
+                "limit": limit,
+                "load_input": load_input,
+                "load_output": load_output,
+            }
+        )
+        if self.failure is not None:
+            raise self.failure
+        return self.pending[:limit]
+
+    def destroy(self) -> None:
+        """Count the client's teardown."""
+        self.destroyed += 1
+
+
+@pytest.fixture
+def drain_client(monkeypatch: pytest.MonkeyPatch) -> _DrainClient:
+    """Substitute the drain's system-database client with one that finds nothing running."""
+    fake = _DrainClient()
+
+    def build(settings: Settings, *, retry_connection_errors: bool = True) -> _DrainClient:
+        """Return the shared fake, recording whether connection errors were to be retried."""
+        fake.retries.append(retry_connection_errors)
+        return fake
+
+    monkeypatch.setattr(dbos_app, "client", build)
+    return fake
+
+
 def test_queues_are_restricted_before_launch(calls: list[tuple[str, object]]) -> None:
     """DBOS reads the listen set at launch; setting it after leaves a window open."""
     worker_main.run(Settings(), WorkerProfile.IO, block=False)
@@ -144,7 +197,7 @@ def test_the_executor_identity_is_passed_to_dbos(calls: list[tuple[str, object]]
 
 
 def test_a_blocking_worker_stops_when_signalled(
-    calls: list[tuple[str, object]], monkeypatch: pytest.MonkeyPatch
+    calls: list[tuple[str, object]], monkeypatch: pytest.MonkeyPatch, drain_client: _DrainClient
 ) -> None:
     """SIGTERM must drain rather than orphan workflows as PENDING on a retired version."""
     destroyed: list[int] = []
@@ -208,7 +261,10 @@ def test_a_contended_identity_never_launches(
 
 
 def test_a_clean_shutdown_releases_the_lease_after_the_drain(
-    calls: list[tuple[str, object]], monkeypatch: pytest.MonkeyPatch, locks: FakeLockServer
+    calls: list[tuple[str, object]],
+    monkeypatch: pytest.MonkeyPatch,
+    locks: FakeLockServer,
+    drain_client: _DrainClient,
 ) -> None:
     """Release last, so a successor cannot recover work still draining here."""
     monkeypatch.setattr(
@@ -237,7 +293,9 @@ def test_an_unfinished_drain_keeps_the_lease_until_exit(
     calls: list[tuple[str, object]], monkeypatch: pytest.MonkeyPatch, locks: FakeLockServer
 ) -> None:
     """Workflows still running at the deadline still run under this identity."""
-    monkeypatch.setattr(worker_main, "_drain_dbos", lambda timeout_seconds: False)
+    monkeypatch.setattr(
+        worker_main, "_drain_dbos", lambda settings, executor_id, timeout_seconds: False
+    )
     stop = threading.Event()
     stop.set()
     worker_main.run(
@@ -255,12 +313,18 @@ def test_losing_the_lease_stops_the_worker_without_draining(
 ) -> None:
     """Fail fast: another process may already be recovering this identity's workflows."""
     drains: list[int] = []
+    destroyed: list[int] = []
 
-    def drain(timeout_seconds: int) -> bool:
+    def drain(settings: Settings, executor_id: str, timeout_seconds: int) -> bool:
         drains.append(timeout_seconds)
         return True
 
     monkeypatch.setattr(worker_main, "_drain_dbos", drain)
+    monkeypatch.setattr(
+        DBOS,
+        "destroy",
+        lambda workflow_completion_timeout_sec: destroyed.append(workflow_completion_timeout_sec),
+    )
     monkeypatch.setattr(worker_main, "_install_shutdown_handler", lambda stop: None)
     locks.fail_probes = True
     with pytest.raises(ExecutorLeaseLostError):
@@ -270,7 +334,8 @@ def test_losing_the_lease_stops_the_worker_without_draining(
             stop=threading.Event(),
             lease_factory=locks.factory,
         )
-    assert drains == [0]
+    assert destroyed == [0], "DBOS was not shut down at once"
+    assert drains == [], "the drain asks the database, the likeliest thing to have been lost"
 
 
 def test_main_exits_at_once_when_the_lease_is_lost(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -294,16 +359,38 @@ def test_main_exits_at_once_when_the_lease_is_lost(monkeypatch: pytest.MonkeyPat
     assert exits == [worker_main.EXIT_LEASE_LOST]
 
 
-def test_the_drain_reports_workflows_left_running(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pins DBOS internals: ``_active_workflows_set.activeList()`` on the instance."""
-    DBOS.destroy()
-    monkeypatch.setenv(EXECUTOR_ID_ENV, "drain-pin")
-    configure(Settings())
-    _get_dbos_instance()._active_workflows_set.add("still-running")
-    assert worker_main._drain_dbos(0) is False
-    configure(Settings())
-    assert worker_main._drain_dbos(0) is True
-    assert worker_main._drain_dbos(0) is True, "no instance at all means nothing is running"
+def test_the_drain_reports_workflows_left_running(
+    monkeypatch: pytest.MonkeyPatch, drain_client: _DrainClient
+) -> None:
+    """A PENDING row under this executor, or no answer at all, is not a finished drain."""
+    destroyed: list[int] = []
+    monkeypatch.setattr(
+        DBOS,
+        "destroy",
+        lambda workflow_completion_timeout_sec: destroyed.append(workflow_completion_timeout_sec),
+    )
+    settings = Settings()
+
+    drain_client.pending = ["still-running"]
+    assert worker_main._drain_dbos(settings, "drain-pin", 5) is False
+    drain_client.pending = []
+    assert worker_main._drain_dbos(settings, "drain-pin", 5) is True
+    drain_client.failure = OperationalError("SELECT", {}, ConnectionError("unreachable"))
+    with capture_logs() as events:
+        assert worker_main._drain_dbos(settings, "drain-pin", 5) is False
+
+    assert destroyed == [5, 5, 5], "DBOS must be shut down before the database is asked"
+    assert drain_client.queries[0] == {
+        "status": "PENDING",
+        "executor_id": ["drain-pin"],
+        "limit": 1,
+        "load_input": False,
+        "load_output": False,
+    }
+    assert drain_client.retries == [False, False, False]
+    assert drain_client.destroyed == 3
+    assert [event["event"] for event in events] == ["worker.drain_state_unknown"]
+    assert events[0]["log_level"] == "error"
 
 
 def test_the_version_is_registered_before_the_lease(
@@ -340,7 +427,9 @@ def test_an_unfinished_drain_keeps_the_version_key_too(
     calls: list[tuple[str, object]], monkeypatch: pytest.MonkeyPatch, locks: FakeLockServer
 ) -> None:
     """Workflows still running mean the version is still live; the sweep must see it."""
-    monkeypatch.setattr(worker_main, "_drain_dbos", lambda timeout_seconds: False)
+    monkeypatch.setattr(
+        worker_main, "_drain_dbos", lambda settings, executor_id, timeout_seconds: False
+    )
     stop = threading.Event()
     stop.set()
     worker_main.run(
