@@ -11,7 +11,7 @@ Workflows strand in two ways, and nothing in DBOS recovers either on its own:
 
 The recovery sweep (`runtime/sweep.py`) handles both. It forks a retired version's rows onto
 the latest version, under a deterministic successor ID, then cancels the originals. It
-re-enqueues a dead executor's rows on their own queues. It runs on the `recovery-sweep`
+resumes a dead executor's rows onto their own queues. It runs on the `recovery-sweep`
 persisted schedule on the I/O profile (`recovery_sweep_schedule`, default every ten minutes),
 and on demand through the operator sweep.
 
@@ -26,17 +26,48 @@ The sweep never touches a version that some process still runs.
 | Version lock | The sweep forks or retires a version's rows only while it holds that version's lock exclusively. Every live worker holds its version shared. | Held: `recovery_sweep.version_live`, with the mode held (`shared` for live workers, `exclusive` for another sweep). A lock error puts the rows in `failed`. |
 | Promotion fence | Every fork and retirement runs under the promotion fence, held shared and tried once without waiting. Promotion holds it exclusively. | A promotion holds it or waits for it: every fork and retire row is `skipped` (`recovery_sweep.skipped`, reason `a promotion is in progress`); dead executors' rows are still re-enqueued. A fence error puts the rows in `failed`. |
 | Latest re-read | Once it holds the fence, and again once it holds each version's lock, the sweep reads the latest version again. | If it changed, nothing more is forked, and the rest is counted as `skipped`. |
-| Executor lock | A PENDING row is re-enqueued only while the sweep holds its executor's lease. | Live executor: `left_running`. Unknown liveness: `failed`. |
-| Queue | A row whose queue is NULL or DBOS's internal queue is never forked or re-enqueued, because every worker dequeues the internal queue. | `recovery_sweep.queue_refused`, in `failed`. Retiring such a row still cancels it. |
+| Executor lock | A PENDING row is re-enqueued only while the sweep holds its executor's lease. Under it, the sweep re-reads the row, resumes it only if it is still PENDING under that executor, and reads it back. It resumes a row at most `MAX_SWEEP_REDISPATCHES` (10) times per application version, counted in the row's workflow attributes, because a resume resets DBOS's own recovery-attempt count. | Live executor: `left_running`. Unknown liveness: `failed`. Changed since listing: left alone. Read back neither ENQUEUED nor running elsewhere: `recovery_sweep.redispatch_unverified`, in `failed`. At the cap: `recovery_sweep.redispatch_cap`, in `failed`, not resumed. |
+| Queue | A row is forked or re-enqueued only onto one of curate.d's declared queues (`QueueName` in `runtime/queues.py`). A NULL queue is refused because DBOS sends a queue-less resume to its internal queue, which every worker dequeues; DBOS's internal queue is not a declared queue. | `recovery_sweep.queue_refused`, in `failed`. Retiring such a row still cancels it. |
+| Lock sessions | Before each fork, and again before that fork's cancel, the sweep asks the promotion fence's session and the source version lock's session whether they still hold. After the cancel, the original must read CANCELLED. | Lost before the fork: the row is `failed`, `recovery_sweep.version_lock_lost`, and the rest of the batch is `skipped`. Lost after it: the original is still cancelled, then the same. Not CANCELLED: `recovery_sweep.lineage_unverified`, in `failed`. The next tick's retire plan finishes the lineage. |
 
 A stale tick of `recovery-sweep` itself is cancelled under the same gates (`retired_ticks`),
 never forked or re-enqueued; the next tick does its work. Rows past DBOS's recovery attempts
 (`MAX_RECOVERY_ATTEMPTS_EXCEEDED`) are left for an operator. `DELAYED` rows wait until they
-become `ENQUEUED`.
+become `ENQUEUED`. A resumed row's timeout clock restarts: DBOS clears its deadline on resume.
 
 Every tick reports `left_running` of at least 1, because its own row is PENDING on a live
-executor. Don't alert on it. Alert on `recovery_sweep.fork_failed`,
-`recovery_sweep.unregistered_version` and `recovery_sweep.newer_than_target`.
+executor. Don't alert on it.
+
+## Alerts
+
+Alert on these events:
+
+- `recovery_sweep.fork_failed`: one row could not be forked; see Triage.
+- `recovery_sweep.unregistered_version`: rows of a build from before the version lease; see
+  [reset.md](reset.md#after-the-version-lease-first-rolls-out).
+- `recovery_sweep.newer_than_target`: rows of a build newer than latest, after a rollback;
+  roll forward, or promote, as under Rollback and roll-forward.
+- `recovery_sweep.redispatch_unverified`: a resumed row read back neither ENQUEUED nor
+  running elsewhere. Inspect it (`DBOSClient.list_workflows(workflow_ids=[<id>])`); the next
+  tick tries again while it is still PENDING under the dead executor.
+- `recovery_sweep.redispatch_cap`: a row was resumed `MAX_SWEEP_REDISPATCHES` times under its
+  version, and most likely kills the worker that runs it. Find why from that worker's logs,
+  then cancel the row, or fix it and clear its count (Triage).
+- `recovery_sweep.version_lock_lost`: a lock session dropped mid-batch; the batch stopped and
+  the next tick carries on. If it repeats, check the database and pooler connections.
+- `recovery_sweep.lineage_unverified`: a forked original did not read CANCELLED after its
+  cancel. The next tick retires it again; if it stays live, cancel it with
+  `DBOSClient.cancel_workflow(<id>)`, since its successor carries the work.
+- `worker.schedule_reconciliation_unverified`: a worker lost the schedule authority, or saw
+  the latest version move, while writing schedules. A worker on the latest version repairs the
+  rows within `schedule_reconciliation_interval_seconds`; if it repeats, check that an I/O
+  worker of the latest version runs.
+- `worker.schedule_reconciliation_failed`: a periodic reconciliation raised (WARNING for a
+  database error, ERROR for anything else). The next interval retries; if it repeats, read
+  the error.
+- `worker.drain_state_unknown`: a stopping worker could not read whether it left workflows
+  running, so it keeps its executor lease until the process exits. If it repeats, check the
+  database's reachability at shutdown.
 
 ## Rollback and roll-forward
 
@@ -50,7 +81,8 @@ kubectl -n <namespace> exec statefulset/curate-d-worker-io -- python -m curate_d
 ```
 
 - **When:** before the target build's workers start, so they apply their schedules at startup.
-  Promoted afterwards, restart them.
+  Promoted afterwards, they are re-applied within `schedule_reconciliation_interval_seconds`
+  (default 10 min); restart the I/O workers to apply them at once.
 - **Where:** from an image that has the module. A build from before the recovery sweep lacks it,
   so run the command from a current image against the same database.
 - **What it checks:**
@@ -142,6 +174,27 @@ dbos = client(get_settings())
 dbos.pause_schedule("recovery-sweep")  # dbos.resume_schedule("recovery-sweep") undoes it
 ```
 
+**Changing a schedule during an incident.** The declarations in code and their settings are
+the only source of a schedule's cron, queue and context: a hand edit to a DBOS schedule row is
+reverted within one `schedule_reconciliation_interval_seconds`. Pause the schedule, which
+survives reconciliation, or change `recovery_sweep_schedule` and restart the I/O workers.
+
+**Clearing a row's redispatch count.** The sweep keeps it in the row's workflow attributes,
+under `curate_d.recovery_redispatches` and `curate_d.recovery_redispatch_version`, and starts
+again from zero under a new application version. To let it resume a row at the cap under the
+same version, remove both keys. An update replaces every attribute, so keep the others:
+
+```python
+from curate_d.config import get_settings
+from curate_d.runtime.dbos_app import client
+
+dbos = client(get_settings())
+[status] = dbos.list_workflows(workflow_ids=["<id>"])
+counter = {"curate_d.recovery_redispatches", "curate_d.recovery_redispatch_version"}
+kept = {key: value for key, value in (status.attributes or {}).items() if key not in counter}
+dbos.update_workflow_attributes("<id>", kept)
+```
+
 ## Integration tests and the local latest version
 
 The recovery and promotion integration tests promote their own test versions, and restore
@@ -160,10 +213,16 @@ prints that version.
 
 These are left to the follow-up `harden-recovery-sweep`.
 
-- **Unfenced writes.** Forks, cancels and re-enqueues commit on DBOS's own connections, not on
-  the lock's session. A lost lock backend can therefore let a source-version worker start
-  mid-sweep, and a lost promotion fence backend can let a promotion land mid-batch. The lease
-  monitor polls every 5 s, so a loss can also precede its detection.
+- **Writes outside the lock.** Forks, cancels and resumes still commit on DBOS's own
+  connections, not on the lock's session. The sweep detects a lost fence or version lock
+  before each fork and before its cancel, stops the batch (`recovery_sweep.version_lock_lost`),
+  and verifies every resume and cancel by reading the row back. What remains is the window
+  between a check and the write it guards. A source-version worker that starts there can
+  revive an original as it is forked: the original runs until its next step, where the cancel
+  stops it, and the steps it completed past the fork point run again under the successor (the
+  fork boundary, below). A promotion that lands there lets that one fork go to the replaced
+  target. The lease monitor polls every 5 s, so a worker can also run briefly after losing
+  its lease.
 - **No replay compatibility check.** A fork onto code that can't replay the original's
   checkpoints isn't prevented. Review a version bump for replay compatibility.
 - **The fork boundary.** A fork copies step outputs only. A ledger transaction that committed
