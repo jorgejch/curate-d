@@ -348,8 +348,12 @@ async def test_the_checkpoint_walk_passes_kept_workflows_rather_than_stalling_on
     await _seed_checkpoint(ledger_engine, workflow_id=kept, created_at=aged)
     await _seed_checkpoint(ledger_engine, workflow_id=orphaned, created_at=aged)
 
-    deleted = prune_datasource_checkpoints(
-        settings, retention_window(settings, now=NOW).cutoff_epoch_ms, batch_size=1
+    # Off the event loop, as the prune runs it: DBOS refuses its synchronous calls on one.
+    deleted = await asyncio.to_thread(
+        prune_datasource_checkpoints,
+        settings,
+        retention_window(settings, now=NOW).cutoff_epoch_ms,
+        batch_size=1,
     )
 
     assert deleted >= 1

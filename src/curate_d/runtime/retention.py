@@ -186,6 +186,7 @@ def prune_datasource_checkpoints(
     Run after `prune_completed_workflows`, so the workflows it just removed are the ones
     found missing. Only rows older than the cutoff go: a deterministic workflow ID enqueued
     again after its first run was pruned writes fresh checkpoints, and those must survive.
+    Synchronous, like `prune_completed_workflows`: call it off the event loop.
 
     Returns:
         How many checkpoint rows were deleted; zero when no datasource has ever created
