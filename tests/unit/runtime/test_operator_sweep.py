@@ -227,3 +227,57 @@ def test_lease_loss_takes_precedence_over_failed_rows(
     assert [event["event"] for event in events] == ["operator_sweep.stopped_on_lease_loss"]
     assert harness.lease.released
     assert harness.client.destroyed
+
+
+def test_a_latest_read_failure_closes_the_client_before_leasing(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An unavailable target aborts without taking authority, sweeping or printing an outcome."""
+    error = RuntimeError("latest unavailable")
+    monkeypatch.setattr(
+        harness.client, "get_latest_application_version_async", AsyncMock(side_effect=error)
+    )
+    acquire = Mock(wraps=harness.lease.acquire)
+    monkeypatch.setattr(harness.lease, "acquire", acquire)
+
+    with pytest.raises(RuntimeError) as raised:
+        operator_sweep.main(["--target-version", OWN])
+    assert raised.value is error
+    acquire.assert_not_called()
+    assert harness.sweeps == []
+    assert harness.client.destroyed
+    assert capsys.readouterr().out == ""
+
+
+def test_an_operator_summary_preserves_every_outcome_value(
+    harness: _Harness, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Mixed outcomes retain their IDs, counters and escaped error text in valid JSON."""
+    harness.outcome = SweepOutcome(
+        reenqueued=("orphan",),
+        forked=(("source", "successor"),),
+        retired=("ancestor",),
+        left_running=2,
+        failed=(("failed", 'database said "no"\nretry later'),),
+        skipped=("off-target",),
+        unregistered=("legacy",),
+        newer_than_target=("newer",),
+        version_live=3,
+        retired_ticks=("tick",),
+    )
+
+    assert operator_sweep.main(["--target-version", OWN]) == operator_sweep.EXIT_FAILED_ROWS
+    assert json.loads(capsys.readouterr().out) == {
+        "reenqueued": ["orphan"],
+        "forked": [["source", "successor"]],
+        "retired": ["ancestor"],
+        "left_running": 2,
+        "failed": [["failed", 'database said "no"\nretry later']],
+        "skipped": ["off-target"],
+        "unregistered": ["legacy"],
+        "newer_than_target": ["newer"],
+        "version_live": 3,
+        "retired_ticks": ["tick"],
+    }
+    assert harness.lease.released
+    assert harness.client.destroyed

@@ -189,3 +189,49 @@ def test_a_failed_database_clock_read_closes_its_connection(
         promote._database_now(Settings())
     assert raised.value is error
     connection.close.assert_called_once_with()
+
+
+def test_a_post_promotion_read_failure_reports_failure_without_undoing_the_write(
+    client: _Client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read outage after promotion cannot be reported as success or rolled back silently."""
+    read = Mock(side_effect=[{"version_name": "v2"}, psycopg.OperationalError("read back failed")])
+    monkeypatch.setattr(client, "get_latest_application_version", read)
+
+    with capture_logs() as events:
+        assert promote.main(["v1"]) == promote.EXIT_REFUSED
+    assert client.promoted == ["v1"]
+    assert client.latest == "v1"
+    assert client.destroyed
+    assert [event["event"] for event in events] == ["promote.failed"]
+    assert "read back failed" in events[0]["error"]
+
+
+def test_a_clock_read_failure_refuses_promotion_and_closes_the_client(
+    client: _Client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreadable database clock never permits the operator to write a promotion."""
+    monkeypatch.setattr(
+        promote, "_database_now", Mock(side_effect=psycopg.OperationalError("clock unavailable"))
+    )
+
+    assert promote.main(["v1"]) == promote.EXIT_REFUSED
+    assert client.promoted == []
+    assert client.latest == "v2"
+    assert client.destroyed
+
+
+def test_an_empty_version_catalog_refuses_before_checking_the_clock(
+    client: _Client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fresh database has no promotable build and requires no clock or write operation."""
+    client.versions = []
+    clock = Mock(side_effect=AssertionError("an unknown version must not check the clock"))
+    monkeypatch.setattr(promote, "_database_now", clock)
+
+    with capture_logs() as events:
+        assert promote.main(["v1"]) == promote.EXIT_REFUSED
+    clock.assert_not_called()
+    assert client.promoted == []
+    assert client.destroyed
+    assert "0 versions" in events[0]["reason"]

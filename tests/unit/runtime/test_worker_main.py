@@ -9,6 +9,7 @@ sequence itself is what gets asserted.
 
 import os
 import threading
+from unittest.mock import Mock
 
 import pytest
 from dbos import DBOS
@@ -436,3 +437,24 @@ def test_startup_failure_releases_both_worker_locks(
     assert locks.holders == {}
     assert not any(locks.shared.values())
     assert all(session.closed for session in locks.sessions)
+
+
+@pytest.mark.parametrize("profile", list(WorkerProfile))
+def test_registration_failure_stops_prepared_staging(
+    calls: list[tuple[str, object]],
+    monkeypatch: pytest.MonkeyPatch,
+    locks: FakeLockServer,
+    profile: WorkerProfile,
+) -> None:
+    """Neither worker profile leaks its staging supervisor when version registration fails."""
+    staging = Mock(spec=worker_main.StagingLifecycle)
+    monkeypatch.setattr(worker_main, "_start_staging", lambda *args: staging)
+    error = VersionRegistryError("registration unavailable")
+    monkeypatch.setattr(worker_main, "register_version", Mock(side_effect=error))
+
+    with pytest.raises(VersionRegistryError) as raised:
+        worker_main.run(Settings(), profile, block=False, lease_factory=locks.factory)
+    assert raised.value is error
+    staging.stop.assert_called_once_with()
+    assert locks.sessions == []
+    assert calls == []

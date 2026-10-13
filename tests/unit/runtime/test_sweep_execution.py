@@ -2,13 +2,14 @@
 
 import inspect
 from sqlite3 import IntegrityError as SQLiteIntegrityError
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from dbos import DBOS, DBOSClient
 from dbos._context import get_local_dbos_context
 from dbos._sys_db import WorkflowStatuses
 from dbos._utils import INTERNAL_QUEUE_NAME
+from psycopg.errors import UniqueViolation
 from sqlalchemy.exc import IntegrityError
 
 from curate_d.config import Settings
@@ -867,3 +868,297 @@ async def test_an_empty_sweep_never_reads_the_registry_or_takes_locks(
     assert registry.reads == 0
     assert holds.events == []
     assert locks.sessions == []
+
+
+@pytest.mark.parametrize("adapter", ["launched", "client"])
+@pytest.mark.parametrize("step_ids", [[], [4, 1, 3]])
+async def test_adapters_read_checkpoint_ids_without_loading_outputs(
+    monkeypatch: pytest.MonkeyPatch, adapter: str, step_ids: list[int]
+) -> None:
+    """Checkpoint discovery keeps every ID without loading potentially large outputs."""
+    client = Mock(spec=DBOSClient)
+    boundary = DBOS if adapter == "launched" else client
+    listing = AsyncMock(return_value=[{"function_id": step_id} for step_id in step_ids])
+    monkeypatch.setattr(boundary, "list_workflow_steps_async", listing)
+    guard = Mock()
+    control = (
+        DBOSRecoveryControl()
+        if adapter == "launched"
+        else ClientRecoveryControl(client, before_write=guard)
+    )
+
+    assert await control.step_ids(ORIGINAL) == step_ids
+    listing.assert_awaited_once_with(ORIGINAL, load_output=False)
+    guard.assert_not_called()
+
+
+async def test_the_client_adapter_maps_pending_rows_without_a_write_guard() -> None:
+    """Operator reads preserve routing, lineage and schedule without requiring a live lease."""
+    client = Mock(spec=DBOSClient)
+    row = workflow_status(
+        ORIGINAL,
+        status="ENQUEUED",
+        executor_id=None,
+        queue_name="maintenance",
+        queue_partition_key="provider-1",
+        was_forked_from=True,
+        schedule_name=RECOVERY_SCHEDULE_NAME,
+    )
+    client.list_workflows_async.return_value = [row]
+    guard = Mock()
+    control = ClientRecoveryControl(client, before_write=guard)
+
+    assert await control.list_pending() == (
+        PendingWorkflow(
+            ORIGINAL,
+            None,
+            "v1",
+            status="ENQUEUED",
+            queue_name="maintenance",
+            queue_partition_key="provider-1",
+            was_forked_from=True,
+            schedule_name=RECOVERY_SCHEDULE_NAME,
+        ),
+    )
+    client.list_workflows_async.assert_awaited_once_with(
+        status=["PENDING", "ENQUEUED"], load_input=False, load_output=False
+    )
+    guard.assert_not_called()
+
+
+async def test_the_client_adapter_returns_none_for_a_deleted_workflow() -> None:
+    """A missing workflow is returned as absent instead of indexing an empty listing."""
+    client = Mock(spec=DBOSClient)
+    client.list_workflows_async.return_value = []
+    guard = Mock()
+
+    assert await ClientRecoveryControl(client, before_write=guard).status(ORIGINAL) is None
+    client.list_workflows_async.assert_awaited_once_with(
+        workflow_ids=[ORIGINAL], load_input=False, load_output=False
+    )
+    guard.assert_not_called()
+
+
+@pytest.mark.parametrize("adapter", ["launched", "client"])
+async def test_adapters_preserve_fork_routing_and_restore_context_after_failure(
+    monkeypatch: pytest.MonkeyPatch, adapter: str
+) -> None:
+    """A failed fork forwards its routing and cannot leak its successor ID to later work."""
+    client = Mock(spec=DBOSClient)
+    boundary = DBOS if adapter == "launched" else client
+    error = RuntimeError("fork unavailable")
+    assigned: list[str] = []
+
+    async def fail(*args: object, **kwargs: object) -> None:
+        """Record the assigned successor inside the failing DBOS call."""
+        context = get_local_dbos_context()
+        assert context is not None
+        assigned.append(context.id_assigned_for_next_workflow)
+        raise error
+
+    fork = AsyncMock(side_effect=fail)
+    monkeypatch.setattr(boundary, "fork_workflow_async", fork)
+    guard = Mock()
+    control = (
+        DBOSRecoveryControl()
+        if adapter == "launched"
+        else ClientRecoveryControl(client, before_write=guard)
+    )
+    previous_context = get_local_dbos_context()
+    previous_id = (
+        None if previous_context is None else previous_context.id_assigned_for_next_workflow
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        await control.fork(
+            ORIGINAL,
+            SUCCESSOR,
+            5,
+            application_version="v2",
+            queue_name="transfer-large",
+            queue_partition_key="provider-1",
+        )
+    assert raised.value is error
+    fork.assert_awaited_once_with(
+        ORIGINAL,
+        5,
+        application_version="v2",
+        queue_name="transfer-large",
+        queue_partition_key="provider-1",
+    )
+    assert assigned == [SUCCESSOR]
+    assert get_local_dbos_context() is previous_context
+    if previous_context is not None:
+        assert previous_context.id_assigned_for_next_workflow == previous_id
+    if adapter == "client":
+        guard.assert_called_once_with()
+
+
+@pytest.mark.parametrize("step_ids, start_step", [([], 1), ([0], 1), ([4, 1, 3], 5)])
+async def test_recovery_resumes_after_the_highest_checkpoint(
+    step_ids: list[int], start_step: int
+) -> None:
+    """An empty or unordered checkpoint listing never skips or repeats committed work."""
+    control = FakeRecoveryControl([workflow_status(ORIGINAL)], steps={ORIGINAL: step_ids})
+
+    assert await sweep._recover_version(control, WORKFLOW, "v2") == (SUCCESSOR, True)
+    assert control.writes() == [
+        ("fork", ORIGINAL, SUCCESSOR, str(start_step)),
+        ("cancel", ORIGINAL),
+    ]
+
+
+@pytest.mark.parametrize("workflow_id_conflict", [True, False])
+async def test_a_concurrent_successor_repairs_only_a_workflow_id_conflict(
+    monkeypatch: pytest.MonkeyPatch, workflow_id_conflict: bool
+) -> None:
+    """A confirmed concurrent successor permits retirement only for the expected conflict."""
+    control = FakeRecoveryControl([workflow_status(ORIGINAL)])
+    error = IntegrityError(
+        "insert",
+        {},
+        SQLiteIntegrityError(
+            "UNIQUE constraint failed: workflow_status.workflow_uuid"
+            if workflow_id_conflict
+            else "UNIQUE constraint failed: workflow_status.name"
+        ),
+    )
+
+    async def concurrent_fork(*args: object, **kwargs: object) -> None:
+        """Publish the other sweeper's successor before reporting this insert's failure."""
+        control.rows[SUCCESSOR] = workflow_status(
+            SUCCESSOR, status="ENQUEUED", version="v2", forked_from=ORIGINAL
+        )
+        raise error
+
+    fork = AsyncMock(side_effect=concurrent_fork)
+    monkeypatch.setattr(control, "fork", fork)
+    if workflow_id_conflict:
+        assert await sweep._recover_version(control, WORKFLOW, "v2") == (SUCCESSOR, False)
+        assert control.writes() == [("cancel", ORIGINAL)]
+    else:
+        with pytest.raises(IntegrityError) as raised:
+            await sweep._recover_version(control, WORKFLOW, "v2")
+        assert raised.value is error
+        assert control.writes() == []
+        assert control.rows[ORIGINAL].status == "PENDING"
+    fork.assert_awaited_once()
+
+
+async def test_a_fork_that_publishes_no_successor_never_cancels_its_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful adapter return is insufficient without a committed matching successor."""
+    control = FakeRecoveryControl([workflow_status(ORIGINAL)])
+    fork = AsyncMock()
+    monkeypatch.setattr(control, "fork", fork)
+
+    with pytest.raises(ValueError, match="did not publish its expected successor"):
+        await sweep._recover_version(control, WORKFLOW, "v2")
+    fork.assert_awaited_once()
+    assert control.writes() == []
+    assert control.rows[ORIGINAL].status == "PENDING"
+
+
+async def test_a_retry_repairs_failed_cancellation_without_forking_again() -> None:
+    """A retry after deployment retires the ancestor and preserves its committed successor."""
+    control = FakeRecoveryControl([workflow_status(ORIGINAL)])
+    control.errors[("cancel", ORIGINAL)] = OSError("cancel unavailable")
+    holds = FakeVersionHolds()
+
+    first = await _sweep(control, holds=holds)
+    assert len(first.failed) == 1
+    assert first.failed[0][0] == ORIGINAL
+    assert "cancel unavailable" in first.failed[0][1]
+    assert first.forked == ()
+    assert first.retired == ()
+    successor = control.rows[SUCCESSOR]
+    assert successor.app_version == "v2"
+    assert control.rows[ORIGINAL].status == "PENDING"
+
+    control.errors.clear()
+    # Roll back to v1: v2 is now newer than the target, so the committed leaf stays parked.
+    control.latest_version = AsyncMock(return_value="v1")  # type: ignore[method-assign]
+    second = await _sweep(control, own="v1", holds=holds)
+
+    assert second == SweepOutcome(retired=(ORIGINAL,), newer_than_target=(SUCCESSOR,))
+    assert control.rows[SUCCESSOR] is successor
+    assert control.rows[ORIGINAL].status == "CANCELLED"
+    assert [call for call in control.writes() if call[0] == "fork"] == [
+        ("fork", ORIGINAL, SUCCESSOR, "1")
+    ]
+    assert holds.held == set()
+
+
+@pytest.mark.parametrize("constraint", ["workflow_status_pkey", "other_unique_key", None])
+def test_postgres_conflicts_require_the_workflow_primary_key(constraint: str | None) -> None:
+    """PostgreSQL's diagnostic constraint name must identify the deterministic ID conflict."""
+    error = IntegrityError(
+        "insert",
+        {},
+        UniqueViolation(
+            "duplicate key", info={} if constraint is None else {ord("n"): constraint.encode()}
+        ),
+    )
+    assert sweep._is_workflow_id_conflict(error) is (constraint == "workflow_status_pkey")
+
+
+@pytest.mark.parametrize("change", ["owner", "status", "deleted"])
+async def test_conditional_reenqueue_does_not_claim_a_row_changed_after_listing(
+    monkeypatch: pytest.MonkeyPatch, locks: FakeLockServer, change: str
+) -> None:
+    """Concurrent completion, deletion or reassignment is a no-op rather than a recovery."""
+    control = FakeRecoveryControl([workflow_status(ORIGINAL, version="v2")])
+    list_pending = control.list_pending
+
+    async def list_then_change() -> tuple[PendingWorkflow, ...]:
+        """Return the snapshot and change the live row before lease acquisition."""
+        pending = await list_pending()
+        if change == "owner":
+            control.rows[ORIGINAL].executor_id = "replacement"
+        elif change == "status":
+            control.rows[ORIGINAL].status = "SUCCESS"
+        else:
+            del control.rows[ORIGINAL]
+        return pending
+
+    monkeypatch.setattr(control, "list_pending", list_then_change)
+    assert await _sweep(control, locks=locks) == SweepOutcome()
+    assert control.writes() == [("reenqueue", ORIGINAL, "retired")]
+    if change == "owner":
+        assert control.rows[ORIGINAL].executor_id == "replacement"
+    elif change == "status":
+        assert control.rows[ORIGINAL].status == "SUCCESS"
+    else:
+        assert ORIGINAL not in control.rows
+    assert locks.holders == {}
+    assert all(session.closed for session in locks.sessions)
+
+
+async def test_a_latest_version_read_failure_under_one_lock_allows_other_versions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unknown liveness fails every row of that source while another source still recovers."""
+    control = FakeRecoveryControl(
+        [
+            workflow_status("a", version="v0"),
+            workflow_status("b", version="v0"),
+            workflow_status("c", version="v1"),
+        ]
+    )
+    monkeypatch.setattr(
+        control,
+        "latest_version",
+        AsyncMock(side_effect=["v2", OSError("latest unavailable"), "v2"]),
+    )
+    holds = FakeVersionHolds()
+    outcome = await _sweep(
+        control, holds=holds, registry=FakeRegistrations(registered("v0", "v1", "v2"))
+    )
+
+    assert [workflow_id for workflow_id, _ in outcome.failed] == ["a", "b"]
+    assert all("latest unavailable" in reason for _, reason in outcome.failed)
+    assert outcome.forked == (("c", recovery_successor_id("c")),)
+    assert control.rows["a"].status == control.rows["b"].status == "PENDING"
+    assert holds.events == ["hold:v0", "release:v0", "hold:v1", "release:v1"]
+    assert holds.held == set()

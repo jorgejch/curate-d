@@ -384,3 +384,20 @@ def test_recovery_cron_rejects_out_of_range_seconds_minutes_and_hours(cron: str)
     """Six-field range violations fail at settings load before any worker can launch."""
     with pytest.raises(ValidationError, match="recovery_sweep_schedule"):
         Settings(recovery_sweep_schedule=cron)
+
+
+def test_an_explicit_recovery_schedule_overrides_an_invalid_environment_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit valid cron follows normal settings precedence over the environment."""
+    monkeypatch.setenv("CURATE_D_RECOVERY_SWEEP_SCHEDULE", "not a cron")
+    assert Settings(recovery_sweep_schedule="0 3 * * 1").recovery_sweep_schedule == "0 3 * * 1"
+
+
+def test_an_invalid_explicit_recovery_schedule_is_not_replaced_by_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A valid environment default cannot hide a malformed explicit schedule."""
+    monkeypatch.setenv("CURATE_D_RECOVERY_SWEEP_SCHEDULE", "*/10 * * * *")
+    with pytest.raises(ValidationError, match="recovery_sweep_schedule"):
+        Settings(recovery_sweep_schedule="not a cron")

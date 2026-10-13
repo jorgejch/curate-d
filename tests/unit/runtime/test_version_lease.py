@@ -7,6 +7,7 @@ here is what each piece does with its connection and its locks, on in-memory dou
 import asyncio
 import threading
 from datetime import UTC, datetime
+from unittest.mock import Mock
 
 import psycopg
 import pytest
@@ -317,4 +318,67 @@ async def test_cancelling_recovery_releases_the_exclusive_version_hold() -> None
         async with hold_exclusive(Settings(), "v1", connect=server.connect):
             raise asyncio.CancelledError
     assert server.mode(KEY) is None
+    assert all(session.closed for session in server.sessions)
+
+
+async def test_a_registry_fetch_failure_closes_the_connection_and_chains_the_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cursor read failure is a registry error with its database cause preserved."""
+    connection = Mock()
+    error = psycopg.OperationalError("cursor read failed")
+    connection.execute.return_value.fetchall.side_effect = error
+    monkeypatch.setattr(version_lease, "connect_dedicated", lambda *args, **kwargs: connection)
+
+    with pytest.raises(VersionRegistryError, match="reading lease_versions failed") as raised:
+        await registrations(Settings())
+    assert raised.value.__cause__ is error
+    connection.close.assert_called_once_with()
+
+
+@pytest.mark.parametrize("body_fails", [False, True])
+async def test_a_close_failure_does_not_replace_the_exclusive_hold_result(
+    monkeypatch: pytest.MonkeyPatch, body_fails: bool
+) -> None:
+    """Cleanup failure preserves a successful block or the original recovery exception."""
+    server = FakeLockServer()
+    session = server.connect()
+    close = session.close
+    error = RuntimeError("recovery failed")
+
+    def fail_close() -> None:
+        """Close the session before reporting the connection cleanup error."""
+        close()
+        raise psycopg.OperationalError("close failed")
+
+    monkeypatch.setattr(session, "close", fail_close)
+
+    async def recover() -> None:
+        """Enter the hold and optionally fail the recovery operation."""
+        async with hold_exclusive(Settings(), "v1", connect=lambda: session) as hold:
+            assert hold.held
+            if body_fails:
+                raise error
+
+    if body_fails:
+        with pytest.raises(RuntimeError) as raised:
+            await recover()
+        assert raised.value is error
+    else:
+        await recover()
+    assert session.closed
+    assert server.mode(KEY) is None
+
+
+async def test_a_released_standalone_lease_refuses_writes_and_permits_recovery() -> None:
+    """Releasing the operator lease immediately removes its authority and shared hold."""
+    server = FakeLockServer()
+    standalone = StandaloneVersionLease("v1", connect=server.connect)
+    assert standalone.try_acquire()
+    standalone.ensure_held()
+    standalone.release()
+    with pytest.raises(ExecutorLeaseLostError, match="stopping before the next write"):
+        standalone.ensure_held()
+    async with hold_exclusive(Settings(), "v1", connect=server.connect) as hold:
+        assert hold.held
     assert all(session.closed for session in server.sessions)

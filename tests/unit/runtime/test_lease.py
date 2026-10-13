@@ -430,3 +430,68 @@ def test_a_shared_lock_error_never_leaves_an_executor_lock_behind(
     assert session.closed
     assert server.holders == {}
     assert not any(server.shared.values())
+
+
+def test_repeated_worker_acquisition_takes_each_lock_only_once() -> None:
+    """Repeated acquire calls cannot leave a recursive version hold after one release."""
+    server = FakeLockServer()
+    lease = server.lease("worker-io-0", version="v1")
+    assert lease.try_acquire()
+    assert lease.try_acquire()
+    assert server.events == ["lease-acquired", "version-shared-acquired"]
+    assert len(server.sessions) == 1
+
+    lease.release()
+    lease.release()
+    assert server.events == [
+        "lease-acquired",
+        "version-shared-acquired",
+        "version-shared-released",
+        "lease-released",
+    ]
+    assert server.holders == {}
+    assert not any(server.shared.values())
+
+
+def test_executor_contention_never_takes_the_new_builds_version_lock() -> None:
+    """A rejected replacement cannot make its version look live before owning the executor."""
+    server = FakeLockServer()
+    first = server.lease("worker-io-0", version="v1")
+    second = server.lease("worker-io-0", version="v2")
+    assert first.try_acquire()
+    assert not second.try_acquire()
+    assert second.version_key is not None
+    assert server.mode(second.version_key) is None
+    assert server.events == ["lease-acquired", "version-shared-acquired"]
+
+    second.release()
+    assert first.held
+    assert server.sessions[0].holds(first.key)
+    first.release()
+
+
+def test_failed_partial_acquire_cleanup_closes_the_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed executor unlock after version refusal drops the partial lease by closing."""
+    server = FakeLockServer()
+    other = server.connect()
+    version_key = version_lease_key("curate-d", "v1")
+    assert other.try_lock(version_key)
+    session = server.connect()
+    lease = ExecutorLease("worker-io-0", version="v1", connect=lambda: session)
+    error = psycopg.OperationalError("rollback unlock failed")
+
+    def fail(key: int) -> None:
+        """Fail to release the partially acquired executor key."""
+        raise error
+
+    monkeypatch.setattr(session, "unlock", fail)
+    with pytest.raises(psycopg.OperationalError) as raised:
+        lease.try_acquire()
+    assert raised.value is error
+    assert not lease.held
+    assert session.closed
+    assert server.mode(lease.key) is None
+    assert server.holders[version_key] is other
+    other.close()
