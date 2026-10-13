@@ -81,20 +81,24 @@ def _database_now(settings: Settings) -> datetime:
     return row[0]
 
 
-def _check_clock(settings: Settings) -> float:
+def _check_clock(settings: Settings, *, clock: Callable[[], float] = time.time) -> float:
     """Return the skew between this clock and the database's, refusing more than 1 s.
 
     The skew is absolute, in seconds, measured against the midpoint of the database
     round trip. Exactly `MAX_CLOCK_SKEW_SECONDS` is accepted.
+
+    Args:
+        settings: Resolved configuration naming the database.
+        clock: Reads this machine's clock in epoch seconds; substituted by tests.
 
     Raises:
         PromotionRefusedError: The database returned no valid time, or the clocks differ
             by more than `MAX_CLOCK_SKEW_SECONDS`.
         psycopg.Error: Reading the database clock failed.
     """
-    before = time.time()
+    before = clock()
     database = _database_now(settings).timestamp()
-    after = time.time()
+    after = clock()
     skew = abs(database - (before + after) / 2)
     if skew > MAX_CLOCK_SKEW_SECONDS:
         raise PromotionRefusedError(
@@ -180,9 +184,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         a DBOS, SQLAlchemy or psycopg error during promotion, or a read-back mismatch. A
         mismatch occurs after the promotion was written. `EXIT_FENCED` when a recovery
         sweep held the promotion fence past `--fence-timeout`; nothing was written.
-
-    Raises:
-        SystemExit: Argument parsing requests help or rejects invalid arguments.
     """
     parser = argparse.ArgumentParser(
         prog="python -m curate_d.runtime.promote",

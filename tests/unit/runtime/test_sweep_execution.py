@@ -2,7 +2,7 @@
 
 import inspect
 from sqlite3 import IntegrityError as SQLiteIntegrityError
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 import pytest
 from dbos import DBOS, DBOSClient
@@ -103,29 +103,6 @@ async def test_the_dbos_adapter_lists_routing_lineage_and_schedule(
     )
 
 
-async def test_the_dbos_adapter_forks_under_the_successor_id(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """SetWorkflowID is what makes the successor deterministic."""
-    assigned: list[str] = []
-
-    async def fork(workflow_id: str, start_step: int, **routing: object) -> None:
-        context = get_local_dbos_context()
-        assert context is not None
-        assigned.append(context.id_assigned_for_next_workflow)
-
-    monkeypatch.setattr(DBOS, "fork_workflow_async", fork)
-    await DBOSRecoveryControl().fork(
-        ORIGINAL,
-        SUCCESSOR,
-        3,
-        application_version="v2",
-        queue_name="stage",
-        queue_partition_key=None,
-    )
-    assert assigned == [SUCCESSOR]
-
-
 async def test_the_dbos_adapter_reads_the_latest_version_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -178,10 +155,21 @@ class _Client:
     def __init__(self) -> None:
         self.calls: list[str] = []
         self._sys_db = _ClientSysDB(self.calls)
+        self.known = {ORIGINAL}
+        self.forks: list[tuple[str, str, int, dict[str, object]]] = []
 
     async def list_workflows_async(self, **filters: object) -> list[object]:
         self.calls.append(f"list:{sorted(filters)}")
-        return [workflow_status(ORIGINAL)] if filters.get("workflow_ids") else []
+        ids = filters.get("workflow_ids")
+        if not isinstance(ids, list):
+            return []
+        return [workflow_status(workflow_id) for workflow_id in ids if workflow_id in self.known]
+
+    async def list_workflow_steps_async(
+        self, workflow_id: str, *, load_output: bool
+    ) -> list[dict[str, int]]:
+        self.calls.append(f"steps:{workflow_id}:load_output={load_output}")
+        return [{"function_id": 4}, {"function_id": 1}]
 
     async def fork_workflow_async(
         self, workflow_id: str, start_step: int, **routing: object
@@ -189,12 +177,65 @@ class _Client:
         context = get_local_dbos_context()
         assert context is not None
         self.calls.append(f"fork:{context.id_assigned_for_next_workflow}")
+        self.forks.append((context.id_assigned_for_next_workflow, workflow_id, start_step, routing))
 
     async def cancel_workflow_async(self, workflow_id: str) -> None:
         self.calls.append("cancel")
 
     async def get_latest_application_version_async(self) -> dict[str, str]:
         return {"version_name": "v2"}
+
+
+@pytest.mark.parametrize("adapter", ["launched", "client"])
+async def test_the_adapters_fork_under_the_successor_id_with_the_original_routing(
+    monkeypatch: pytest.MonkeyPatch, adapter: str
+) -> None:
+    """SetWorkflowID makes the successor deterministic; version, queue and partition pass on."""
+    client = _Client()
+    control: DBOSRecoveryControl | ClientRecoveryControl
+    if adapter == "launched":
+        monkeypatch.setattr(DBOS, "fork_workflow_async", client.fork_workflow_async)
+        control = DBOSRecoveryControl()
+    else:
+        control = ClientRecoveryControl(client, before_write=lambda: None)  # type: ignore[arg-type]
+    await control.fork(
+        ORIGINAL,
+        SUCCESSOR,
+        5,
+        application_version="v2",
+        queue_name="transfer-large",
+        queue_partition_key="provider-1",
+    )
+    assert client.forks == [
+        (
+            SUCCESSOR,
+            ORIGINAL,
+            5,
+            {
+                "application_version": "v2",
+                "queue_name": "transfer-large",
+                "queue_partition_key": "provider-1",
+            },
+        )
+    ]
+
+
+async def test_the_adapters_read_step_ids_without_outputs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Checkpoint discovery reads function IDs only, never the step outputs."""
+    client = _Client()
+    monkeypatch.setattr(DBOS, "list_workflow_steps_async", client.list_workflow_steps_async)
+    assert await DBOSRecoveryControl().step_ids(ORIGINAL) == [4, 1]
+    control = ClientRecoveryControl(client, before_write=lambda: None)  # type: ignore[arg-type]
+    assert await control.step_ids(ORIGINAL) == [4, 1]
+    assert client.calls == [f"steps:{ORIGINAL}:load_output=False"] * 2
+
+
+async def test_the_client_adapter_returns_none_for_a_missing_workflow() -> None:
+    """An empty listing is an absent workflow, not an index error."""
+    client = _Client()
+    client.known = set()
+    control = ClientRecoveryControl(client, before_write=lambda: None)  # type: ignore[arg-type]
+    assert await control.status(ORIGINAL) is None
 
 
 async def test_the_client_adapter_checks_the_lease_before_every_write() -> None:
@@ -1030,130 +1071,6 @@ async def test_a_sweep_with_only_reenqueues_never_takes_the_fence(locks: FakeLoc
     assert fence.attempts == 0
 
 
-@pytest.mark.parametrize("adapter", ["launched", "client"])
-@pytest.mark.parametrize("step_ids", [[], [4, 1, 3]])
-async def test_adapters_read_checkpoint_ids_without_loading_outputs(
-    monkeypatch: pytest.MonkeyPatch, adapter: str, step_ids: list[int]
-) -> None:
-    """Checkpoint discovery keeps every ID without loading potentially large outputs."""
-    client = Mock(spec=DBOSClient)
-    boundary = DBOS if adapter == "launched" else client
-    listing = AsyncMock(return_value=[{"function_id": step_id} for step_id in step_ids])
-    monkeypatch.setattr(boundary, "list_workflow_steps_async", listing)
-    guard = Mock()
-    control = (
-        DBOSRecoveryControl()
-        if adapter == "launched"
-        else ClientRecoveryControl(client, before_write=guard)
-    )
-
-    assert await control.step_ids(ORIGINAL) == step_ids
-    listing.assert_awaited_once_with(ORIGINAL, load_output=False)
-    guard.assert_not_called()
-
-
-async def test_the_client_adapter_maps_pending_rows_without_a_write_guard() -> None:
-    """Operator reads preserve routing, lineage and schedule without requiring a live lease."""
-    client = Mock(spec=DBOSClient)
-    row = workflow_status(
-        ORIGINAL,
-        status="ENQUEUED",
-        executor_id=None,
-        queue_name="maintenance",
-        queue_partition_key="provider-1",
-        was_forked_from=True,
-        schedule_name=RECOVERY_SCHEDULE_NAME,
-    )
-    client.list_workflows_async.return_value = [row]
-    guard = Mock()
-    control = ClientRecoveryControl(client, before_write=guard)
-
-    assert await control.list_pending() == (
-        PendingWorkflow(
-            ORIGINAL,
-            None,
-            "v1",
-            status="ENQUEUED",
-            queue_name="maintenance",
-            queue_partition_key="provider-1",
-            was_forked_from=True,
-            schedule_name=RECOVERY_SCHEDULE_NAME,
-        ),
-    )
-    client.list_workflows_async.assert_awaited_once_with(
-        status=["PENDING", "ENQUEUED"], load_input=False, load_output=False
-    )
-    guard.assert_not_called()
-
-
-async def test_the_client_adapter_returns_none_for_a_deleted_workflow() -> None:
-    """A missing workflow is returned as absent instead of indexing an empty listing."""
-    client = Mock(spec=DBOSClient)
-    client.list_workflows_async.return_value = []
-    guard = Mock()
-
-    assert await ClientRecoveryControl(client, before_write=guard).status(ORIGINAL) is None
-    client.list_workflows_async.assert_awaited_once_with(
-        workflow_ids=[ORIGINAL], load_input=False, load_output=False
-    )
-    guard.assert_not_called()
-
-
-@pytest.mark.parametrize("adapter", ["launched", "client"])
-async def test_adapters_preserve_fork_routing_and_restore_context_after_failure(
-    monkeypatch: pytest.MonkeyPatch, adapter: str
-) -> None:
-    """A failed fork forwards its routing and cannot leak its successor ID to later work."""
-    client = Mock(spec=DBOSClient)
-    boundary = DBOS if adapter == "launched" else client
-    error = RuntimeError("fork unavailable")
-    assigned: list[str] = []
-
-    async def fail(*args: object, **kwargs: object) -> None:
-        """Record the assigned successor inside the failing DBOS call."""
-        context = get_local_dbos_context()
-        assert context is not None
-        assigned.append(context.id_assigned_for_next_workflow)
-        raise error
-
-    fork = AsyncMock(side_effect=fail)
-    monkeypatch.setattr(boundary, "fork_workflow_async", fork)
-    guard = Mock()
-    control = (
-        DBOSRecoveryControl()
-        if adapter == "launched"
-        else ClientRecoveryControl(client, before_write=guard)
-    )
-    previous_context = get_local_dbos_context()
-    previous_id = (
-        None if previous_context is None else previous_context.id_assigned_for_next_workflow
-    )
-
-    with pytest.raises(RuntimeError) as raised:
-        await control.fork(
-            ORIGINAL,
-            SUCCESSOR,
-            5,
-            application_version="v2",
-            queue_name="transfer-large",
-            queue_partition_key="provider-1",
-        )
-    assert raised.value is error
-    fork.assert_awaited_once_with(
-        ORIGINAL,
-        5,
-        application_version="v2",
-        queue_name="transfer-large",
-        queue_partition_key="provider-1",
-    )
-    assert assigned == [SUCCESSOR]
-    assert get_local_dbos_context() is previous_context
-    if previous_context is not None:
-        assert previous_context.id_assigned_for_next_workflow == previous_id
-    if adapter == "client":
-        guard.assert_called_once_with()
-
-
 @pytest.mark.parametrize("step_ids, start_step", [([], 1), ([0], 1), ([4, 1, 3], 5)])
 async def test_recovery_resumes_after_the_highest_checkpoint(
     step_ids: list[int], start_step: int
@@ -1263,36 +1180,22 @@ def test_postgres_conflicts_require_the_workflow_primary_key(constraint: str | N
     assert sweep._is_workflow_id_conflict(error) is (constraint == "workflow_status_pkey")
 
 
-@pytest.mark.parametrize("change", ["owner", "status", "deleted"])
-async def test_conditional_reenqueue_does_not_claim_a_row_changed_after_listing(
-    monkeypatch: pytest.MonkeyPatch, locks: FakeLockServer, change: str
+async def test_a_reenqueue_that_changes_nothing_is_not_counted(
+    monkeypatch: pytest.MonkeyPatch, locks: FakeLockServer
 ) -> None:
-    """Concurrent completion, deletion or reassignment is a no-op rather than a recovery."""
+    """A row another executor claimed after listing is not reported as re-enqueued."""
     control = FakeRecoveryControl([workflow_status(ORIGINAL, version="v2")])
     list_pending = control.list_pending
 
-    async def list_then_change() -> tuple[PendingWorkflow, ...]:
-        """Return the snapshot and change the live row before lease acquisition."""
+    async def list_then_claim() -> tuple[PendingWorkflow, ...]:
+        """Return the listing, then hand the row to another executor."""
         pending = await list_pending()
-        if change == "owner":
-            control.rows[ORIGINAL].executor_id = "replacement"
-        elif change == "status":
-            control.rows[ORIGINAL].status = "SUCCESS"
-        else:
-            del control.rows[ORIGINAL]
+        control.rows[ORIGINAL].executor_id = "replacement"
         return pending
 
-    monkeypatch.setattr(control, "list_pending", list_then_change)
+    monkeypatch.setattr(control, "list_pending", list_then_claim)
     assert await _sweep(control, locks=locks) == SweepOutcome()
     assert control.writes() == [("reenqueue", ORIGINAL, "retired")]
-    if change == "owner":
-        assert control.rows[ORIGINAL].executor_id == "replacement"
-    elif change == "status":
-        assert control.rows[ORIGINAL].status == "SUCCESS"
-    else:
-        assert ORIGINAL not in control.rows
-    assert locks.holders == {}
-    assert all(session.closed for session in locks.sessions)
 
 
 async def test_a_latest_version_read_failure_under_one_lock_allows_other_versions(

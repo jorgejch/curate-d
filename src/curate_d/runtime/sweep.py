@@ -340,11 +340,7 @@ class ClientRecoveryControl:
     """
 
     def __init__(self, client: DBOSClient, *, before_write: Callable[[], None]) -> None:
-        """Bind the adapter to `client` and a guard called before each recovery write.
-
-        `before_write` must raise to refuse a write; its return value is ignored and
-        its exceptions propagate from fork, cancel and re-enqueue calls.
-        """
+        """Bind the adapter to `client` and the guard run before each write."""
         self._client = client
         self._before_write = before_write
 
@@ -465,8 +461,9 @@ async def _recover_version(
         previously committed or concurrently created successor.
 
     Raises:
-        ValueError: The successor belongs to another source, the source is no longer
-            eligible without a matching successor, or the fork published no successor.
+        ValueError: The successor belongs to another source; the source is no longer
+            eligible, or already has a manual fork, and no matching successor exists; or
+            the fork published no successor.
         IntegrityError: The fork violated a constraint other than the workflow primary
             key, or a primary-key conflict had no confirmed matching successor.
     """

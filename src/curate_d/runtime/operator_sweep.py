@@ -110,9 +110,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         0 when no row failed, `EXIT_FAILED_ROWS` when any did, `EXIT_REFUSED` when the
         target or the lease is refused before anything is written, `EXIT_LEASE_LOST` when
         the version lease was lost mid-run.
-
-    Raises:
-        SystemExit: Argument parsing requests help or rejects invalid arguments.
     """
     parser = argparse.ArgumentParser(
         prog="python -m curate_d.runtime.operator_sweep",

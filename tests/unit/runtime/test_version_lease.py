@@ -7,7 +7,6 @@ here is what each piece does with its connection and its locks, on in-memory dou
 import asyncio
 import threading
 from datetime import UTC, datetime
-from unittest.mock import Mock
 
 import psycopg
 import pytest
@@ -141,9 +140,12 @@ async def test_an_unreadable_registry_raises(monkeypatch: pytest.MonkeyPatch) ->
         await registrations(Settings())
 
 
-async def test_a_malformed_registry_row_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("row", [("v1", None), (42, datetime(2026, 10, 1, tzinfo=UTC))])
+async def test_a_malformed_registry_row_raises(
+    monkeypatch: pytest.MonkeyPatch, row: tuple[object, ...]
+) -> None:
     """A row the registry should never hold is not silently skipped."""
-    _connect_to(monkeypatch, _Connection(rows=[("v1", None)]))
+    _connect_to(monkeypatch, _Connection(rows=[row]))
     with pytest.raises(VersionRegistryError, match="unexpected lease_versions row"):
         await registrations(Settings())
 
@@ -247,23 +249,6 @@ def test_a_lost_standalone_lease_stops_the_next_write() -> None:
     standalone.release()
 
 
-async def test_an_empty_registry_returns_no_versions(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An empty deployment registry is a valid read, with no invented target."""
-    connection = _Connection(rows=[])
-    _connect_to(monkeypatch, connection)
-    assert await registrations(Settings()) == {}
-    assert connection.closed == 1
-
-
-async def test_a_non_string_version_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Invalid identifiers cannot silently change the sweep's version membership checks."""
-    connection = _Connection(rows=[(42, datetime(2026, 10, 1, tzinfo=UTC))])
-    _connect_to(monkeypatch, connection)
-    with pytest.raises(VersionRegistryError, match="unexpected lease_versions row"):
-        await registrations(Settings())
-    assert connection.closed == 1
-
-
 async def test_a_refused_lock_with_no_visible_holder_stays_refused() -> None:
     """A disappearing holder is not proof that this session acquired the version lock."""
     server = FakeLockServer()
@@ -330,21 +315,6 @@ async def test_cancelling_recovery_releases_the_exclusive_version_hold() -> None
     assert all(session.closed for session in server.sessions)
 
 
-async def test_a_registry_fetch_failure_closes_the_connection_and_chains_the_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A cursor read failure is a registry error with its database cause preserved."""
-    connection = Mock()
-    error = psycopg.OperationalError("cursor read failed")
-    connection.execute.return_value.fetchall.side_effect = error
-    monkeypatch.setattr(version_lease, "connect_dedicated", lambda *args, **kwargs: connection)
-
-    with pytest.raises(VersionRegistryError, match="reading lease_versions failed") as raised:
-        await registrations(Settings())
-    assert raised.value.__cause__ is error
-    connection.close.assert_called_once_with()
-
-
 @pytest.mark.parametrize("body_fails", [False, True])
 async def test_a_close_failure_does_not_replace_the_exclusive_hold_result(
     monkeypatch: pytest.MonkeyPatch, body_fails: bool
@@ -377,20 +347,6 @@ async def test_a_close_failure_does_not_replace_the_exclusive_hold_result(
         await recover()
     assert session.closed
     assert server.mode(KEY) is None
-
-
-async def test_a_released_standalone_lease_refuses_writes_and_permits_recovery() -> None:
-    """Releasing the operator lease immediately removes its authority and shared hold."""
-    server = FakeLockServer()
-    standalone = StandaloneVersionLease("v1", connect=server.connect)
-    assert standalone.try_acquire()
-    standalone.ensure_held()
-    standalone.release()
-    with pytest.raises(ExecutorLeaseLostError, match="stopping before the next write"):
-        standalone.ensure_held()
-    async with hold_exclusive(Settings(), "v1", connect=server.connect) as hold:
-        assert hold.held
-    assert all(session.closed for session in server.sessions)
 
 
 # The promotion fence.

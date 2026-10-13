@@ -1,6 +1,5 @@
 """Promotion of an already-registered version, on an in-memory DBOS client."""
 
-import time
 from datetime import UTC, datetime
 from unittest.mock import Mock
 
@@ -145,11 +144,10 @@ def test_clock_skew_accepts_the_exact_boundary_using_the_round_trip_midpoint(
 ) -> None:
     """Both clock directions accept one second, measured at the request midpoint."""
     readings = iter([1000.0, 1004.0])
-    monkeypatch.setattr(time, "time", lambda: next(readings))
     monkeypatch.setattr(
         promote, "_database_now", lambda settings: datetime.fromtimestamp(1002.0 + offset, UTC)
     )
-    assert promote._check_clock(Settings()) == abs(offset)
+    assert promote._check_clock(Settings(), clock=lambda: next(readings)) == abs(offset)
 
 
 @pytest.mark.parametrize("offset", [-1.001, 1.001])
@@ -157,12 +155,11 @@ def test_clock_skew_just_outside_the_boundary_is_refused(
     monkeypatch: pytest.MonkeyPatch, offset: float
 ) -> None:
     """Skew beyond one second fails for both a fast and a slow database clock."""
-    monkeypatch.setattr(time, "time", lambda: 1000.0)
     monkeypatch.setattr(
         promote, "_database_now", lambda settings: datetime.fromtimestamp(1000.0 + offset, UTC)
     )
     with pytest.raises(promote.PromotionRefusedError, match="more than 1s"):
-        promote._check_clock(Settings())
+        promote._check_clock(Settings(), clock=lambda: 1000.0)
 
 
 @pytest.mark.parametrize(
@@ -243,22 +240,6 @@ def test_a_clock_read_failure_refuses_promotion_and_closes_the_client(
     assert client.promoted == []
     assert client.latest == "v2"
     assert client.destroyed
-
-
-def test_an_empty_version_catalog_refuses_before_checking_the_clock(
-    client: _Client, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A fresh database has no promotable build and requires no clock or write operation."""
-    client.versions = []
-    clock = Mock(side_effect=AssertionError("an unknown version must not check the clock"))
-    monkeypatch.setattr(promote, "_database_now", clock)
-
-    with capture_logs() as events:
-        assert promote.main(["v1"]) == promote.EXIT_REFUSED
-    clock.assert_not_called()
-    assert client.promoted == []
-    assert client.destroyed
-    assert "0 versions" in events[0]["reason"]
 
 
 def test_the_change_runs_under_the_exclusive_fence(

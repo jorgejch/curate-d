@@ -225,8 +225,7 @@ async def hold_exclusive(
 
     Yields a held `VersionHold` until the block exits, or a refused one naming the mode
     another session holds, if visible. On exit, attempt to release any acquired lock and
-    close the session, suppressing cleanup errors. Exceptions from the caller's block
-    propagate.
+    close the session, suppressing cleanup errors.
 
     Args:
         settings: Resolved configuration naming the system database.
@@ -281,7 +280,7 @@ async def hold_fence_shared(
 
     Yields whether it was taken, and holds it until the block exits. A promotion holding
     the fence, or waiting for it, refuses it. On exit, attempt to release it and close
-    the session, suppressing cleanup errors. Exceptions from the caller's block propagate.
+    the session, suppressing cleanup errors.
 
     Args:
         settings: Resolved configuration naming the system database.
