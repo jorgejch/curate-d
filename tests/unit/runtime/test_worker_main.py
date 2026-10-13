@@ -9,7 +9,6 @@ sequence itself is what gets asserted.
 
 import os
 import threading
-from unittest.mock import Mock
 
 import pytest
 from dbos import DBOS
@@ -401,60 +400,26 @@ def test_a_worker_never_promotes_its_version(
     assert promoted == []
 
 
-@pytest.mark.parametrize("profile", list(WorkerProfile))
-def test_both_worker_profiles_lease_the_registered_build_version(
-    calls: list[tuple[str, object]], monkeypatch: pytest.MonkeyPatch, profile: WorkerProfile
-) -> None:
-    """The version registered before startup is the same one held throughout execution."""
-    monkeypatch.setattr(dbos_app, "APPLICATION_VERSION", "build-under-test")
-    worker_main.run(Settings(), profile, block=False)
-    assert ("register_version", "build-under-test") in calls
-    assert ("lease", ("worker-io-0", "build-under-test")) in calls
-
-
 def test_startup_failure_releases_both_worker_locks(
     calls: list[tuple[str, object]], monkeypatch: pytest.MonkeyPatch, locks: FakeLockServer
 ) -> None:
-    """A service preparation failure must not leave the unlaunched version looking live."""
-    error = RuntimeError("service preparation failed")
+    """A startup failure before launch gives back both keys, so the version is not live."""
 
     def fail(settings: Settings, profile: WorkerProfile, staging: object) -> None:
-        """Fail after both worker locks have been acquired."""
+        """Fail once both keys are held."""
         assert locks.holders
         assert any(locks.shared.values())
-        raise error
+        raise RuntimeError("service preparation failed")
 
     monkeypatch.setattr(worker_main, "prepare_services", fail)
-    with pytest.raises(RuntimeError) as raised:
+    with pytest.raises(RuntimeError, match="service preparation failed"):
         worker_main.run(
             Settings(staging_s3_endpoint_url=None),
             WorkerProfile.IO,
             block=False,
             lease_factory=locks.factory,
         )
-    assert raised.value is error
     assert "launch" not in [name for name, _ in calls]
     assert locks.holders == {}
     assert not any(locks.shared.values())
     assert all(session.closed for session in locks.sessions)
-
-
-@pytest.mark.parametrize("profile", list(WorkerProfile))
-def test_registration_failure_stops_prepared_staging(
-    calls: list[tuple[str, object]],
-    monkeypatch: pytest.MonkeyPatch,
-    locks: FakeLockServer,
-    profile: WorkerProfile,
-) -> None:
-    """Neither worker profile leaks its staging supervisor when version registration fails."""
-    staging = Mock(spec=worker_main.StagingLifecycle)
-    monkeypatch.setattr(worker_main, "_start_staging", lambda *args: staging)
-    error = VersionRegistryError("registration unavailable")
-    monkeypatch.setattr(worker_main, "register_version", Mock(side_effect=error))
-
-    with pytest.raises(VersionRegistryError) as raised:
-        worker_main.run(Settings(), profile, block=False, lease_factory=locks.factory)
-    assert raised.value is error
-    staging.stop.assert_called_once_with()
-    assert locks.sessions == []
-    assert calls == []

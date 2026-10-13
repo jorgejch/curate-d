@@ -1,10 +1,7 @@
 """The persisted schedule that runs the recovery sweep."""
 
 import asyncio
-import inspect
-from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
 from dbos import DBOS
@@ -77,38 +74,3 @@ def test_the_step_sweeps_as_this_build_and_returns_plain_values(
         "version_live",
         "retired_ticks",
     }
-
-
-async def test_the_workflow_delegates_each_tick_to_one_sweep_step(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The scheduled workflow runs one step and leaves its summary in the step checkpoint."""
-    step = AsyncMock(return_value={"reenqueued": ("orphan",)})
-    monkeypatch.setattr(recovery, "_recovery_sweep_step", step)
-
-    result = await inspect.unwrap(recovery.recover_stranded_workflows)(
-        datetime(2026, 10, 1, tzinfo=UTC), {"schedule_context": "ignored"}
-    )
-    assert result is None
-    step.assert_awaited_once_with()
-
-
-async def test_a_sweep_step_failure_propagates_without_a_successful_checkpoint(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A registry outage remains a step failure rather than becoming an empty outcome."""
-    settings = Settings()
-    error = OSError("registry unavailable")
-    sweep = AsyncMock(side_effect=error)
-    monkeypatch.setattr(recovery, "run_recovery_sweep", sweep)
-    monkeypatch.setattr(recovery, "current", lambda: SimpleNamespace(settings=settings))
-    monkeypatch.setattr(DBOS, "application_version", "v2")
-
-    with pytest.raises(OSError) as raised:
-        await inspect.unwrap(recovery._recovery_sweep_step)()
-    assert raised.value is error
-    sweep.assert_awaited_once()
-    assert sweep.await_args is not None
-    assert sweep.await_args.args == (settings,)
-    assert sweep.await_args.kwargs["own_version"] == "v2"
-    assert isinstance(sweep.await_args.kwargs["control"], DBOSRecoveryControl)

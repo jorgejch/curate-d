@@ -762,6 +762,7 @@ async def test_a_running_worker_keeps_its_version_from_the_sweep(
     target = f"9.9.11-sweep-worker-{_RUN}"
     workflow_id = f"sweep-worker-held-{uuid4()}"
     previous_latest = await _latest_version(ledger_engine)
+    worker_version_registered = worker_version in await _registered_versions(ledger_engine)
     monkeypatch.setattr(worker_main, "apply_schedules", lambda profile, settings: None)
     monkeypatch.setattr(worker_main, "start_conductor", lambda settings, profile: None)
     monkeypatch.setattr(worker_main, "_install_shutdown_handler", lambda stop: None)
@@ -783,7 +784,6 @@ async def test_a_running_worker_keeps_its_version_from_the_sweep(
             failures.append(error)
 
     thread = threading.Thread(target=serve, name="sweep-test-worker")
-    worker_version_registered = worker_version in await _registered_versions(ledger_engine)
     thread.start()
     try:
         for _ in range(300):

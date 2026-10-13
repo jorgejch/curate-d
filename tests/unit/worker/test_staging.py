@@ -13,6 +13,7 @@ from dbos import DBOS
 from curate_d.config import Settings, StagingRole
 from curate_d.runtime.lease import ExecutorLease
 from curate_d.runtime.profiles import WorkerProfile
+from curate_d.runtime.version_lease import VersionRegistryError
 from curate_d.staging.errors import (
     StagingNotReadyError,
     StagingObjectStoreError,
@@ -374,6 +375,23 @@ def test_worker_readiness_failure_starts_no_dbos(startup_calls: list[str]) -> No
             staging_factory=lambda settings, profile: RecordedLifecycle(
                 startup_calls, StagingNotReadyError("offline")
             ),
+        )
+    assert startup_calls == ["staging-ready", "staging-stop"]
+
+
+def test_a_failed_version_registration_stops_staging(
+    startup_calls: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Close staging when the version cannot be registered, before any lease or launch."""
+    monkeypatch.setattr(
+        worker, "register_version", Mock(side_effect=VersionRegistryError("registry down"))
+    )
+    with pytest.raises(VersionRegistryError):
+        worker.run(
+            settings_for(),
+            WorkerProfile.IO,
+            block=False,
+            staging_factory=lambda settings, profile: RecordedLifecycle(startup_calls),
         )
     assert startup_calls == ["staging-ready", "staging-stop"]
 

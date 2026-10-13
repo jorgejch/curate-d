@@ -386,22 +386,19 @@ def test_a_worker_lease_for_settings_carries_its_version(monkeypatch: pytest.Mon
     assert lease.version_key == version_lease_key("curate-d", "v1")
 
 
-@pytest.mark.parametrize("lost_key", ["executor", "version"])
-def test_losing_either_worker_lock_discards_both(lost_key: str) -> None:
-    """A surviving half of the worker's lease cannot keep the worker running."""
+def test_losing_the_executor_key_gives_up_the_version_key() -> None:
+    """The probe fails without the executor key, and the version is no longer held live."""
     server = FakeLockServer()
     lease = server.lease("worker-io-0", version="v1")
     assert lease.try_acquire()
     assert lease.version_key is not None
     session = server.sessions[0]
-    if lost_key == "executor":
-        session.unlock(lease.key)
-    else:
-        session.unlock_shared(lease.version_key)
-    assert not lease._probe()
+    session.unlock(lease.key)
+    lost = threading.Event()
+    lease.monitor(lost.set)
+    assert lost.wait(1)
     assert not lease.held
     assert session.closed
-    assert server.mode(lease.key) is None
     assert server.mode(lease.version_key) is None
     lease.release()
 

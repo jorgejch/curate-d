@@ -3,7 +3,8 @@
 No DBOS instance is launched: the sweep runs exactly as the module entry point does in a
 pod. The suite's version is the target, registered in DBOS and `lease_versions` and made
 latest for the test; a source version registered before it holds the seeded rows. The
-previous latest version is restored and every test row and version deleted afterwards.
+previous latest version is restored afterwards, and every test row and every registration
+the fixture added is deleted; a registration it found is kept.
 """
 
 import json
