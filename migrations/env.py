@@ -15,7 +15,7 @@ import asyncio
 from logging.config import fileConfig
 
 from alembic import context
-from dbos.cli.migration import run_dbos_database_migrations
+from dbos import run_dbos_database_migrations
 from sqlalchemy import Connection, pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 

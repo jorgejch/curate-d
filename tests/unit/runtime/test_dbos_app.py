@@ -262,7 +262,7 @@ def test_a_build_revision_that_is_not_a_dev_tag_is_refused(revision: str) -> Non
 
 def test_the_system_schema_migration_binding_still_exists() -> None:
     """Pins the DBOS helper `migrations/env.py` calls; an upgrade that moves it fails here."""
-    from dbos.cli.migration import run_dbos_database_migrations
+    from dbos import run_dbos_database_migrations
 
     parameters = inspect.signature(run_dbos_database_migrations).parameters
     assert {"system_database_url", "schema"} <= parameters.keys()
