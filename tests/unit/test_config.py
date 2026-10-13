@@ -229,7 +229,22 @@ def test_a_rejected_database_url_keeps_its_password_out_of_the_error(
 
 
 @pytest.mark.parametrize(
-    "cron", ["every ten minutes", "*/10 * * *", "61 * * * *", "0 0 24 * * *", ""]
+    "cron",
+    [
+        "every ten minutes",
+        "*/10 * * *",
+        "61 * * * *",
+        "0 0 24 * * *",
+        "",
+        "0 0 * JAN *",
+        "@hourly",
+        "0 0 L * *",
+        "0 0 15W * *",
+        "0 0 * * 1#2",
+        "0 0 ? * *",
+        "*/60 * * * *",
+        "0 0 0 * * * 2027",
+    ],
 )
 def test_an_invalid_recovery_sweep_schedule_is_rejected(
     monkeypatch: pytest.MonkeyPatch, cron: str
@@ -240,7 +255,9 @@ def test_an_invalid_recovery_sweep_schedule_is_rejected(
         Settings()
 
 
-@pytest.mark.parametrize("cron", ["*/10 * * * *", "*/30 * * * * *", "0 59 23 * * *", "0 3 * * 1"])
+@pytest.mark.parametrize(
+    "cron", ["*/10 * * * *", "*/30 * * * * *", "0 59 23 * * *", "0 3 * * 1", "0,30 1-5/2 * * 7"]
+)
 def test_a_valid_recovery_sweep_schedule_is_kept(
     monkeypatch: pytest.MonkeyPatch, cron: str
 ) -> None:
