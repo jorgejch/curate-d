@@ -14,12 +14,17 @@ from collections.abc import Callable, Sequence
 from typing import Annotated, Final, Protocol
 
 from dbos import DBOSClient, Queue
-from dbos._queue import QueueRateLimit
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
 from curate_d.api.errors import NOT_FOUND, REJECTED, NotFoundError, RejectedError, problems
-from curate_d.runtime.queues import QUEUE_SPECS, SPECS_BY_NAME, QueueName, QueueSpec
+from curate_d.runtime.queues import (
+    QUEUE_SPECS,
+    SPECS_BY_NAME,
+    QueueName,
+    QueueSpec,
+    RateLimitSpec,
+)
 
 MAX_CONCURRENCY: Final = 64
 MAX_RATE: Final = 10_000
@@ -118,7 +123,7 @@ def router(backend: Callable[[Request], ThroughputBackend]) -> APIRouter:
     return routes
 
 
-def _rate(limiter: QueueRateLimit | None) -> Rate | None:
+def _rate(limiter: RateLimitSpec | None) -> Rate | None:
     """A stored rate limit."""
     return None if limiter is None else Rate(limit=limiter["limit"], period=limiter["period"])
 
@@ -186,7 +191,7 @@ class DbosThroughput:
         if not partition_first and change.partition_worker_concurrency is not None:
             await queue.set_partition_worker_concurrency_async(change.partition_worker_concurrency)
         if change.rate is not None:
-            limiter: QueueRateLimit = {"limit": change.rate.limit, "period": change.rate.period}
+            limiter: RateLimitSpec = {"limit": change.rate.limit, "period": change.rate.period}
             if spec.partitioned:
                 await queue.set_partition_limiter_async(limiter)
             else:
