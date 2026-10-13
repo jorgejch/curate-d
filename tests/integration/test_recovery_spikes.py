@@ -18,7 +18,6 @@ from uuid import uuid4
 
 import pytest
 from dbos import DBOS, SetWorkflowID
-from dbos._utils import GlobalParams
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -101,7 +100,7 @@ async def dbos(settings: Settings, ledger_engine: AsyncEngine) -> AsyncIterator[
             )
 
 
-async def _seed(engine: AsyncEngine, workflow_id: str, app_name: str | None) -> None:
+async def _seed(engine: AsyncEngine, workflow_id: str, app_name: str) -> None:
     """Write a PENDING row on the source version, as an abandoned worker leaves one."""
     async with engine.begin() as connection:
         await connection.execute(
@@ -151,12 +150,12 @@ def _assert_forked(rows: dict[str, dict[str, object]], original: str, successor:
 
 
 async def test_a_step_forks_under_the_assigned_id_then_cancels(
-    dbos: None, ledger_engine: AsyncEngine
+    dbos: None, settings: Settings, ledger_engine: AsyncEngine
 ) -> None:
     """From inside a step, the fork honours SetWorkflowID, the queue and the partition."""
     original = f"spike-step-{uuid4()}"
     successor = f"spike-step-successor-{uuid4()}"
-    await _seed(ledger_engine, original, GlobalParams.app_name)
+    await _seed(ledger_engine, original, application_name(settings.environment))
 
     returned = await spike_fork_from_step(original, successor)
 
@@ -166,15 +165,14 @@ async def test_a_step_forks_under_the_assigned_id_then_cancels(
 
 _CLIENT_FORK = """
 import asyncio, json, sys
-from dbos import SetWorkflowID
-import dbos._dbos as dbos_module
+from dbos import DBOS, SetWorkflowID, error
 from curate_d.config import Settings
 from curate_d.runtime.dbos_app import client
 
 original, successor, version, queue, partition = sys.argv[1:6]
 
 
-async def main() -> None:
+async def main() -> str:
     dbos_client = client(Settings())
     try:
         with SetWorkflowID(successor):
@@ -185,11 +183,17 @@ async def main() -> None:
         await dbos_client.cancel_workflow_async(original)
     finally:
         dbos_client.destroy()
-    launched = dbos_module._dbos_global_instance is not None
-    print(json.dumps({"id": handle.get_workflow_id(), "launched": launched}))
+    return handle.get_workflow_id()
 
 
-asyncio.run(main())
+forked = asyncio.run(main())
+# Every DBOS class method needs a DBOS instance; without one it raises DBOSException.
+try:
+    DBOS.list_workflows(limit=1)
+    launched = True
+except error.DBOSException:
+    launched = False
+print(json.dumps({"id": forked, "launched": launched}))
 """
 
 

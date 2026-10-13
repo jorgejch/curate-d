@@ -2,8 +2,9 @@
 
 The unit tests check the lease's logic on an in-memory lock server; these check that the
 SQL means what that server models: shared holders coexist, an exclusive holder excludes
-both modes, a terminated backend frees every key it held, and a registration keeps its
-first time. The promotion fence tests also check `lock_timeout` bounds promotion's wait.
+both modes, a terminated backend frees every key it held and its hold says so, and a
+registration keeps its first time. The promotion fence tests also check `lock_timeout`
+bounds promotion's wait.
 """
 
 import asyncio
@@ -16,7 +17,8 @@ import psycopg
 import pytest
 
 from curate_d.config import Settings
-from curate_d.runtime.lease import ExecutorLease, lease_conninfo
+from curate_d.runtime.dbos_app import APPLICATION_NAME
+from curate_d.runtime.lease import ExecutorLease, lease_conninfo, promotion_fence_key
 from curate_d.runtime.version_lease import (
     LockMode,
     PromotionFenceTimeoutError,
@@ -162,6 +164,49 @@ async def test_a_standalone_lease_shares_the_version_with_workers(
         worker.release()
 
 
+def _terminate(settings: Settings, application_name: str) -> list[tuple[object, ...]]:
+    """Terminate every backend connected under `application_name`; return the results."""
+    with psycopg.connect(lease_conninfo(settings), autocommit=True) as admin:
+        return admin.execute(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
+            " WHERE application_name = %(name)s",
+            {"name": application_name[:63]},
+        ).fetchall()
+
+
+async def test_a_version_hold_whose_backend_dies_reports_its_lock_lost(
+    settings: Settings, version: str
+) -> None:
+    """The sweep asks the hold before each fork; a terminated backend answers no."""
+    async with hold_exclusive(settings, version) as hold:
+        assert hold.held
+        assert await hold.still_held()
+        assert _terminate(settings, f"{APPLICATION_NAME} recovery sweep {version}") == [(True,)]
+        assert not await hold.still_held()
+    async with hold_exclusive(settings, version) as again:
+        assert again.held, "the terminated backend still held the version key"
+
+
+async def test_a_fence_hold_whose_backend_dies_reports_the_fence_lost(
+    settings: Settings, fence_application: str
+) -> None:
+    """The fence hold asks its own session, so a dropped backend is seen as a lost fence."""
+    async with hold_fence_shared(settings, application_name=fence_application) as fenced:
+        assert fenced.held
+        assert await fenced.still_held()
+        # Every sweep's fence session shares one name, so find this one by its key.
+        key = promotion_fence_key(fence_application) & 0xFFFF_FFFF_FFFF_FFFF
+        with psycopg.connect(lease_conninfo(settings), autocommit=True) as admin:
+            terminated = admin.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_locks"
+                " WHERE locktype = 'advisory' AND granted AND objsubid = 1"
+                " AND classid = %(high)s::bigint::oid AND objid = %(low)s::bigint::oid",
+                {"high": key >> 32, "low": key & 0xFFFF_FFFF},
+            ).fetchall()
+        assert terminated == [(True,)]
+        assert not await fenced.still_held()
+
+
 async def test_registration_keeps_the_first_time(
     settings: Settings, version: str, registry_cleanup: None
 ) -> None:
@@ -181,7 +226,7 @@ async def test_sweeps_hold_the_promotion_fence_together(
         hold_fence_shared(settings, application_name=fence_application) as first,
         hold_fence_shared(settings, application_name=fence_application) as second,
     ):
-        assert first and second
+        assert first.held and second.held
         with pytest.raises(PromotionFenceTimeoutError):
             await asyncio.to_thread(_promote_within, settings, fence_application, 0.2)
     await asyncio.to_thread(_promote_within, settings, fence_application, 5)
@@ -212,18 +257,18 @@ async def test_a_sweep_holding_the_fence_blocks_promotion_until_released(
     thread = threading.Thread(target=promote)
     try:
         async with hold_fence_shared(settings, application_name=fence_application) as fenced:
-            assert fenced
+            assert fenced.held
             thread.start()
             await asyncio.sleep(0.5)
             assert not promoted.is_set(), "promotion ran while a sweep held the fence"
             async with hold_fence_shared(settings, application_name=fence_application) as late:
-                assert not late, "a new sweep took the fence ahead of a waiting promotion"
+                assert not late.held, "a new sweep took the fence ahead of a waiting promotion"
         assert await asyncio.to_thread(promoted.wait, 30), "promotion never took the fence"
         async with hold_fence_shared(settings, application_name=fence_application) as during:
-            assert not during
+            assert not during.held
     finally:
         release.set()
         await asyncio.to_thread(thread.join, 30)
     assert failure == []
     async with hold_fence_shared(settings, application_name=fence_application) as after:
-        assert after
+        assert after.held

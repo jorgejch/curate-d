@@ -2,12 +2,14 @@
 
 The planner's rules and the gate's decisions are unit-tested; what can only be checked
 here is that each remedy actually lands, and that each gate holds against the real locks
-and registry: re-enqueueing returns a row to its own queue under its own identifier,
-forking produces a linked row on the target version, and a row of a live executor or a
-live, unregistered or newer version is left exactly as it was found.
+and registry: a redispatch resumes a row onto its own queue under its own identifier and
+counts itself in the row's attributes, forking produces a linked row on the target
+version, and a row of a live executor or a live, unregistered or newer version is left
+exactly as it was found.
 
 Every workflow this seeds carries a version no deployed worker runs, on a queue no worker
-consumes, so the workers in the local stack cannot dequeue them mid-assertion. The sweep is
+consumes, so the workers in the local stack cannot dequeue them mid-assertion. The sweep
+refuses queues outside curate.d's own, so `_admit_test_queues` adds this module's. The sweep is
 database-wide, so assertions about `failed` filter to the test's own rows. The stack's own
 rows are on a version that never registered, so the sweep leaves them alone.
 
@@ -25,16 +27,18 @@ from uuid import uuid4
 
 import pytest
 from dbos import DBOS, SetEnqueueOptions, SetWorkflowID, WorkflowHandleAsync
-from dbos._utils import INTERNAL_QUEUE_NAME, GlobalParams
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from curate_d.config import Settings
-from curate_d.runtime import dbos_app
+from curate_d.runtime import dbos_app, sweep
 from curate_d.runtime.dbos_app import build_dbos_config, configure
 from curate_d.runtime.lease import ExecutorLease
 from curate_d.runtime.profiles import WorkerProfile
 from curate_d.runtime.sweep import (
+    MAX_SWEEP_REDISPATCHES,
+    REDISPATCH_COUNT_ATTRIBUTE,
+    REDISPATCH_VERSION_ATTRIBUTE,
     DBOSRecoveryControl,
     RecoveryAction,
     SweepOutcome,
@@ -64,6 +68,17 @@ ALL_VERSIONS = [*REGISTERED, UNREGISTERED_VERSION]
 
 RUN_QUEUE = f"sweep-run-{_RUN}"
 """A queue only this process listens to, for rows the test wants to see run."""
+
+UNCONSUMED_QUEUE = "sweep-unconsumed"
+"""A queue no process listens to, for rows the test only inspects."""
+
+
+@pytest.fixture(autouse=True)
+def _admit_test_queues(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let the sweep fork and redispatch onto this module's queues as onto curate.d's own."""
+    monkeypatch.setattr(
+        sweep, "_DEQUEUED_QUEUES", sweep._DEQUEUED_QUEUES | {RUN_QUEUE, UNCONSUMED_QUEUE}
+    )
 
 
 @DBOS.workflow()
@@ -185,7 +200,7 @@ async def _seed_pending(
     executor_id: str | None,
     version: str | None,
     status: str = "PENDING",
-    queue_name: str | None = "sweep-unconsumed",
+    queue_name: str | None = UNCONSUMED_QUEUE,
     queue_partition_key: str | None = None,
     delay_until_epoch_ms: int | None = None,
 ) -> None:
@@ -203,7 +218,7 @@ async def _seed_pending(
             {
                 "id": workflow_id,
                 "name": "tests.sweep.stranded",
-                "app": GlobalParams.app_name,
+                "app": dbos_app.application_name(Settings().environment),
                 "executor": executor_id,
                 "version": version,
                 "status": status,
@@ -270,11 +285,45 @@ async def test_a_workflow_left_by_a_retired_identity_is_recovered(
     assert workflow_id in outcome.reenqueued
     row = await _row(ledger_engine, workflow_id)
     assert row["status"] == "ENQUEUED", "the orphan was not returned to a queue"
-    assert row["queue_name"] == "sweep-unconsumed", "the orphan did not keep its own queue"
+    assert row["queue_name"] == UNCONSUMED_QUEUE, "the orphan did not keep its own queue"
+    assert row["executor_id"] == RETIRED_EXECUTOR, "resume reassigned the row's executor"
     # Re-enqueueing keeps the identifier, which is what preserves the idempotency key
     # the reconciler derives from content and destination.
     assert row["forked_from"] is None
     assert row["application_version"] == CURRENT_VERSION
+    status = await DBOS.get_workflow_status_async(workflow_id)
+    assert status is not None
+    assert status.attributes == {
+        REDISPATCH_COUNT_ATTRIBUTE: 1,
+        REDISPATCH_VERSION_ATTRIBUTE: CURRENT_VERSION,
+    }
+
+
+async def test_a_row_at_the_redispatch_cap_is_reported_and_left_pending(
+    dbos: None, ledger_engine: AsyncEngine
+) -> None:
+    """Resume resets DBOS's own recovery attempts, so the sweep's count stops the loop."""
+    workflow_id = f"sweep-capped-{uuid4()}"
+    await _seed_pending(
+        ledger_engine,
+        workflow_id=workflow_id,
+        executor_id=RETIRED_EXECUTOR,
+        version=CURRENT_VERSION,
+    )
+    await DBOS.update_workflow_attributes_async(
+        workflow_id,
+        {
+            REDISPATCH_COUNT_ATTRIBUTE: MAX_SWEEP_REDISPATCHES,
+            REDISPATCH_VERSION_ATTRIBUTE: CURRENT_VERSION,
+        },
+    )
+    before = await _row(ledger_engine, workflow_id)
+
+    outcome = await _sweep()
+
+    assert workflow_id not in outcome.reenqueued
+    assert "the cap of" in _failed(outcome, workflow_id)[workflow_id]
+    assert await _row(ledger_engine, workflow_id) == before
 
 
 async def test_a_workflow_left_by_a_superseded_version_is_recovered(
@@ -294,7 +343,7 @@ async def test_a_workflow_left_by_a_superseded_version_is_recovered(
     assert workflow_id in [original for original, _ in outcome.forked]
     fork = await _fork_of(ledger_engine, workflow_id)
     assert fork["status"] == "ENQUEUED"
-    assert fork["queue_name"] == "sweep-unconsumed"
+    assert fork["queue_name"] == UNCONSUMED_QUEUE
     # The point of the remedy: the copy runs on a version a live worker actually serves.
     assert fork["application_version"] == CURRENT_VERSION
     assert fork["workflow_uuid"] == recovery_successor_id(workflow_id)
@@ -448,12 +497,12 @@ async def test_fork_preserves_routing_and_retires_source(
     assert original not in again.retired
 
 
-@pytest.mark.parametrize("queue", [None, INTERNAL_QUEUE_NAME])
+@pytest.mark.parametrize("queue", [None, "_dbos_internal_queue", "retired-queue"])
 @pytest.mark.parametrize("on_target", [True, False])
-async def test_a_row_without_a_named_queue_is_refused_and_untouched(
+async def test_a_row_without_a_curate_d_queue_is_refused_and_untouched(
     dbos: None, ledger_engine: AsyncEngine, queue: str | None, on_target: bool
 ) -> None:
-    """Every worker dequeues the internal queue: recovering it could cross the profile split."""
+    """Every worker dequeues the internal queue and none another: recovery could misroute it."""
     workflow_id = f"sweep-unrouted-{uuid4()}"
     await _seed_pending(
         ledger_engine,
@@ -637,10 +686,11 @@ async def test_the_sweep_reenqueues_under_a_free_lease_and_holds_it_meanwhile(
     claimed_mid_sweep: list[bool] = []
     reenqueue = DBOSRecoveryControl.reenqueue
 
-    async def observe(control: DBOSRecoveryControl, workflow_id: str, executor_id: str) -> bool:
-        if executor_id == executor:
+    async def observe(control: DBOSRecoveryControl, resumed: str, *, queue_name: str) -> None:
+        """Try to lease the dead executor while its row is resumed, then resume it."""
+        if resumed == workflow_id:
             claimed_mid_sweep.append(await asyncio.to_thread(restarting.try_acquire))
-        return await reenqueue(control, workflow_id, executor_id)
+        await reenqueue(control, resumed, queue_name=queue_name)
 
     monkeypatch.setattr(DBOSRecoveryControl, "reenqueue", observe)
     try:
