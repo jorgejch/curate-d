@@ -107,7 +107,9 @@ how it is made idempotent, whether it belongs in a workflow — against the `dbo
   checkpointed. That departs from the skill's rule against starting workflows from a step.
   A re-run repeats the whole sweep, which is safe only because every fork is keyed by the
   deterministic successor ID, every cancel is gated on a re-read status, and every resume on
-  a re-read status under the dead executor's lease; keep it that way. Each write is verified
+  a re-read status under the dead executor's lease, re-read again right before the resume (a
+  cancel landing inside that round trip is the documented gap); keep it that way. Each
+  write is verified
   after: a resumed row must read back ENQUEUED or dequeued elsewhere
   (`recovery_sweep.redispatch_unverified`), a cancelled original CANCELLED
   (`recovery_sweep.lineage_unverified`). A resume resets DBOS's recovery-attempt count, so

@@ -642,7 +642,7 @@ class _Redispatch(StrEnum):
     """Resumed, and already running on a live executor when read back."""
 
     UNOWNED = "unowned"
-    """Not resumed: the re-read found it no longer PENDING under the dead executor."""
+    """Not resumed: a re-read found it no longer PENDING under the dead executor."""
 
 
 class _RedispatchError(Exception):
@@ -660,9 +660,13 @@ async def _redispatch(
     """Resume one row of a dead executor onto its own queue, gated and verified.
 
     Call only while holding `executor_id`'s lease. DBOS's resume is unconditional, so the
-    row is re-read first and resumed only if still PENDING under `executor_id`, onto the
-    queue it names; the sweep's redispatch count is recorded on the row before the resume.
-    The row is read again afterwards to confirm the resume took.
+    premise, PENDING under `executor_id`, is checked twice: on a first re-read that also
+    gives the queue and the redispatch count, and on a second one right before the resume,
+    after the count is recorded on the row. The count write is a round trip in which an
+    operator's cancel may land, and a resume after it would undo the cancel; the second
+    re-read narrows that window to the resume's own round trip. A count recorded for a row
+    then left alone is an over-count, never an under-count. The row is resumed onto the
+    queue it names and read again afterwards to confirm the resume took.
 
     Raises:
         _RedispatchError: The re-read row names a queue no curate.d worker dequeues, it
@@ -695,6 +699,9 @@ async def _redispatch(
             REDISPATCH_VERSION_ATTRIBUTE: status.app_version,
         },
     )
+    current = await control.status(workflow_id)
+    if current is None or current.status != PENDING or current.executor_id != executor_id:
+        return _Redispatch.UNOWNED
     await control.reenqueue(workflow_id, queue_name=queue_name)
     after = await control.status(workflow_id)
     if after is not None and after.status == ENQUEUED:

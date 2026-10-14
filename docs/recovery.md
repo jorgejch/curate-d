@@ -215,6 +215,11 @@ the only source of a schedule's cron, queue and context: a hand edit to a DBOS s
 reverted within one `schedule_reconciliation_interval_seconds`. Pause the schedule, which
 survives reconciliation, or change `recovery_sweep_schedule` and restart the I/O workers.
 
+**Cancelling a dead executor's rows.** Pause the `recovery-sweep` schedule first (Kill switch)
+and don't run the operator sweep, then cancel, then resume the schedule. A resume is
+unconditional, so a sweep resuming a PENDING row of a dead executor can undo a cancel that
+lands just before it (Known gaps: resume after a cancel). A cancel at any other time is safe.
+
 **Clearing a row's redispatch count.** The sweep keeps it in the row's workflow attributes,
 under `curate_d.recovery_redispatches` and `curate_d.recovery_redispatch_version`, and starts
 again from zero under a new application version. To let it resume a row at the cap under the
@@ -268,6 +273,11 @@ The sweep's are left to the follow-up `harden-recovery-sweep`; the last two are 
 - **Redispatch count before the resume.** The sweep records a row's redispatch count before
   it resumes the row. A crash between the two over-counts by one, so the row reaches
   `MAX_SWEEP_REDISPATCHES` one resume early; it is never resumed uncounted.
+- **Resume after a cancel.** A resume is unconditional; an operator cancel of a dead
+  executor's PENDING row landing between the sweep's last re-read and its resume is undone,
+  and the read-back cannot tell. Before cancelling a dead executor's rows, pause the
+  `recovery-sweep` schedule and don't run the operator sweep; resume the schedule after. A
+  cancel at any other time is safe: the next sweep's re-read sees CANCELLED and leaves the row.
 - **Schedule authority, check to write.** A reconciliation's writes commit on DBOS's pool, not
   on the authority's session, so a worker that loses the authority, or sees latest move,
   between its check and its write can leave a stale schedule row. It reads back after and

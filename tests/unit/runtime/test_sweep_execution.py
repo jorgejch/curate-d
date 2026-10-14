@@ -1413,6 +1413,27 @@ async def test_a_row_dequeued_right_after_its_resume_is_left_running(
     assert ("reenqueue", ORIGINAL, "stage") in control.writes()
 
 
+async def test_a_row_cancelled_after_the_counter_write_is_not_resumed(
+    locks: FakeLockServer,
+) -> None:
+    """A row cancelled after the counter write is not resumed."""
+
+    class _Cancelling(FakeRecoveryControl):
+        """Cancel each row as an operator would, right after its count is recorded."""
+
+        async def set_attributes(self, workflow_id: str, attributes: dict[str, object]) -> None:
+            await super().set_attributes(workflow_id, attributes)
+            await self.cancel(workflow_id)
+
+    control = _Cancelling([workflow_status(ORIGINAL, version="v2")])
+    with capture_logs() as events:
+        outcome = await _sweep(control, locks=locks)
+    assert outcome == SweepOutcome()
+    assert [call for call in control.writes() if call[0] == "reenqueue"] == []
+    assert control.rows[ORIGINAL].status == "CANCELLED"
+    assert [event for event in events if event["log_level"] == "error"] == []
+
+
 async def test_a_resume_that_does_not_take_is_a_failure(
     monkeypatch: pytest.MonkeyPatch, locks: FakeLockServer
 ) -> None:
