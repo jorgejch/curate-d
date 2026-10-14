@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from structlog.testing import capture_logs
 
 from curate_d.config import Settings
 from curate_d.runtime import retention
@@ -89,10 +90,16 @@ class _Status:
 
 @dataclass
 class _FakeDBOS:
-    """Serve listed workflow IDs in batches and record every list and delete call."""
+    """Serve listed workflow IDs in batches and record every list, re-read and delete call.
+
+    A row in `revived` is listed as eligible but drops out at the re-read, as a row resumed
+    between the two calls does, and is no longer eligible afterwards.
+    """
 
     rows: list[str]
+    revived: set[str] = field(default_factory=set)
     listed: list[dict[str, object]] = field(default_factory=list)
+    reread: list[dict[str, object]] = field(default_factory=list)
     deleted: list[list[str]] = field(default_factory=list)
 
     def list_workflows(
@@ -102,19 +109,22 @@ class _FakeDBOS:
         completed_before: str,
         load_input: bool,
         load_output: bool,
-        limit: int,
+        limit: int | None = None,
+        workflow_ids: list[str] | None = None,
     ) -> list[_Status]:
-        """Return the first `limit` rows not yet deleted."""
-        self.listed.append(
-            {
-                "status": status,
-                "completed_before": completed_before,
-                "load_input": load_input,
-                "load_output": load_output,
-                "limit": limit,
-            }
-        )
-        return [_Status(workflow_id) for workflow_id in self.rows[:limit]]
+        """Return the first `limit` eligible rows, or the eligible ones of `workflow_ids`."""
+        call: dict[str, object] = {
+            "status": status,
+            "completed_before": completed_before,
+            "load_input": load_input,
+            "load_output": load_output,
+        }
+        if workflow_ids is None:
+            self.listed.append({**call, "limit": limit})
+            return [_Status(workflow_id) for workflow_id in self.rows[:limit]]
+        self.reread.append({**call, "workflow_ids": workflow_ids, "limit": limit})
+        self.rows = [row for row in self.rows if row not in self.revived]
+        return [_Status(workflow_id) for workflow_id in workflow_ids if workflow_id in self.rows]
 
     def delete_workflows(self, workflow_ids: list[str]) -> None:
         """Drop the given rows, as DBOS's delete does."""
@@ -161,3 +171,66 @@ def test_the_prune_lists_only_terminal_rows_completed_by_the_cutoff(
         "MAX_RECOVERY_ATTEMPTS_EXCEEDED",
     }
     assert fake.deleted == []
+
+
+def test_a_row_revived_between_the_listing_and_the_delete_is_left_in_place(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeDBOS(rows=["wf-0", "wf-1", "wf-2"], revived={"wf-1"})
+    monkeypatch.setattr(retention, "DBOS", fake)
+
+    deleted = prune_completed_workflows(NOW, batch_size=3)
+
+    assert deleted == 2
+    assert fake.deleted == [["wf-0", "wf-2"]]
+
+
+def test_the_re_read_binds_the_batchs_ids_under_the_original_terminal_and_cutoff_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeDBOS(rows=["wf-0", "wf-1", "wf-2"])
+    monkeypatch.setattr(retention, "DBOS", fake)
+
+    prune_completed_workflows(NOW, batch_size=2)
+
+    assert fake.reread == [
+        {
+            "status": list(TERMINAL_STATUSES),
+            "completed_before": NOW.isoformat(),
+            "load_input": False,
+            "load_output": False,
+            "workflow_ids": batch,
+            "limit": None,
+        }
+        for batch in (["wf-0", "wf-1"], ["wf-2"])
+    ]
+
+
+def test_a_revived_row_is_logged_by_id_under_workflow_history_revived_during_prune(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeDBOS(rows=["wf-0", "wf-1", "wf-2"], revived={"wf-0", "wf-2"})
+    monkeypatch.setattr(retention, "DBOS", fake)
+
+    with capture_logs() as events:
+        prune_completed_workflows(NOW, batch_size=3)
+
+    revived = [
+        event for event in events if event["event"] == "workflow_history.revived_during_prune"
+    ]
+    assert len(revived) == 1
+    assert revived[0]["log_level"] == "error"
+    assert revived[0]["workflow_ids"] == ["wf-0", "wf-2"]
+
+
+def test_a_batch_whose_every_row_was_revived_deletes_nothing_and_the_walk_continues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeDBOS(rows=["wf-0", "wf-1", "wf-2", "wf-3"], revived={"wf-0", "wf-1"})
+    monkeypatch.setattr(retention, "DBOS", fake)
+
+    deleted = prune_completed_workflows(NOW, batch_size=2)
+
+    assert deleted == 2
+    assert fake.deleted == [["wf-2", "wf-3"]]
+    assert len(fake.listed) == 3

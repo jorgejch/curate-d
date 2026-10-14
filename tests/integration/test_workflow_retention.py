@@ -177,6 +177,35 @@ async def test_a_completed_record_older_than_the_period_is_removed(
     assert not await _exists(ledger_engine, workflow_id)
 
 
+async def test_resuming_a_success_seed_is_a_no_op_and_the_prune_still_removes_it(
+    dbos: None, ledger_engine: AsyncEngine, settings_with_retention: Settings
+) -> None:
+    """Pins DBOS's no-op resume of a SUCCESS row, which keeps such a row out of the prune race."""
+    workflow_id = f"retention-resumed-{uuid4()}"
+    aged = NOW - timedelta(days=RETENTION_DAYS + 1)
+    await _seed_workflow(
+        ledger_engine, workflow_id=workflow_id, status="SUCCESS", created_at=aged, completed_at=aged
+    )
+
+    await DBOS.resume_workflow_async(workflow_id)
+
+    async with ledger_engine.connect() as connection:
+        row = (
+            await connection.execute(
+                text(
+                    "SELECT status, completed_at FROM dbos.workflow_status"
+                    " WHERE workflow_uuid = :id"
+                ),
+                {"id": workflow_id},
+            )
+        ).one()
+    assert (row.status, row.completed_at) == ("SUCCESS", _epoch_ms(aged))
+
+    await prune_workflow_history(settings_with_retention, now=NOW)
+
+    assert not await _exists(ledger_engine, workflow_id)
+
+
 async def test_a_recent_completed_record_survives(
     dbos: None, ledger_engine: AsyncEngine, settings_with_retention: Settings
 ) -> None:

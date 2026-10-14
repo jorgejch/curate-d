@@ -32,9 +32,12 @@ binding, so this replaces it, and accepts what that costs:
   them on the maintenance queue, a tick a day; and a second one running at once would only
   find fewer rows to delete.
 - No VACUUM of the workflow tables after a prune; autovacuum reclaims the space.
-- The list and the delete are separate calls. A workflow resumed by hand in between is
-  deleted although it is live again. Only an operator resume of a record older than the
-  retention period can hit that window.
+- No conditional delete. Each batch is re-read under the same filter immediately before
+  its delete, and only the rows still terminal and aged are deleted; one that no longer is
+  stays, under `workflow_history.revived_during_prune`. The re-read and the delete are
+  still separate calls, and a delete leaves nothing to read back: a workflow resumed by
+  hand in between is deleted although it is live again. Only an operator resume of a
+  record older than the retention period can hit that window.
 - Only this application's rows, and unowned ones, are listed: `list_workflows` defaults
   to the calling application, where DBOS's collector swept the whole system database.
 
@@ -158,7 +161,10 @@ async def prune_workflow_history(
 def prune_completed_workflows(cutoff: datetime, *, batch_size: int = CHECKPOINT_BATCH_SIZE) -> int:
     """Delete terminal workflow records that completed at or before `cutoff`, in batches.
 
-    Synchronous: DBOS refuses its synchronous calls on a thread running an event loop.
+    Each batch is re-read under the same filter just before its delete, and a row that no
+    longer matches is kept and logged rather than deleted. It no longer matches the next
+    listing either, so the walk moves past it. Synchronous: DBOS refuses its synchronous
+    calls on a thread running an event loop.
 
     Returns:
         How many workflow records were deleted.
@@ -174,8 +180,31 @@ def prune_completed_workflows(cutoff: datetime, *, batch_size: int = CHECKPOINT_
         )
         if not batch:
             return deleted
-        DBOS.delete_workflows([status.workflow_id for status in batch])
-        deleted += len(batch)
+        listed = [status.workflow_id for status in batch]
+        eligible = _still_eligible(listed, cutoff)
+        revived = [workflow_id for workflow_id in listed if workflow_id not in eligible]
+        if revived:
+            logger.error(
+                "workflow_history.revived_during_prune",
+                workflow_ids=revived,
+                cutoff=cutoff.isoformat(),
+            )
+        kept = [workflow_id for workflow_id in listed if workflow_id in eligible]
+        if kept:
+            DBOS.delete_workflows(kept)
+            deleted += len(kept)
+
+
+def _still_eligible(workflow_ids: list[str], cutoff: datetime) -> set[str]:
+    """Return which of `workflow_ids` still read terminal and completed by `cutoff`."""
+    statuses = DBOS.list_workflows(
+        workflow_ids=workflow_ids,
+        status=list(TERMINAL_STATUSES),
+        completed_before=cutoff.isoformat(),
+        load_input=False,
+        load_output=False,
+    )
+    return {status.workflow_id for status in statuses}
 
 
 def prune_datasource_checkpoints(
