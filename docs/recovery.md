@@ -67,6 +67,10 @@ Alert on these events:
 - `worker.schedule_reconciliation_failed`: a periodic reconciliation raised (WARNING for a
   database error, ERROR for anything else). The next interval retries; if it repeats, read
   the error.
+- `workflow_history.revived_during_prune`: a row the retention prune listed was no longer
+  terminal and aged when it re-read the batch just before the delete; it was kept. No action
+  unless it repeats; then find who resumes rows older than `workflow_retention_days` (see
+  Known gaps).
 - `worker.drain_state_unknown`: a stopping worker could not read whether it left workflows
   running, so it keeps its executor lease until the process exits. If it repeats, check the
   database's reachability at shutdown.
@@ -243,7 +247,7 @@ prints that version.
 
 ## Known gaps
 
-These are left to the follow-up `harden-recovery-sweep`.
+The sweep's are left to the follow-up `harden-recovery-sweep`; the last two are accepted.
 
 - **Writes outside the lock.** Forks, cancels and resumes still commit on DBOS's own
   connections, not on the lock's session. The sweep detects a lost fence or version lock
@@ -261,3 +265,18 @@ These are left to the follow-up `harden-recovery-sweep`.
   without its step checkpoint runs again under the successor.
 - **dbos-transact-py#886.** A superseded execution's exception can become a datasource step's
   durable error, which a scheduled sweep turns from a rare takeover into routine work.
+- **Redispatch count before the resume.** The sweep records a row's redispatch count before
+  it resumes the row. A crash between the two over-counts by one, so the row reaches
+  `MAX_SWEEP_REDISPATCHES` one resume early; it is never resumed uncounted.
+- **Schedule authority, check to write.** A reconciliation's writes commit on DBOS's pool, not
+  on the authority's session, so a worker that loses the authority, or sees latest move,
+  between its check and its write can leave a stale schedule row. It reads back after and
+  logs `worker.schedule_reconciliation_unverified`; a worker of the latest version rewrites
+  the rows within one `schedule_reconciliation_interval_seconds`.
+- **Prune re-read to delete.** DBOS has no conditional delete, and a delete leaves nothing to
+  read back. The retention prune re-reads each batch under its terminal and cutoff filter
+  just before deleting it, which keeps a row resumed before the re-read
+  (`workflow_history.revived_during_prune`), but a hand resume of a row older than
+  `workflow_retention_days` landing between the re-read and the delete loses that run: its
+  record and its aged checkpoints are deleted. Don't resume aged terminal rows; enqueue new
+  work under a new ID.
