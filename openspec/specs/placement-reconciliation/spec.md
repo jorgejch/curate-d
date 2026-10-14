@@ -50,10 +50,10 @@ Source retention SHALL be determined by policy evaluation, not by transfer compl
 - **WHEN** no policy explicitly permits releasing a source
 - **THEN** the source is retained regardless of how many placements exist
 
-#### Scenario: Source counts toward required copies
-- **WHEN** a policy requires a number of copies and the source location is itself an eligible copy
-- **THEN** the source is counted toward that requirement
-- **AND** the source is not released while it is needed to satisfy the requirement
+#### Scenario: Required copies exist without the source
+- **WHEN** a policy permits release and requires a number of copies
+- **THEN** only strongly verified placements count toward that number, and the source does not
+- **AND** the source is retained until that many such placements exist
 
 ### Requirement: Verification gate on source release
 

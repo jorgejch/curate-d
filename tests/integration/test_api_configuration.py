@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator, Iterator
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from curate_d.api.app import create_app
@@ -20,7 +20,7 @@ from curate_d.domain import (
     StrongFingerprint,
 )
 from curate_d.ledger import ContentObjectRepository, PlacementRepository
-from curate_d.ledger.tables import content_objects, placements
+from curate_d.ledger.tables import configurations, content_objects, placements
 from curate_d.rendering.templates import parse_templates
 
 pytestmark = pytest.mark.integration
@@ -139,4 +139,55 @@ async def test_a_template_change_leaves_existing_placements_untouched(
             await connection.execute(delete(placements).where(placements.c.id == placed.id))
             await connection.execute(
                 delete(content_objects).where(content_objects.c.id == content.id)
+            )
+
+
+async def test_a_stored_policy_with_the_retired_flag_is_still_in_force(
+    http: TestClient, ledger_engine: AsyncEngine
+) -> None:
+    """A version stored with `source_counts_as_copy` is served without it; a new one is refused."""
+    before = http.get("/configuration/policy").json()
+    rule = {"name": f"keep-{uuid.uuid4().hex[:8]}", "release_source": False, "required_copies": 3}
+    stored = {
+        "destinations": [],
+        "rules": [],
+        "retention": [rule | {"source_counts_as_copy": False}],
+    }
+    policies = configurations.c.kind == ConfigurationKind.POLICY.value
+    async with ledger_engine.begin() as connection:
+        version = (
+            int(await connection.scalar(select(func.max(configurations.c.version)).where(policies)))
+            + 1
+        )
+        await connection.execute(
+            configurations.update().where(policies, configurations.c.active).values(active=False)
+        )
+        await connection.execute(
+            configurations.insert().values(
+                kind=ConfigurationKind.POLICY.value,
+                version=version,
+                document=stored,
+                active=True,
+                created_by="test-retired-flag",
+            )
+        )
+    try:
+        served = http.get("/configuration/policy")
+        assert served.status_code == 200
+        assert served.json()["version"] == version
+        [retention] = served.json()["document"]["retention"]
+        assert (retention["name"], retention["required_copies"]) == (rule["name"], 3)
+        assert "source_counts_as_copy" not in retention
+
+        refused = http.put("/configuration/policy", json=stored)
+        assert refused.status_code == 422
+        assert "source_counts_as_copy" in refused.text
+        assert http.get("/configuration/policy").json() == served.json()
+    finally:
+        async with ledger_engine.begin() as connection:
+            await ConfigurationRepository(connection).activate(
+                ConfigurationKind.POLICY,
+                before["document"],
+                parse_policy,
+                created_by="test-restore",
             )

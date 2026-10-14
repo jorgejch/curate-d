@@ -1,4 +1,4 @@
-"""Retention decisions: retain by default, the original as a copy, the verification gate."""
+"""Retention decisions: retain by default, copies besides the original, the verification gate."""
 
 from uuid import uuid4
 
@@ -28,14 +28,9 @@ def _copy(
     ).model_copy(update={"state": state, "verification_level": level})
 
 
-def _releasing(required: int = 2, *, counts: bool = True) -> RetentionRule:
-    """A rule that permits release once `required` copies exist."""
-    return RetentionRule(
-        name="archive",
-        release_source=True,
-        required_copies=required,
-        source_counts_as_copy=counts,
-    )
+def _releasing(required: int = 2) -> RetentionRule:
+    """Return a rule that permits release once `required` copies exist."""
+    return RetentionRule(name="archive", release_source=True, required_copies=required)
 
 
 def test_originals_are_retained_when_no_rule_applies() -> None:
@@ -51,14 +46,24 @@ def test_a_rule_that_does_not_permit_release_retains() -> None:
     assert (decision.outcome, decision.rule) == (RetentionOutcome.RETAIN, "keep")
 
 
-def test_the_original_is_kept_while_it_is_one_of_the_required_copies() -> None:
-    """Two required, one placement: the original is the second copy."""
+def test_the_original_is_kept_until_the_required_copies_exist_without_it() -> None:
+    """Two required, one placement: the original and one copy are not enough."""
     decision = decide_retention(_releasing(2), [_copy("a")])
     assert decision.outcome is RetentionOutcome.RETAIN
-    assert decision.reason == (
-        "the original is one of the 2 required copies; releasing it would leave 1"
-    )
+    assert decision.reason == "1 of 2 required copies are strongly verified"
     assert decision.strong_copies == ("a",)
+    assert "source_counts_as_copy" not in decision.audit_details()
+
+
+def test_the_original_never_counts_toward_required_copies() -> None:
+    """One required: no placement retains, one strong placement permits release."""
+    rule = _releasing(1)
+    alone = decide_retention(rule, [])
+    copied = decide_retention(rule, [_copy("a")])
+    assert alone.outcome is RetentionOutcome.RETAIN
+    assert alone.reason == "0 of 1 required copies are strongly verified"
+    assert copied.outcome is RetentionOutcome.RELEASE_PERMITTED
+    assert "source_counts_as_copy" not in copied.audit_details()
 
 
 def test_enough_strong_copies_without_the_original_permit_release() -> None:
@@ -74,7 +79,7 @@ def test_enough_strong_copies_without_the_original_permit_release() -> None:
 def test_weakly_verified_copies_do_not_satisfy_the_gate() -> None:
     """Retained, and the reason names the copies that did not count."""
     decision = decide_retention(
-        _releasing(2, counts=False),
+        _releasing(2),
         [
             _copy("a"),
             _copy("b", VerificationLevel.WEAK),
