@@ -26,6 +26,7 @@ from curate_d.runtime.lease import (
 from curate_d.runtime.profiles import WorkerProfile
 from curate_d.runtime.version_lease import VersionRegistryError
 from curate_d.worker import main as worker_main
+from tests.unit.conftest import NetworkAccessInUnitTestError
 from tests.unit.runtime.fake_lease import FakeLockServer
 
 
@@ -203,7 +204,9 @@ def test_the_full_startup_sequence(calls: list[tuple[str, object]], profile: Wor
 
 
 def test_the_reconciler_is_stopped_before_the_drain(
-    calls: list[tuple[str, object]], monkeypatch: pytest.MonkeyPatch
+    calls: list[tuple[str, object]],
+    drain_client: _DrainClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """It writes through DBOS, so it must be stopped and joined before DBOS is destroyed."""
     monkeypatch.setattr(
@@ -403,6 +406,13 @@ def test_main_exits_at_once_when_the_lease_is_lost(monkeypatch: pytest.MonkeyPat
     with pytest.raises(SystemExit):
         worker_main.main()
     assert exits == [worker_main.EXIT_LEASE_LOST]
+
+
+def test_an_unsubstituted_drain_client_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A unit test that reaches dbos_app.client without patching it fails loudly."""
+    monkeypatch.setattr(DBOS, "destroy", lambda workflow_completion_timeout_sec: None)
+    with pytest.raises(NetworkAccessInUnitTestError, match=r"Patch dbos_app\.client"):
+        worker_main._drain_dbos(Settings(), "drain-pin", 5)
 
 
 def test_the_drain_reports_workflows_left_running(
