@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/jorgejch/curate-d/security/advisories/new
+    about: Report it privately; never in a public issue.
+  - name: Report a Code of Conduct violation
+    url: https://hddd.dev/contact/
+    about: Reports go to the maintainer privately.

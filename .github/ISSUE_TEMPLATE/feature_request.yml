@@ -1,0 +1,37 @@
+name: Feature request
+description: A new capability, provider or behaviour change.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Agreed features are built through an OpenSpec change (see [CONTRIBUTING.md](https://github.com/jorgejch/curate-d/blob/dev/CONTRIBUTING.md#how-a-change-is-made)). This issue settles whether and roughly how; the proposal settles the details.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What you're trying to do, and what stops you today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+      description: What curate.d should do instead. Say which capability it touches if you know (`openspec/specs/`).
+    validations:
+      required: true
+  - type: textarea
+    id: failure
+    attributes:
+      label: Behaviour on failure
+      description: What should happen when the new behaviour can't complete or isn't sure. Quarantine, retry or stop?
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contribution
+      options:
+        - label: I'd like to write the OpenSpec proposal and implement it.
