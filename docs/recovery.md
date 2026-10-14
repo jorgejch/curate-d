@@ -251,7 +251,7 @@ The sweep's are left to the follow-up `harden-recovery-sweep`; the last two are 
 
 - **Writes outside the lock.** Forks, cancels and resumes still commit on DBOS's own
   connections, not on the lock's session. The sweep detects a lost fence or version lock
-  before each fork and before its cancel, stops the batch (`recovery_sweep.version_lock_lost`),
+  before each fork and before every cancel, stops the batch (`recovery_sweep.version_lock_lost`),
   and verifies every resume and cancel by reading the row back. What remains is the window
   between a check and the write it guards. A source-version worker that starts there can
   revive an original as it is forked: the original runs until its next step, where the cancel
