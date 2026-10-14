@@ -54,20 +54,52 @@ Alert on these events:
   version, and most likely kills the worker that runs it. Find why from that worker's logs,
   then cancel the row, or fix it and clear its count (Triage).
 - `recovery_sweep.version_lock_lost`: a lock session dropped mid-batch; the batch stopped and
-  the next tick carries on. If it repeats, check the database and pooler connections.
+  the next tick carries on. If it repeats, check the database and pooler connections; see
+  [Connection pooling](#connection-pooling).
 - `recovery_sweep.lineage_unverified`: a forked original did not read CANCELLED after its
   cancel. The next tick retires it again; if it stays live, cancel it with
   `DBOSClient.cancel_workflow(<id>)`, since its successor carries the work.
 - `worker.schedule_reconciliation_unverified`: a worker lost the schedule authority, or saw
   the latest version move, while writing schedules. A worker on the latest version repairs the
   rows within `schedule_reconciliation_interval_seconds`; if it repeats, check that an I/O
-  worker of the latest version runs.
+  worker of the latest version runs, then the pooler mode under
+  [Connection pooling](#connection-pooling).
 - `worker.schedule_reconciliation_failed`: a periodic reconciliation raised (WARNING for a
   database error, ERROR for anything else). The next interval retries; if it repeats, read
   the error.
 - `worker.drain_state_unknown`: a stopping worker could not read whether it left workflows
   running, so it keeps its executor lease until the process exits. If it repeats, check the
   database's reachability at shutdown.
+
+## Connection pooling
+
+The recovery machinery holds session-level advisory locks on connections the app opens
+itself through `runtime/lease.py`: the executor lease (every worker), the version lease and
+promotion fence (`runtime/version_lease.py`, workers and the sweep), and the schedule
+authority (`runtime/schedule_authority.py`, each I/O worker at startup and then every
+`schedule_reconciliation_interval_seconds`, default 600 s, from `worker/schedules.py`).
+
+A session lock lives only on one pinned server connection. A transaction-mode pooler, as
+PgBouncer defaults to, swaps the server connection between statements. The lock is taken on
+one backend and the next statement runs on another, so probes report the lock lost, the
+unlock misses it, and the orphaned lock blocks that key until the pooler recycles the
+backend. You would see `recovery_sweep.version_lock_lost`,
+`worker.schedule_reconciliation_unverified` and executor-lease loss at startup.
+
+The ledger database URL must therefore reach PostgreSQL directly or through a session-mode
+pooler. That pooler must also:
+
+- detect vanished clients with TCP keepalives, so a dead worker's locks are released;
+- keep `server_reset_query` at its default `DISCARD ALL`, which releases advisory locks when
+  the client goes. An emptied reset query hands a dead worker's lock to the next client.
+
+Both environments connect through a CloudNativePG `Pooler` (PgBouncer) in session mode, with
+keepalives that close a dead client within about 90 seconds and the default reset query. The
+deployment repository's manifests and their tests pin session mode and the URL's route
+through it. `compose.yaml` connects directly, with server-side `tcp_keepalives_*` set.
+
+For capacity, count one extra short-lived pooler client per I/O replica per reconciliation
+interval, on top of each worker's two long-lived lease sessions.
 
 ## Rollback and roll-forward
 
