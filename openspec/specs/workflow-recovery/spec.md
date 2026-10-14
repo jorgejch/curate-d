@@ -396,10 +396,14 @@ The operator sweep SHALL print every field of the sweep's outcome. It SHALL exit
 
 ### Requirement: Re-enqueue is gated, verified and capped
 
-The sweep SHALL re-enqueue a dead executor's row through DBOS's public resume, only after re-reading that the row is still PENDING under that executor, always onto the row's own queue. After the resume it SHALL read the row back: ENQUEUED counts as re-enqueued; PENDING under another executor counts as left running; anything else SHALL be reported as failed and logged as `recovery_sweep.redispatch_unverified`. Because a resume resets DBOS's recovery-attempt count, the sweep SHALL count its own redispatches of a row in the row's workflow attributes, per application version, and SHALL refuse a row at `MAX_SWEEP_REDISPATCHES` (10), reporting it as failed and logging `recovery_sweep.redispatch_cap`. A count recorded under another version SHALL start at zero.
+The sweep SHALL re-enqueue a dead executor's row through DBOS's public resume, only after re-reading, immediately before the resume, that the row is still PENDING under that executor, always onto the row's own queue. After the resume it SHALL read the row back: ENQUEUED counts as re-enqueued; PENDING under another executor counts as left running; anything else SHALL be reported as failed and logged as `recovery_sweep.redispatch_unverified`. Because a resume resets DBOS's recovery-attempt count, the sweep SHALL count its own redispatches of a row in the row's workflow attributes, per application version, and SHALL refuse a row at `MAX_SWEEP_REDISPATCHES` (10), reporting it as failed and logging `recovery_sweep.redispatch_cap`. A count recorded under another version SHALL start at zero.
 
 #### Scenario: Row changed after listing
 - **WHEN** the re-read shows the row no longer PENDING under the dead executor
+- **THEN** nothing is resumed and the row is not counted as re-enqueued
+
+#### Scenario: Row cancelled after the counter write
+- **WHEN** the row no longer reads PENDING under the dead executor right before the resume
 - **THEN** nothing is resumed and the row is not counted as re-enqueued
 
 #### Scenario: Row at the cap
