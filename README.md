@@ -135,6 +135,9 @@ version, re-run the install and commit what changes:
 npx skills add dbos-inc/agent-skills --skill dbos-python -a claude-code codex -y
 ```
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how changes, commits, tests and pull requests
+are expected to look.
+
 ## Content staging
 
 RustFS is the local/CI backend through the application S3 adapter. It replaced MinIO,

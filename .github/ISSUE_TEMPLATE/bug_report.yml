@@ -1,0 +1,62 @@
+name: Bug report
+description: Something curate.d does wrong, or fails to do.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A security problem goes through [private vulnerability reporting](https://github.com/jorgejch/curate-d/security/advisories/new), not here.
+        Strip credentials, bucket names and personal file names from anything you paste.
+  - type: dropdown
+    id: data-at-risk
+    attributes:
+      label: Is data at risk?
+      description: Data at risk means an original released or deleted without a verified copy, a file misfiled, or a placement lost.
+      options:
+        - "No"
+        - "Yes: an original was released or deleted without a verified copy"
+        - "Yes: content was misfiled or a placement is missing"
+        - "Not sure"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What curate.d did, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: Steps, the input that triggers it, and the provider(s) involved.
+      placeholder: |
+        1. make stack-up
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Logs, workflow IDs and audit entries
+      description: Relevant log lines (named events such as `recovery_sweep.*`), the workflow ID, and ledger or audit rows, if you have them.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v0.1.0, or dev at abc1234
+    validations:
+      required: true
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Where it ran
+      options:
+        - Local stack (make stack-up)
+        - CI
+        - Kubernetes deployment
+        - Other
+    validations:
+      required: true
