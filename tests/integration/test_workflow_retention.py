@@ -18,8 +18,9 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from curate_d.config import Settings
+from curate_d.runtime import dbos_app
 from curate_d.runtime.datasource import create_ledger_datasource
-from curate_d.runtime.dbos_app import application_name, build_dbos_config
+from curate_d.runtime.dbos_app import build_dbos_config
 from curate_d.runtime.retention import (
     prune_datasource_checkpoints,
     prune_workflow_history,
@@ -81,11 +82,20 @@ async def _seed_workflow(
     status: str,
     created_at: datetime,
     completed_at: datetime | None = None,
+    application_name: str | None = None,
 ) -> None:
     """Insert a workflow_status row as DBOS would leave it.
 
     A terminal seed needs `completed_at`: the prune keys on it, and DBOS sets it on
     every terminal transition.
+
+    Args:
+        engine: The ledger engine, which also holds the DBOS system tables.
+        workflow_id: The row's workflow ID.
+        status: The row's status.
+        created_at: The row's creation time.
+        completed_at: The row's completion time, for a terminal seed.
+        application_name: The owning application; this environment's when None.
     """
     async with engine.begin() as connection:
         await connection.execute(
@@ -98,7 +108,7 @@ async def _seed_workflow(
             ),
             {
                 "id": workflow_id,
-                "app": application_name(Settings().environment),
+                "app": application_name or dbos_app.application_name(Settings().environment),
                 "status": status,
                 "created": _epoch_ms(created_at),
                 "completed": None if completed_at is None else _epoch_ms(completed_at),
@@ -349,6 +359,27 @@ async def test_the_checkpoints_of_an_in_flight_workflow_survive_however_old(
 
     await prune_workflow_history(settings_with_retention, now=NOW)
 
+    assert await _has_checkpoint(ledger_engine, workflow_id)
+
+
+async def test_the_checkpoints_of_another_applications_live_workflow_survive(
+    dbos_with_datasource: None, ledger_engine: AsyncEngine, settings_with_retention: Settings
+) -> None:
+    """The live check reads IDs across applications; a foreign PENDING row keeps its checkpoints."""
+    workflow_id = f"retention-checkpoint-foreign-{uuid4()}"
+    aged = NOW - timedelta(days=RETENTION_DAYS * 5)
+    await _seed_workflow(
+        ledger_engine,
+        workflow_id=workflow_id,
+        status="PENDING",
+        created_at=aged,
+        application_name="curate-d-other",
+    )
+    await _seed_checkpoint(ledger_engine, workflow_id=workflow_id, created_at=aged)
+
+    await prune_workflow_history(settings_with_retention, now=NOW)
+
+    assert await _exists(ledger_engine, workflow_id)
     assert await _has_checkpoint(ledger_engine, workflow_id)
 
 

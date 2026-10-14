@@ -462,6 +462,10 @@ Workflow-history pruning SHALL follow only `workflow_retention_days`, run by `ru
 - **WHEN** a datasource checkpoint belongs to a workflow still present
 - **THEN** the prune leaves it in place
 
+#### Scenario: Another application's live workflow
+- **WHEN** a datasource checkpoint older than the cutoff belongs to a workflow owned by another application in the same system database
+- **THEN** the prune leaves it in place and does not prune the workflow record
+
 #### Scenario: Workflow revived mid-prune
 - **WHEN** a listed row no longer reads terminal and completed before the cutoff when the prune re-reads its batch before the delete
 - **THEN** the prune leaves it and logs `workflow_history.revived_during_prune`

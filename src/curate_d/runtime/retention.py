@@ -40,6 +40,9 @@ binding, so this replaces it, and accepts what that costs:
   record older than the retention period can hit that window.
 - Only this application's rows, and unowned ones, are listed: `list_workflows` defaults
   to the calling application, where DBOS's collector swept the whole system database.
+  The live-ID check for checkpoints is keyed by workflow ID, which DBOS reads across
+  applications; a checkpoint of another application's live workflow survives, and the
+  pinned test fails if a DBOS upgrade changes that.
 
 `delete_children` is not set: a child workflow carries its own `completed_at` and ages out
 on its own.

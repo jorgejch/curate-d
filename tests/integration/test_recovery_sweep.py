@@ -369,6 +369,26 @@ async def test_a_retired_versions_workflow_is_forked_and_completes(
     assert (await _row(ledger_engine, workflow_id))["status"] == "CANCELLED"
 
 
+async def test_a_dequeue_stamps_the_executors_version_on_a_versionless_row(
+    dbos: None, settings: Settings
+) -> None:
+    """A versionless client enqueue carries the dequeuing executor's version once dequeued."""
+    # Re-check on a DBOS upgrade: the redispatch cap keys its count on this version.
+    workflow_id = f"sweep-versionless-{uuid4()}"
+    client = dbos_app.client(settings)
+    try:
+        handle: WorkflowHandleAsync[int] = await client.enqueue_async(
+            {"workflow_name": "sweep_doubles", "queue_name": RUN_QUEUE, "workflow_id": workflow_id},
+            21,
+        )
+        assert await asyncio.wait_for(handle.get_result(), timeout=30) == 42
+    finally:
+        client.destroy()
+
+    [row] = await DBOS.list_workflows_async(workflow_ids=[workflow_id])
+    assert row.app_version == CURRENT_VERSION
+
+
 async def test_a_workflow_running_on_a_live_executor_is_never_redispatched(
     dbos: None, ledger_engine: AsyncEngine
 ) -> None:

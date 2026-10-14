@@ -621,7 +621,9 @@ def redispatch_count(status: WorkflowStatus) -> int:
 
     A count recorded under another application version is zero: a fork copies the
     attributes onto its successor, and a new build is when a crashing row may be fixed.
-    A missing or malformed count is zero too.
+    A missing or malformed count is zero too. A row has no version only before its first
+    dequeue, which stamps the executor's version, so a PENDING row's version is never
+    None; a hand-written one is counted under None until a dequeue re-keys it.
     """
     attributes = status.attributes or {}
     if attributes.get(REDISPATCH_VERSION_ATTRIBUTE) != status.app_version:

@@ -1503,6 +1503,54 @@ async def test_a_redispatch_count_from_another_version_restarts_at_zero(
     }
 
 
+async def test_a_versionless_row_is_capped_under_no_version(locks: FakeLockServer) -> None:
+    """A hand-written row without a version is capped under no version, never rescued forever."""
+    control = FakeRecoveryControl(
+        [
+            workflow_status(
+                ORIGINAL,
+                version=None,
+                attributes={
+                    REDISPATCH_COUNT_ATTRIBUTE: MAX_SWEEP_REDISPATCHES,
+                    REDISPATCH_VERSION_ATTRIBUTE: None,
+                },
+            )
+        ]
+    )
+    with capture_logs() as events:
+        outcome = await _sweep(control, locks=locks)
+    assert outcome.reenqueued == ()
+    assert [workflow_id for workflow_id, _ in outcome.failed] == [ORIGINAL]
+    assert f"the cap of {MAX_SWEEP_REDISPATCHES}" in outcome.failed[0][1]
+    assert control.writes() == []
+    [event] = [event for event in events if event["event"] == "recovery_sweep.redispatch_cap"]
+    assert event["log_level"] == "error"
+
+
+async def test_a_count_recorded_without_a_version_restarts_once_the_row_is_versioned(
+    locks: FakeLockServer,
+) -> None:
+    """A dequeue stamps the executor's version, so a count kept under no version restarts."""
+    control = FakeRecoveryControl(
+        [
+            workflow_status(
+                ORIGINAL,
+                version="v2",
+                attributes={
+                    REDISPATCH_COUNT_ATTRIBUTE: MAX_SWEEP_REDISPATCHES,
+                    REDISPATCH_VERSION_ATTRIBUTE: None,
+                },
+            )
+        ]
+    )
+    outcome = await _sweep(control, locks=locks)
+    assert outcome.reenqueued == (ORIGINAL,)
+    assert control.rows[ORIGINAL].attributes == {
+        REDISPATCH_COUNT_ATTRIBUTE: 1,
+        REDISPATCH_VERSION_ATTRIBUTE: "v2",
+    }
+
+
 async def test_a_redispatch_is_counted_before_the_resume_and_keeps_other_attributes(
     locks: FakeLockServer,
 ) -> None:
