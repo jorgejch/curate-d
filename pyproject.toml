@@ -125,15 +125,33 @@ select = [
     "SIM",      # simplify
     "PTH",      # pathlib over os.path
     "RUF",
+    "TID251",   # banned APIs: DBOS's private modules, listed below
 ]
 
 [tool.ruff.lint.isort]
 known-first-party = ["curate_d", "tests"]
 
+# DBOS's private modules carry no compatibility promise; an upgrade can move or drop them
+# without notice. tests/unit/test_no_library_internals.py backs this with a grep.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"dbos._dbos".msg = "Private DBOS module; use `from dbos import DBOS` and its public methods."
+"dbos._queue".msg = "Private DBOS module; use `dbos.Queue` or the local types in curate_d.runtime.queues."
+"dbos._error".msg = "Private DBOS module; use `from dbos import error`."
+"dbos._croniter".msg = "Private DBOS module; validate cron with curate_d.config's strict grammar."
+"dbos._workflow_commands".msg = "Private DBOS module; use DBOS.list_workflows, delete_workflows and the other public workflow methods."
+"dbos._utils".msg = "Private DBOS module; use DBOS's public attributes or curate_d.runtime.dbos_app."
+"dbos._sys_db".msg = "Private DBOS module; use the public re-exports in `dbos` (WorkflowStatus, WorkflowStatusString, ...)."
+"dbos._context".msg = "Private DBOS module; use the public context managers in `dbos` (SetWorkflowID, ...)."
+"dbos._registrations".msg = "Private DBOS module; refer to workflows by function or registered name through the public API."
+"dbos._schemas".msg = "Private DBOS module; read DBOS state through DBOS or DBOSClient methods."
+"dbos._conductor".msg = "Private DBOS module, moving to dbos-enterprise; curate.d does not use Conductor."
+
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101"]
 # Hand-run scripts against a deployment; their output is the point.
 "tests/local/*" = ["S101", "T201"]
+# Still on DBOS internals while sections 2 and 3 land on their own branches; remove in
+# task 5 of remove-dbos-internals.
 
 [tool.mypy]
 python_version = "3.12"

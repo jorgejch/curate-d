@@ -1,10 +1,23 @@
 # curate.d
 
 > **Load the `dbos-python` skill before any DBOS design or change** — a workflow, step,
-> queue, schedule, datasource, `DBOSClient` or Conductor call. It holds DBOS's own patterns,
+> queue, schedule, datasource or `DBOSClient` call. It holds DBOS's own patterns,
 > conventions and architecture guidance: decide against it, and treat a departure from it as
 > a decision to record under [DBOS](#dbos). It is vendored in `.agents/skills/dbos-python`
 > (`.claude/skills/dbos-python` links to it) and pinned in `skills-lock.json`.
+
+## Changes
+
+Make every change except a simple fix (a typo, a one-line bug fix, a doc correction)
+through OpenSpec (`openspec/`): propose it (`openspec-propose`), apply it
+(`openspec-apply-change`), sync its delta specs into `openspec/specs/`
+(`openspec-sync-specs`), then archive it (`openspec-archive-change`). No ad-hoc plan files.
+
+Write a proposal so its apply can run on several agents in parallel, as far as the change
+allows: group `tasks.md` into work streams that touch disjoint files, state which streams
+depend on which and which can start at once, and keep shared edits (a migration, a
+settings field, this file) in one stream or one up-front task the others wait on. Say so
+in the design when a change can't be split.
 
 ## Docstrings
 
@@ -70,43 +83,71 @@ how it is made idempotent, whether it belongs in a workflow — against the `dbo
   derives the system URL from `ledger_database_url`. Test fixtures `DBOS.destroy()`,
   configure and launch; they never call `DBOS.reset_system_database`. Use unique workflow
   IDs per test instead.
-- `retention.py`, `sweep.py`, `queues.py`, `conductor.py`, `worker/main.py` and
-  `api/throughput.py` use private DBOS internals (`_workflow_commands.garbage_collect`,
-  `_sys_db.reenqueue_for_recovery`, `dbos._utils.INTERNAL_QUEUE_NAME`, `dbos._queue`,
-  `_active_workflows_set` to tell whether the drain left workflows running before the
-  executor lease is released; `dbos._error.DBOSException`,
-  `dbos._conductor.conductor.connect`, replaced at runtime, `ConductorWebsocket`'s
-  constructor, `DBOS.conductor_websocket` for shutdown, the `dbos._conductor.protocol`
-  dataclasses for refusal responses, and `dbos._dbos._get_dbos_instance`). Tests pin them;
-  re-check them on every DBOS upgrade. `dbos._conductor` is moving to the commercial
-  `dbos-enterprise` package (dbos-transact-py PR #873).
-- Conductor is read-only: the gate (`runtime/conductor.py`) passes read messages to DBOS's
-  handler and refuses every write (cancel, resume, the schedule commands, delete, the forks,
-  rewind, version promotion, backfill, recovery, retention, import), enqueuing and
-  auditing nothing. Conductor sends a write to every connected executor under fresh request
-  IDs and cannot route one to our stable executor IDs after a rollout; see the
-  `add-optional-dbos-conductor` design. Don't reopen a write path through Conductor.
-- Schedule reconciliation runs in one system-database transaction that holds the
-  schedule authority (`pg_advisory_xact_lock`), so losing the backend loses the lock and
-  every pending write together. DBOS has no public way to write schedules on a caller's
-  connection, so `runtime/schedule_authority.py` uses `_sys_db.engine`, `upsert_schedule`,
-  `list_schedules`, `delete_schedule` (with `conn`), `SystemSchema.application_versions`,
-  `SystemDatabase._name_filter`, and a copy of `DBOS.apply_schedules`'s row builder
-  (`stored_form`, which also needs `_sys_db.get_queue`, `_sys_db.serializer`, `_registry`,
-  `dbos._registrations`, `dbos._croniter`, `dbos._error` and `dbos._utils`).
-  `tests/unit/runtime/test_schedule_authority.py` pins them; re-check them on every DBOS
-  upgrade. Don't move those writes back onto `DBOS.apply_schedules` or
-  `DBOS.delete_schedule`: they commit on their own connections, outside the lock.
-- Migrations that read `dbos.*` tables (0005, 0007, 0008, 0009) need the DBOS system
-  schema, so `migrations/env.py` brings it up to date before Alembic's own migrations run.
+- No private internals of a library (an underscore module or attribute, or a copy of its
+  private logic or SQL) without the owner's explicit approval.
+  `tests/unit/test_no_library_internals.py` and ruff `TID251` (`banned-api` in
+  `pyproject.toml`) fail the build on a DBOS one. Where the public API can't give a
+  guarantee, as DBOS has no public write on a caller's connection: take the lock on our own
+  connection (`runtime/lease.py`), write through the public API, verify afterwards that the
+  lock and the premise still hold, log one named ERROR event when they don't, and let a
+  periodic idempotent pass repair the drift. Name the event in `docs/recovery.md`'s alert
+  list. A detection without a repair and an alert is "log and hope", not a guarantee.
+- Migrations 0005, 0007, 0008 and 0009 (views and data migrations), `retention.py`'s prune
+  of the datasource's `datasource_outputs` tracking table, and integration fixtures read
+  DBOS's documented tables by raw SQL. That is a schema dependency, not a private API:
+  re-check it on every DBOS upgrade (`tests/integration/test_workflow_views.py`,
+  `test_migrations.py`). Those migrations need the DBOS system schema, so
+  `migrations/env.py` brings it up to date before Alembic's own migrations run. The
+  workflow-history prune itself goes through the public `list_workflows` and
+  `delete_workflows`; it re-reads each batch's status before deleting it, and since a
+  delete has no read-back, the re-read→delete window is a documented gap
+  (`docs/recovery.md`, `workflow_history.revived_during_prune`).
+- The recovery sweep (`runtime/sweep.py`, scheduled by `workflows/recovery.py`) forks,
+  cancels and resumes from inside one `@DBOS.step`, and those DBOS calls are not
+  checkpointed. That departs from the skill's rule against starting workflows from a step.
+  A re-run repeats the whole sweep, which is safe only because every fork is keyed by the
+  deterministic successor ID, every cancel is gated on a re-read status, and every resume on
+  a re-read status under the dead executor's lease, re-read again right before the resume (a
+  cancel landing inside that round trip is the documented gap); keep it that way. Each
+  write is verified
+  after: a resumed row must read back ENQUEUED or dequeued elsewhere
+  (`recovery_sweep.redispatch_unverified`), a cancelled original CANCELLED
+  (`recovery_sweep.lineage_unverified`). A resume resets DBOS's recovery-attempt count, so
+  the sweep counts its own resumes of a row in its workflow attributes and stops at
+  `MAX_SWEEP_REDISPATCHES` per application version (`recovery_sweep.redispatch_cap`). Before
+  each fork and before every cancel, it asks the fence's and the version lock's sessions
+  whether they still hold; a loss stops the batch (`recovery_sweep.version_lock_lost`).
+  `harden-recovery-sweep` moves the writes out of the step.
+- Version lease: every process that runs workflows (the workers, nothing else) registers its
+  version in `lease_versions` before launch and holds that version's advisory lock shared, on
+  its executor lease's session, until it exits (`runtime/version_lease.py`). The sweep forks
+  or retires a version's rows only under that lock held exclusively, and only for a version
+  registered before its target, DBOS's latest. Promoting a version is an operator command
+  (`python -m curate_d.runtime.promote`, see `docs/recovery.md`); workers never promote.
+  The promotion fence (`version_lease.py`) keeps latest from moving backwards mid-sweep: the
+  sweep holds it shared, tried once, across every fork and retirement, and promotion holds it
+  exclusively, waiting a bounded time. Don't fork or retire outside it.
+- Schedule reconciliation holds the schedule authority (`runtime/schedule_authority.py`), a
+  session advisory lock on a dedicated `runtime/lease.py` connection, under the key older
+  builds take as a transaction lock, so mixed builds exclude each other. It writes through
+  the public `DBOS.get_latest_application_version`, `apply_schedules`, `list_schedules` and
+  `delete_schedule`, which commit on DBOS's own pool: a lost lock no longer rolls the writes
+  back, so the reconciliation verifies afterwards that it still held the lock and that
+  latest did not move, and logs `worker.schedule_reconciliation_unverified` when not. Every
+  I/O worker reconciles again every `schedule_reconciliation_interval_seconds` from a thread
+  (`worker/schedules.py`), not a workflow: a schedule re-applying the schedules would be
+  self-referential, and `DBOS.apply_schedules` refuses a workflow context. The declarations
+  are the only source of truth: a hand edit to a schedule row reverts within one interval; a
+  pause survives. A promoted version's workers apply its schedules within one interval,
+  without a restart.
 - `rewind_workflow` re-executes steps from `start_step` after deleting their checkpoints, and
   a re-executed step appends new audit entries. That is intended: the trail keeps the
   original decision and the new one. Don't deduplicate audit entries by workflow or step.
 - Rewind does not re-run child workflows. A rewound parent calling a child under the same
   deterministic ID gets the child's old result back, so rewind or delete the children too.
-- Nothing in curate.d rewinds a workflow, and the Conductor gate refuses `REWIND_WORKFLOW`,
-  so the two points above concern a rewind run by hand; record who ran it, from which step
-  and why in the audit trail.
+- Nothing in curate.d rewinds a workflow, so the two points above concern a rewind run by
+  hand; record who ran it, from which step and why in the audit trail.
 - New periodic work uses persisted schedules: declare them in `schedules_for`
-  (`workflows/registry.py`); `worker/main.py`'s `apply_schedules` writes them after launch
-  through the schedule authority. `@DBOS.scheduled` no longer exists.
+  (`workflows/registry.py`); `worker/schedules.py`'s `apply_schedules` writes them after
+  launch, and its reconciler periodically, through the schedule authority.
+  `@DBOS.scheduled` no longer exists.

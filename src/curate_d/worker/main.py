@@ -16,15 +16,13 @@ import os
 import signal
 import sys
 import threading
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import Callable, Coroutine
 from contextlib import suppress
-from dataclasses import dataclass
 from types import FrameType
 from typing import Final, Protocol, runtime_checkable
 
-from dbos import DBOS, ScheduleInput
-from dbos._dbos import _get_dbos_instance
-from dbos._error import DBOSException
+from dbos import DBOS
+from dbos import error as dbos_error
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -37,19 +35,15 @@ from curate_d.placement.remotes import ConnectedRemotes, RcloneAccess
 from curate_d.providers.access import ConnectedAccounts
 from curate_d.providers.crypto import CredentialCipher
 from curate_d.providers.pacing import Pacer, Quota
-from curate_d.runtime.conductor import start_conductor
+from curate_d.runtime import dbos_app
 from curate_d.runtime.datasource import create_ledger_datasource
 from curate_d.runtime.dbos_app import configure
 from curate_d.runtime.identity import resolve_executor_id
 from curate_d.runtime.lease import ExecutorLease, ExecutorLeaseLostError
 from curate_d.runtime.profiles import WorkerProfile, resolve_profile
 from curate_d.runtime.queues import register_all
-from curate_d.runtime.schedule_authority import (
-    ScheduleAuthority,
-    StoredSchedule,
-    schedule_authority,
-)
 from curate_d.runtime.services import Services, StagingAccess, install
+from curate_d.runtime.version_lease import register_version
 from curate_d.staging.errors import StagingError, StagingNotReadyError, StagingRoleMismatchError
 from curate_d.staging.factories import (
     StagingReaderBackend,
@@ -61,7 +55,12 @@ from curate_d.staging.factories import (
     run_idle_cleanup,
 )
 from curate_d.staging.object_store import S3ClientFactory
-from curate_d.workflows.registry import declared_schedule_names, schedules_for
+from curate_d.worker.schedules import (
+    RECONCILER_STOP_SECONDS,
+    ScheduleReconciler,
+    apply_schedules,
+    start_schedule_reconciler,
+)
 
 logger = get_logger(__name__)
 
@@ -108,7 +107,16 @@ class StagingLifecycle(Protocol):
 
 
 type StagingFactory = Callable[[Settings, WorkerProfile], StagingLifecycle]
-type LeaseFactory = Callable[[Settings, str], ExecutorLease]
+
+
+class LeaseFactory(Protocol):
+    """Builds a worker's lease on its executor identity and its version."""
+
+    def __call__(
+        self, settings: Settings, executor_id: str, /, *, version: str | None = None
+    ) -> ExecutorLease:
+        """Return the lease, not yet acquired."""
+        ...
 
 
 def require_staging_role(profile: WorkerProfile, settings: Settings) -> StagingRole:
@@ -557,94 +565,6 @@ def prepare_services(
     return services
 
 
-@dataclass(frozen=True, slots=True)
-class Reconciliation:
-    """What one schedule reconciliation wrote, once its transaction commits.
-
-    Attributes:
-        latest_version: DBOS's latest application version, read under the authority.
-        applied: Whether this worker was on that version and so applied its schedules.
-        deleted: The stored schedules it deleted because no profile declares them.
-    """
-
-    latest_version: str
-    applied: bool
-    deleted: tuple[StoredSchedule, ...] = ()
-
-
-def reconcile_schedules(
-    authority: ScheduleAuthority,
-    *,
-    version: str,
-    schedules: Sequence[ScheduleInput],
-    declared: frozenset[str],
-) -> Reconciliation:
-    """Apply `schedules` and delete stored ones outside `declared`, if `version` is the latest.
-
-    Every read and write goes through `authority`, so all of it commits with the
-    transaction that holds the lock or none of it does.
-    """
-    latest = authority.latest_version()
-    if latest != version:
-        return Reconciliation(latest_version=latest, applied=False)
-    authority.apply(schedules)
-    retired = tuple(stored for stored in authority.stored() if stored.name not in declared)
-    for stored in retired:
-        authority.delete(stored.name)
-    return Reconciliation(latest_version=latest, applied=True, deleted=retired)
-
-
-def apply_schedules(profile: WorkerProfile, settings: Settings) -> None:
-    """Upsert this profile's persisted schedules, then delete undeclared ones. Call after launch.
-
-    A stored schedule (this application's, or one no application has claimed, as
-    `DBOS.list_schedules` returns them) that no profile declares any more is deleted, so
-    a renamed or dropped pass stops firing instead of ticking a workflow nobody runs. Only
-    a profile that applies schedules deletes any, and it keeps every profile's names, not
-    just its own. A crash before the commit leaves the deletions for the next start.
-
-    Schedule rows are shared by every version of the application, so only a worker on the
-    deployment's latest version (DBOS's, by registration time) touches them: DBOS enqueues
-    every tick on that version, so its declarations are the ones that count. A replica of
-    an older version restarting mid-rollout would otherwise delete a schedule the newer
-    one added or rewrite one it changed, and the newer workers apply only at startup.
-    Every build is its own version: a dev image carries its build in the version
-    (`dbos_app.application_version`), so an older dev build is never the latest either.
-
-    The version check, the upsert and the deletions run in one system-database
-    transaction holding a lock shared by every worker (`runtime/schedule_authority.py`).
-    A worker that passes the check and stalls keeps the next one waiting; one whose
-    backend is lost meanwhile loses the lock and its pending writes together, so it
-    cannot apply or delete after a newer version has registered and applied its own.
-    Outcomes are logged after the commit, so a logged deletion happened.
-
-    `DBOS.set_latest_application_version` only changes which version is latest; it
-    applies nothing. After a rollback, promote the restored version before its workers
-    start, or restart them afterwards.
-
-    Raises:
-        ScheduleAuthorityUnavailableError: Another worker held the lock past the timeout.
-        sqlalchemy.exc.DBAPIError: The transaction failed, its backend lost included;
-            nothing it wrote was committed.
-    """
-    schedules = schedules_for(profile, settings)
-    if not schedules:
-        return
-    declared = declared_schedule_names(settings)
-    with schedule_authority() as authority:
-        outcome = reconcile_schedules(
-            authority, version=DBOS.application_version, schedules=schedules, declared=declared
-        )
-    if not outcome.applied:
-        logger.warning(
-            "worker.schedules_left_to_latest_version",
-            version=DBOS.application_version,
-            latest_version=outcome.latest_version,
-        )
-    for stored in outcome.deleted:
-        logger.info("worker.schedule_deleted", schedule=stored.name, workflow=stored.workflow)
-
-
 def _install_shutdown_handler(stop: threading.Event) -> None:
     """Set `stop` on SIGTERM or SIGINT so Kubernetes gets a clean drain rather than a kill."""
 
@@ -657,23 +577,37 @@ def _install_shutdown_handler(stop: threading.Event) -> None:
     signal.signal(signal.SIGINT, handle)
 
 
-def _drain_dbos(timeout_seconds: int) -> bool:
+def _drain_dbos(settings: Settings, executor_id: str, timeout_seconds: int) -> bool:
     """Shut DBOS down after up to `timeout_seconds` for in-flight workflows.
 
     DBOS stops waiting at the deadline but does not stop the workflow threads; the
     interpreter joins them at exit. Their executor identity is still in use until then,
-    so the caller keeps the lease unless nothing was left running.
+    so the caller keeps the lease unless nothing was left running. What was left is read
+    from the system database after the shutdown, through a client since the DBOS
+    singleton is gone: a workflow still running here is a PENDING row under
+    `executor_id`.
 
     Returns:
-        Whether no workflow was still running when DBOS shut down.
+        Whether no PENDING workflow is left under `executor_id`. False as well when the
+        database could not answer, which is logged as `worker.drain_state_unknown`.
     """
-    try:
-        # Private: DBOS's own drain loop counts this set. Pinned in test_worker_main.py.
-        active = _get_dbos_instance()._active_workflows_set
-    except DBOSException:
-        active = None
     DBOS.destroy(workflow_completion_timeout_sec=timeout_seconds)
-    return active is None or not active.activeList()
+    # No retry: a database outage at shutdown must not hold the pod past its grace period.
+    workflows = dbos_app.client(settings, retry_connection_errors=False)
+    try:
+        pending = workflows.list_workflows(
+            status="PENDING",
+            executor_id=[executor_id],
+            limit=1,
+            load_input=False,
+            load_output=False,
+        )
+    except (SQLAlchemyError, dbos_error.DBOSException) as failure:
+        logger.error("worker.drain_state_unknown", executor_id=executor_id, error=str(failure))
+        return False
+    finally:
+        workflows.destroy()
+    return not pending
 
 
 def run(
@@ -692,18 +626,21 @@ def run(
         profile: Which half of the pipeline this process serves.
         stop: Set to begin a drain. A fresh event with signal handlers installed on it
             when omitted.
-        block: False returns once the worker is serving, tearing staging back down and
-            releasing the lease on the way out. For tests; a deployed worker always
-            blocks.
+        block: False returns once the worker is serving, stopping the schedule
+            reconciler, tearing staging back down and releasing the lease on the way
+            out. For tests; a deployed worker always blocks.
         staging_factory: Builds the staging supervisor, substituted by tests that must
             not open an event loop.
-        lease_factory: Builds the executor lease; a lease on the configured DBOS system
-            database when omitted. Substituted by tests that must not connect.
+        lease_factory: Builds the executor and version lease; a lease on the configured
+            DBOS system database when omitted. Substituted by tests that must not connect.
 
     Raises:
         ExecutorIdentityError: No stable executor identity is configured.
-        ExecutorLeaseUnavailableError: Another live process holds this identity's lease
-            and did not release it in time. DBOS is never launched.
+        VersionRegistryError: This build's version could not be registered in
+            `lease_versions`. DBOS is never launched.
+        ExecutorLeaseUnavailableError: Another live process holds this identity's lease,
+            or a recovery sweep holds this version exclusively, past the acquire budget.
+            DBOS is never launched.
         ExecutorLeaseLostError: The lease was lost while serving. DBOS was shut down
             without waiting for in-flight workflows; the caller must exit at once.
         StagingNotReadyError: Staging is configured but unreachable. No queue is
@@ -730,24 +667,31 @@ def run(
     # is no second backend for it to try.
     staging = _start_staging(settings, profile, staging_factory)
     lease: ExecutorLease | None = None
+    reconciler: ScheduleReconciler | None = None
     launched = False
     drained = False
     try:
+        # Registered first: the recovery sweep treats an unregistered version as one that
+        # predates the version lease, and leaves its rows alone.
+        version = dbos_app.APPLICATION_VERSION
+        register_version(settings, version)
         # Before launch, because launch runs startup recovery for this identity: a second
-        # live process doing that would claim the first one's in-flight workflows.
-        lease = (lease_factory or ExecutorLease.for_settings)(settings, executor_id)
+        # live process doing that would claim the first one's in-flight workflows. The
+        # version key, held shared beside it, tells the sweep this version is live; it is
+        # kept with the executor key until exit, even when the drain does not finish.
+        lease = (lease_factory or ExecutorLease.for_settings)(
+            settings, executor_id, version=version
+        )
         lease.acquire(stop=shutdown)
         lease.monitor(on_lease_lost)
         prepare_services(settings, profile, staging)
-        configure(settings, executor_id=executor_id, profile=profile)
+        configure(settings, executor_id=executor_id)
         DBOS.listen_queues([queue.value for queue in profile.queues])
         DBOS.launch()
         launched = True
         register_all()
         apply_schedules(profile, settings)
-        # Last: only a launched executor holding its lease reports, and Conductor failing
-        # or misconfigured never stops the worker serving.
-        start_conductor(settings, profile)
+        reconciler = start_schedule_reconciler(profile, settings, stop=shutdown)
 
         logger.info("worker.ready", profile=profile.value, executor_id=executor_id)
         if not block:
@@ -760,11 +704,20 @@ def run(
                 f"lost the executor lease for {executor_id!r}; stopping without draining"
             )
     finally:
+        # Before the drain: the reconciler writes through DBOS, which the drain destroys.
+        # Not waited for once the lease is lost: stopping at once matters more.
+        shutdown.set()
+        if reconciler is not None:
+            reconciler.join(0 if lease_lost.is_set() else RECONCILER_STOP_SECONDS)
         try:
             # Let workflows already in flight finish rather than orphaning them as PENDING
             # on a version this deployment is about to retire.
-            if launched and block:
-                drained = _drain_dbos(0 if lease_lost.is_set() else DRAIN_SECONDS)
+            if launched and block and lease_lost.is_set():
+                # Another process may already hold the identity: shut down at once, and
+                # ask the database nothing, since losing it is the likeliest cause.
+                DBOS.destroy(workflow_completion_timeout_sec=0)
+            elif launched and block:
+                drained = _drain_dbos(settings, executor_id, DRAIN_SECONDS)
         finally:
             try:
                 # After the drain: a workflow finishing its last step may still be reading

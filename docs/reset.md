@@ -125,6 +125,15 @@ To hand the dev workloads back to the reconciler by hand instead of rerunning:
 kubectl -n <namespace> annotate deployment/curate-d-api statefulset/curate-d-worker-io statefulset/curate-d-worker-cpu kustomize.toolkit.fluxcd.io/reconcile- curate-d/reset-replicas-
 ```
 
+## After the version lease first rolls out
+
+Builds from before the recovery sweep never registered in `lease_versions` and hold no version
+lock, so the sweep leaves their stranded rows alone and logs
+`recovery_sweep.unregistered_version` each tick (see [recovery.md](recovery.md)). Once the
+first lock-holding build has rolled out on both `worker-io` and `worker-cpu`, reset `dev` and
+`local` once to clear those rows; locally, run `make image` from that build first. A reset
+also empties `lease_versions`, and the workers register again as they restart.
+
 ## Examples
 
 Preview a dev reset (changes nothing):

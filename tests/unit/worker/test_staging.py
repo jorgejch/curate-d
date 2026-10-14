@@ -11,8 +11,10 @@ import pytest
 from dbos import DBOS
 
 from curate_d.config import Settings, StagingRole
+from curate_d.runtime import dbos_app
 from curate_d.runtime.lease import ExecutorLease
 from curate_d.runtime.profiles import WorkerProfile
+from curate_d.runtime.version_lease import VersionRegistryError
 from curate_d.staging.errors import (
     StagingNotReadyError,
     StagingObjectStoreError,
@@ -314,10 +316,17 @@ def startup_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     monkeypatch.setattr(worker, "prepare_services", lambda settings, profile, staging: None)
     monkeypatch.setattr(worker, "apply_schedules", lambda profile, settings: None)
     monkeypatch.setattr(DBOS, "destroy", lambda **kw: calls.append("drain"))
+    # The drain reads what is left running through a client; nothing is.
+    drained = Mock()
+    drained.list_workflows.return_value = []
+    monkeypatch.setattr(dbos_app, "client", lambda settings, **kw: drained)
     monkeypatch.setattr(worker, "_install_shutdown_handler", lambda stop: None)
+    monkeypatch.setattr(worker, "register_version", lambda settings, version: None)
     locks = FakeLockServer(events=calls)
     monkeypatch.setattr(
-        ExecutorLease, "for_settings", lambda settings, executor_id: locks.lease(executor_id)
+        ExecutorLease,
+        "for_settings",
+        lambda settings, executor_id, *, version=None: locks.lease(executor_id),
     )
     return calls
 
@@ -371,6 +380,23 @@ def test_worker_readiness_failure_starts_no_dbos(startup_calls: list[str]) -> No
             staging_factory=lambda settings, profile: RecordedLifecycle(
                 startup_calls, StagingNotReadyError("offline")
             ),
+        )
+    assert startup_calls == ["staging-ready", "staging-stop"]
+
+
+def test_a_failed_version_registration_stops_staging(
+    startup_calls: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Close staging when the version cannot be registered, before any lease or launch."""
+    monkeypatch.setattr(
+        worker, "register_version", Mock(side_effect=VersionRegistryError("registry down"))
+    )
+    with pytest.raises(VersionRegistryError):
+        worker.run(
+            settings_for(),
+            WorkerProfile.IO,
+            block=False,
+            staging_factory=lambda settings, profile: RecordedLifecycle(startup_calls),
         )
     assert startup_calls == ["staging-ready", "staging-stop"]
 

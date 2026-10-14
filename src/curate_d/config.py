@@ -4,12 +4,12 @@ Everything the application needs to reach the outside world arrives through the
 environment; nothing here has a default that would silently work against production.
 """
 
+import re
 from decimal import Decimal
 from enum import StrEnum
 from functools import lru_cache
-from ipaddress import ip_address
 from pathlib import Path
-from typing import Annotated, Final, Self
+from typing import Final, Self
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import (
@@ -20,9 +20,7 @@ from pydantic import (
     ModelWrapValidatorHandler,
     PostgresDsn,
     SecretStr,
-    UrlConstraints,
     ValidationError,
-    WebsocketUrl,
     field_validator,
     model_validator,
 )
@@ -33,6 +31,15 @@ from curate_d.domain.source import Provider
 
 _LOCAL_LEDGER_DSN = "postgresql+psycopg://curate_d:curate_d@localhost:5433/curate_d"
 _HIDDEN_INPUT: Final = "<hidden>"
+
+# Inclusive bounds of each cron field: minute, hour, day of month, month, day of week
+# (0 and 7 are both Sunday). A six-field expression puts seconds, 0-59, in front.
+_CRON_SECOND_BOUNDS: Final = (0, 59)
+_CRON_FIELD_BOUNDS: Final = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
+# One comma-separated item: `*`, `*/n`, `a`, `a-b` or `a-b/n`.
+_CRON_ITEM: Final = re.compile(
+    r"\*(?:/(?P<every>\d+))?|(?P<start>\d+)(?:-(?P<end>\d+)(?:/(?P<step>\d+))?)?"
+)
 
 
 def _without_input(error: ValidationError) -> ValidationError:
@@ -50,18 +57,43 @@ def _without_input(error: ValidationError) -> ValidationError:
     return ValidationError.from_exception_data(error.title, details)
 
 
-def _is_loopback(host: str | None) -> bool:
-    """Return whether a URL host, as pydantic renders it, names this machine.
+def _cron_field_is_valid(field: str, low: int, high: int) -> bool:
+    """Return whether every comma-separated item of one cron field is in grammar and bounds."""
+    for item in field.split(","):
+        match = _CRON_ITEM.fullmatch(item)
+        if match is None:
+            return False
+        step = match["every"] or match["step"]
+        if step is not None and not 1 <= int(step) <= high:
+            return False
+        if match["start"] is not None:
+            start = int(match["start"])
+            end = int(match["end"]) if match["end"] is not None else start
+            if not low <= start <= end <= high:
+                return False
+    return True
 
-    Pydantic lowercases host names and keeps the brackets on an IPv6 literal, so
-    `localhost`, any 127/8 address and `[::1]` all count.
+
+def _is_strict_cron(value: str) -> bool:
+    """Return whether `value` is a cron expression in a strict subset of DBOS's grammar.
+
+    Five whitespace-separated fields, or six with seconds first. Each field is a comma
+    list of `*`, `*/n`, `a`, `a-b` or `a-b/n`, numeric only, within the field's bounds,
+    with a step of at least 1 and at most the field's upper bound. Names, `@` aliases and
+    `L`, `W`, `#`, `?` are refused although DBOS takes them. This is a strict subset of
+    DBOS's cron grammar; stricter is the safe direction: whatever passes here, DBOS accepts.
     """
-    if host is None:
+    fields = value.split()
+    if len(fields) == len(_CRON_FIELD_BOUNDS) + 1:
+        bounds: tuple[tuple[int, int], ...] = (_CRON_SECOND_BOUNDS, *_CRON_FIELD_BOUNDS)
+    elif len(fields) == len(_CRON_FIELD_BOUNDS):
+        bounds = _CRON_FIELD_BOUNDS
+    else:
         return False
-    try:
-        return ip_address(host.strip("[]")).is_loopback
-    except ValueError:
-        return host == "localhost"
+    return all(
+        _cron_field_is_valid(field, low, high)
+        for field, (low, high) in zip(fields, bounds, strict=True)
+    )
 
 
 class StagingRole(StrEnum):
@@ -301,32 +333,20 @@ class Settings(BaseSettings):
         "one day's worth of newly aged records, short enough not to hold the maintenance "
         "queue's one slot for long.",
     )
-    conductor_enabled: bool = Field(
-        default=False,
-        description="Whether workers connect to DBOS Conductor. Separate from the key so the "
-        "credential can stay provisioned while the switch is flipped in a reviewed commit.",
+    recovery_sweep_schedule: str = Field(
+        default="*/10 * * * *",
+        description="Cron schedule of the recovery sweep, which forks work stranded on a "
+        "retired version and re-enqueues work of executors that never return. Five fields, "
+        "or six with seconds first, as DBOS reads them.",
     )
-    conductor_key: SecretStr | None = Field(
-        default=None,
-        description="DBOS Conductor API key. Used only when `conductor_enabled` is set, and "
-        "never handed to DBOS's own configuration, so DBOS_CONDUCTOR_KEY is never read.",
+    schedule_reconciliation_interval_seconds: float = Field(
+        default=600,
+        gt=0,
+        description="How often an I/O worker re-applies its persisted schedules after "
+        "startup. DBOS's schedule writes commit outside the schedule authority, so this "
+        "is what repairs rows a worker wrote after losing it, and how a promoted "
+        "version's workers apply their schedules without a restart.",
     )
-    conductor_url: WebsocketUrl | None = Field(
-        default=None,
-        description="Conductor websocket endpoint. Unset means the hosted Conductor. `wss://` "
-        "unless the host is loopback: DBOS puts the key in the handshake path, so plaintext "
-        "is only allowed to this machine.",
-    )
-    conductor_proxy_url: Annotated[HttpUrl, UrlConstraints(allowed_schemes=["http"])] | None = (
-        Field(
-            default=None,
-            description="Plain-http egress proxy for the Conductor connection, and nothing "
-            "else in the process. Set where direct egress is not available. "
-            "Plain http is enough: the proxy sees only the CONNECT target, and the handshake "
-            "and every frame cross it inside Conductor's TLS.",
-        )
-    )
-
     content_staging_root: Path = Field(
         default=Path("/var/lib/curate-d/staging"),
         description="Not read anywhere: content staging is S3-backed (see staging_s3_*).",
@@ -408,50 +428,18 @@ class Settings(BaseSettings):
         "rather than trusting the node's disk to be large enough.",
     )
 
-    @field_validator("conductor_key", mode="before")
+    @field_validator("recovery_sweep_schedule")
     @classmethod
-    def _blank_conductor_key_is_missing(cls, value: object) -> object:
-        """Treat an empty or whitespace-only key as unset.
+    def _recovery_sweep_schedule_is_a_cron(cls, value: str) -> str:
+        """Reject a cron DBOS would refuse, before the lease and the launch.
 
-        An unset environment variable and an empty one are the same operator intent: no
-        key. Collapsing them here keeps `start_conductor` on its one misconfigured path
-        instead of handing a blank credential to the connection gate.
+        The grammar is a strict subset of DBOS's (`_is_strict_cron`), so an expression accepted
+        here is one DBOS accepts too: failing here stops a worker at settings load, where
+        `apply_schedules` would instead fail after launch and crash-loop every I/O worker.
         """
-        if isinstance(value, str) and not value.strip():
-            return None
-        if isinstance(value, SecretStr) and not value.get_secret_value().strip():
-            return None
+        if not _is_strict_cron(value):
+            raise ValueError(f"recovery_sweep_schedule {value!r} is not a valid cron expression")
         return value
-
-    @model_validator(mode="after")
-    def _validate_conductor_transport(self) -> Self:
-        """Keep a plaintext Conductor connection on this machine.
-
-        DBOS sends the key in the websocket handshake path and workflow data in the frames,
-        so a `ws://` endpoint exposes both to the network. The local fixtures serve on
-        loopback, which is the one place plaintext never leaves the host. A proxy is a
-        `CONNECT` tunnel: under `wss://` it carries ciphertext whatever its own scheme, but
-        under `ws://` it carries the handshake itself, so it has to be loopback too.
-
-        Raises:
-            ValueError: `conductor_url` is `ws://` to a host other than loopback, or is
-                `ws://` through a proxy on a host other than loopback.
-        """
-        if self.conductor_url is None or self.conductor_url.scheme == "wss":
-            return self
-        if not _is_loopback(self.conductor_url.host):
-            raise ValueError(
-                f"conductor_url {str(self.conductor_url)!r} is plaintext to a host that is "
-                "not loopback. The Conductor key travels in the websocket handshake path, "
-                "so use wss://; ws:// is only allowed to localhost, 127.0.0.1 or [::1]."
-            )
-        if self.conductor_proxy_url is not None and not _is_loopback(self.conductor_proxy_url.host):
-            raise ValueError(
-                f"conductor_proxy_url {str(self.conductor_proxy_url)!r} is not loopback but "
-                "conductor_url is plaintext, so the Conductor key would cross the network in "
-                "the handshake to the proxy. Use wss://, or a proxy on this machine."
-            )
-        return self
 
     @model_validator(mode="after")
     def _validate_staging_s3(self) -> Self:

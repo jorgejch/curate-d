@@ -200,118 +200,11 @@ def test_unknown_environment_is_rejected(monkeypatch: pytest.MonkeyPatch) -> Non
         Settings()
 
 
-def test_conductor_is_disabled_by_default() -> None:
-    """Conductor stays off unless the flag is set."""
-    assert Settings().conductor_enabled is False
-
-
-def test_conductor_flag_is_read_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Parse the prefixed Conductor flag."""
-    monkeypatch.setenv("CURATE_D_CONDUCTOR_ENABLED", "true")
-    assert Settings().conductor_enabled is True
-
-
-def test_conductor_key_is_masked_in_representations(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The key appears in neither repr(), str(), nor a non-serialized model dump."""
-    monkeypatch.setenv("CURATE_D_CONDUCTOR_KEY", "conductor-s3cret")
-    settings = Settings()
-    rendered = f"{settings!r} {settings} {settings.model_dump()}"
-    assert "conductor-s3cret" not in rendered
-    assert settings.conductor_key is not None
-    assert settings.conductor_key.get_secret_value() == "conductor-s3cret"
-
-
-@pytest.mark.parametrize("blank", ["", "  ", "\t\n"])
-def test_blank_conductor_key_is_missing(monkeypatch: pytest.MonkeyPatch, blank: str) -> None:
-    """An empty or whitespace-only key, from the environment or a raw value, reads as unset."""
-    monkeypatch.setenv("CURATE_D_CONDUCTOR_KEY", blank)
-    assert Settings().conductor_key is None
-    assert Settings.model_validate({"conductor_key": blank}).conductor_key is None
-
-
-def test_conductor_key_keeps_its_surrounding_whitespace(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Normalization only decides presence; a non-blank key is passed through untouched."""
-    monkeypatch.setenv("CURATE_D_CONDUCTOR_KEY", " padded ")
-    key = Settings().conductor_key
-    assert key is not None
-    assert key.get_secret_value() == " padded "
-
-
-def test_websocket_conductor_url_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Accept a wss Conductor endpoint."""
-    monkeypatch.setenv("CURATE_D_CONDUCTOR_URL", "wss://conductor.example/conductor/v1alpha1")
-    assert str(Settings().conductor_url) == "wss://conductor.example/conductor/v1alpha1"
-
-
-def test_non_websocket_conductor_url_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An https Conductor URL fails validation, naming the setting."""
-    monkeypatch.setenv("CURATE_D_CONDUCTOR_URL", "https://cloud.dbos.dev/conductor/v1alpha1")
-    with pytest.raises(ValidationError, match="conductor_url"):
-        Settings()
-
-
-def test_plaintext_conductor_url_to_a_remote_host_is_rejected(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A ws URL off this machine fails, naming the setting and the key in the handshake path."""
-    monkeypatch.setenv("CURATE_D_CONDUCTOR_URL", "ws://conductor.example/conductor/v1alpha1")
-    with pytest.raises(ValidationError, match=r"conductor_url .* handshake path"):
-        Settings()
-
-
-@pytest.mark.parametrize(
-    "url", ["ws://localhost/", "ws://LOCALHOST:8765/", "ws://127.0.0.1:8765/", "ws://[::1]:8765/"]
-)
-def test_plaintext_conductor_url_to_loopback_is_accepted(
-    monkeypatch: pytest.MonkeyPatch, url: str
-) -> None:
-    """A ws URL to a loopback host, as the local fixtures serve, passes."""
-    monkeypatch.setenv("CURATE_D_CONDUCTOR_URL", url)
-    assert Settings().conductor_url is not None
-
-
-def test_plaintext_conductor_url_through_a_loopback_proxy_is_accepted(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A ws URL stays on this machine through a proxy that is also loopback."""
-    monkeypatch.setenv("CURATE_D_CONDUCTOR_URL", "ws://127.0.0.1:8765/")
-    monkeypatch.setenv("CURATE_D_CONDUCTOR_PROXY_URL", "http://127.0.0.1:3128")
-    assert Settings().conductor_proxy_url is not None
-
-
-def test_plaintext_conductor_url_through_a_remote_proxy_is_rejected(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A ws URL through a proxy off this machine sends the handshake over the network."""
-    monkeypatch.setenv("CURATE_D_CONDUCTOR_URL", "ws://127.0.0.1:8765/")
-    monkeypatch.setenv("CURATE_D_CONDUCTOR_PROXY_URL", "http://egress-proxy:3128")
-    with pytest.raises(ValidationError, match=r"conductor_proxy_url .* conductor_url is plaintext"):
-        Settings()
-
-
-def test_remote_proxy_is_accepted_under_tls(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Under wss the proxy only tunnels ciphertext, so its host is unconstrained."""
-    monkeypatch.setenv("CURATE_D_CONDUCTOR_URL", "wss://conductor.example/conductor/v1alpha1")
-    monkeypatch.setenv("CURATE_D_CONDUCTOR_PROXY_URL", "http://egress-proxy:3128")
-    assert Settings().conductor_proxy_url is not None
-
-
 def _assert_hidden(error: ValidationError, secret: str) -> None:
     """Assert `secret` is in neither the rendered error nor its structured details."""
     assert secret not in str(error)
     assert secret not in repr(error.errors())
     assert error.__context__ is None
-
-
-def test_a_rejected_conductor_url_keeps_the_key_out_of_the_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A transport error still names the setting, but carries no trace of the key."""
-    monkeypatch.setenv("CURATE_D_CONDUCTOR_KEY", "ck9")
-    monkeypatch.setenv("CURATE_D_CONDUCTOR_URL", "ws://remote/")
-    with pytest.raises(ValidationError, match="conductor_url") as raised:
-        Settings()
-    _assert_hidden(raised.value, "ck9")
 
 
 def test_a_rejected_s3_configuration_keeps_the_secret_out_of_the_error(
@@ -335,20 +228,39 @@ def test_a_rejected_database_url_keeps_its_password_out_of_the_error(
     _assert_hidden(raised.value, "dsn-pw")
 
 
-def test_http_conductor_proxy_url_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Accept a plain-http proxy for the Conductor connection."""
-    monkeypatch.setenv("CURATE_D_CONDUCTOR_PROXY_URL", "http://egress-proxy:3128")
-    proxy = Settings().conductor_proxy_url
-    assert proxy is not None
-    assert proxy.scheme == "http"
-    assert proxy.host == "egress-proxy"
-
-
-@pytest.mark.parametrize("proxy", ["https://egress-proxy:3128", "socks5://egress-proxy"])
-def test_non_http_conductor_proxy_url_is_rejected(
-    monkeypatch: pytest.MonkeyPatch, proxy: str
+@pytest.mark.parametrize(
+    "cron",
+    [
+        "every ten minutes",
+        "*/10 * * *",
+        "61 * * * *",
+        "0 0 24 * * *",
+        "",
+        "0 0 * JAN *",
+        "@hourly",
+        "0 0 L * *",
+        "0 0 15W * *",
+        "0 0 * * 1#2",
+        "0 0 ? * *",
+        "*/60 * * * *",
+        "0 0 0 * * * 2027",
+    ],
+)
+def test_an_invalid_recovery_sweep_schedule_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, cron: str
 ) -> None:
-    """Anything but an http proxy URL fails validation, naming the setting."""
-    monkeypatch.setenv("CURATE_D_CONDUCTOR_PROXY_URL", proxy)
-    with pytest.raises(ValidationError, match="conductor_proxy_url"):
+    """A cron DBOS would refuse fails at settings load, naming the setting."""
+    monkeypatch.setenv("CURATE_D_RECOVERY_SWEEP_SCHEDULE", cron)
+    with pytest.raises(ValidationError, match="recovery_sweep_schedule"):
         Settings()
+
+
+@pytest.mark.parametrize(
+    "cron", ["*/10 * * * *", "*/30 * * * * *", "0 59 23 * * *", "0 3 * * 1", "0,30 1-5/2 * * 7"]
+)
+def test_a_valid_recovery_sweep_schedule_is_kept(
+    monkeypatch: pytest.MonkeyPatch, cron: str
+) -> None:
+    """Five fields, or six with seconds first, as DBOS reads them."""
+    monkeypatch.setenv("CURATE_D_RECOVERY_SWEEP_SCHEDULE", cron)
+    assert Settings().recovery_sweep_schedule == cron

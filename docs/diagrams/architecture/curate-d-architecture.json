@@ -3,6 +3,7 @@
   "diagram_type": "architecture",
   "meta": {
     "title": "curate.d runtime architecture",
+    "repository": { "url": "git@github.com:jorgejch/curate-d.git", "link_mode": "local-only", "revision": "6c231b40fcd1b3df3f5f06e69909d2816482e883" },
     "output": "docs/diagrams/architecture/curate-d-architecture.html",
     "quality_profile": "showcase"
   },
@@ -19,19 +20,6 @@
         { "path": "src/curate_d/classification/remote.py", "line": 1, "end_line": 12, "label": "remote tier" },
         { "path": "src/curate_d/classification/remote.py", "line": 40, "label": "base URL" },
         { "path": "src/curate_d/workflows/classify.py", "line": 3, "end_line": 13, "label": "escalation and spend cap" }
-      ]
-    },
-    {
-      "id": "conductor",
-      "type": "external",
-      "label": "DBOS Conductor",
-      "sublabel": "optional · observability",
-      "pos": [925, 80],
-      "size": [180, 64],
-      "sources": [
-        { "path": "src/curate_d/runtime/conductor.py", "line": 1, "end_line": 20, "label": "read-only gate" },
-        { "path": "src/curate_d/runtime/conductor.py", "line": 485, "end_line": 503, "label": "opt-in connection" },
-        { "path": "src/curate_d/config.py", "line": 321, "end_line": 329, "label": "proxy for Conductor" }
       ]
     },
     {
@@ -68,9 +56,9 @@
       "pos": [600, 260],
       "size": [200, 64],
       "sources": [
-        { "path": "src/curate_d/runtime/queues.py", "line": 205, "end_line": 216, "label": "I/O queues" },
-        { "path": "src/curate_d/workflows/registry.py", "line": 28, "end_line": 47, "label": "I/O-only schedules" },
-        { "path": "src/curate_d/worker/main.py", "line": 483, "end_line": 557, "label": "I/O-only services" }
+        { "path": "src/curate_d/runtime/queues.py", "line": 216, "end_line": 227, "label": "I/O queues" },
+        { "path": "src/curate_d/workflows/registry.py", "line": 29, "end_line": 49, "label": "I/O-only schedules" },
+        { "path": "src/curate_d/worker/main.py", "line": 491, "end_line": 565, "label": "I/O-only services" }
       ]
     },
     {
@@ -94,7 +82,7 @@
       "pos": [1250, 260],
       "size": [180, 64],
       "sources": [
-        { "path": "src/curate_d/runtime/queues.py", "line": 217, "end_line": 220, "label": "CPU queues" },
+        { "path": "src/curate_d/runtime/queues.py", "line": 228, "end_line": 231, "label": "CPU queues" },
         { "path": "src/curate_d/workflows/ingest.py", "line": 1, "end_line": 7, "label": "fingerprint half" },
         { "path": "src/curate_d/classification/local.py", "line": 1, "end_line": 11, "label": "OCR and keyword tier" }
       ]
@@ -108,9 +96,9 @@
       "pos": [925, 430],
       "size": [180, 64],
       "sources": [
-        { "path": "src/curate_d/runtime/dbos_app.py", "line": 1, "end_line": 8, "label": "system tables in ledger" },
+        { "path": "src/curate_d/runtime/dbos_app.py", "line": 1, "end_line": 11, "label": "system tables in ledger" },
         { "path": "src/curate_d/runtime/lease.py", "line": 1, "end_line": 33, "label": "executor lease · pooler" },
-        { "path": "src/curate_d/runtime/schedule_authority.py", "line": 1, "end_line": 12, "label": "schedule authority" }
+        { "path": "src/curate_d/runtime/schedule_authority.py", "line": 1, "end_line": 11, "label": "schedule authority" }
       ]
     },
     {
@@ -179,8 +167,6 @@
     { "id": "io-pg", "from": "io", "to": "pg", "label": "workflows · ledger tx", "fromSide": "bottom", "toSide": "left" },
     { "id": "cpu-pg", "from": "cpu", "to": "pg", "label": "workflows · ledger tx", "fromSide": "bottom", "toSide": "right" },
     { "id": "io-openrouter", "from": "io", "to": "openrouter", "label": "classify-llm", "fromSide": "top", "toSide": "right" },
-    { "id": "io-conductor", "from": "io", "to": "conductor", "label": "read-only", "variant": "dashed", "fromSide": "top", "toSide": "left" },
-    { "id": "cpu-conductor", "from": "cpu", "to": "conductor", "label": "read-only · optional proxy", "variant": "dashed", "fromSide": "top", "toSide": "right" },
     { "id": "api-pg", "from": "api", "to": "pg", "label": "ledger · enqueue", "fromSide": "top", "toSide": "bottom" },
     { "id": "api-pcloud", "from": "api", "to": "pcloud", "label": "OAuth code exchange", "fromSide": "left", "toSide": "bottom" },
     { "id": "api-logfire", "from": "api", "to": "logfire", "label": "spans", "variant": "dashed" },
@@ -211,7 +197,7 @@
       "title": "Durable execution",
       "items": [
         "DBOS system tables live in the ledger database, schema dbos",
-        "The I/O worker applies persisted schedules under an advisory-lock authority",
+        "The I/O worker applies persisted schedules under an advisory-lock authority and re-applies them periodically",
         "Each worker holds an executor lease; the API never launches DBOS and uses DBOSClient",
         "Ledger connections go through a session-mode pooler, as the lease requires",
         "Migrations bring the dbos schema up before the ledger's own revisions"
@@ -221,7 +207,6 @@
       "dot": "amber",
       "title": "Operations",
       "items": [
-        "Conductor is opt-in; its gate refuses every write command",
         "The API traces requests to Logfire, health probes excepted",
         "reset-environment.sh empties the local or dev ledger, dbos schema included, and content/ prefix",
         "The reset keeps pCloud connections unless --drop-connections is given"

@@ -16,52 +16,79 @@ system exists to keep, so nothing here touches it — the append-only trigger on
 The retention period is configuration rather than a constant because the right value
 depends on how often anyone actually looks, which is not knowable in advance.
 
-DBOS's collector measures age from completion, not creation: a record is eligible once
-its `completed_at` is older than the cutoff. That column is set on every terminal
-transition and cleared on resume, so PENDING, ENQUEUED, and DELAYED rows survive
-regardless of age. Work parked across a long deployment is therefore never pruned out
-from under the recovery sweep in `sweep.py`.
+A record is eligible once it is terminal (SUCCESS, ERROR, CANCELLED or
+MAX_RECOVERY_ATTEMPTS_EXCEEDED) and its `completed_at` is at or before the cutoff: age is
+measured from completion, not creation. DBOS sets that column on every terminal transition
+and clears it on resume, so PENDING, ENQUEUED, and DELAYED rows survive regardless of age.
+Work parked across a long deployment is therefore never pruned out from under the recovery
+sweep in `sweep.py`.
 
-The collector is reached through DBOS internals because it has no public binding: it is
-exposed only to Conductor's retention command. Conductor can be connected, but the gate in
-`conductor.py` refuses that command, so this module stays the single owner of pruning and
-a console setting cannot add a second policy. The alternative — issuing the deletes here
-— would put this module in the business of tracking DBOS's schema across upgrades, which
-is strictly worse. A unit test pins the import so a DBOS upgrade that moves it fails
-loudly rather than silently disabling pruning.
+The prune goes through DBOS's public API: `DBOS.list_workflows(completed_before=...)` reads
+one batch of eligible IDs and `DBOS.delete_workflows` removes them with their inputs,
+outputs and step rows, until a batch comes back empty. DBOS's own collector has no public
+binding, so this replaces it, and accepts what that costs:
 
-The collector does not reach the ledger datasource's `datasource_outputs`, one row per
-datasource transaction per workflow, which lives in the ledger database rather than the
-system one; nothing in DBOS 3.1 deletes from it except a rewind. This module prunes it
-after the collector, and only rows whose workflow the system database no longer holds: a
-checkpoint of a workflow that can still be recovered or rewound is what keeps its ledger
-write exactly-once.
+- No retention advisory lock. Two prunes are not expected to overlap: one schedule enqueues
+  them on the maintenance queue, a tick a day; and a second one running at once would only
+  find fewer rows to delete.
+- No VACUUM of the workflow tables after a prune; autovacuum reclaims the space.
+- No conditional delete. Each batch is re-read under the same filter immediately before
+  its delete, and only the rows still terminal and aged are deleted; one that no longer is
+  stays, under `workflow_history.revived_during_prune`. The re-read and the delete are
+  still separate calls, and a delete leaves nothing to read back: a workflow resumed by
+  hand in between is deleted although it is live again. Only an operator resume of a
+  record older than the retention period can hit that window.
+- Only this application's rows, and unowned ones, are listed: `list_workflows` defaults
+  to the calling application, where DBOS's collector swept the whole system database.
+  The live-ID check for checkpoints is keyed by workflow ID, which DBOS reads across
+  applications; a checkpoint of another application's live workflow survives, and the
+  pinned test fails if a DBOS upgrade changes that.
+
+`delete_children` is not set: a child workflow carries its own `completed_at` and ages out
+on its own.
+
+DBOS does not prune the ledger datasource's `datasource_outputs`, one row per datasource
+transaction per workflow, which lives in the ledger database rather than the system one;
+nothing in DBOS deletes from it except a rewind. This module prunes it after the workflow
+records, and only rows whose workflow the system database no longer holds: a checkpoint of
+a workflow that can still be recovered or rewound is what keeps its ledger write
+exactly-once. Those rows are read and deleted with SQL: the table is the datasource's own
+tracking table, not part of DBOS's API.
 """
 
 import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Final
 
-from dbos._dbos import _get_dbos_instance
-from dbos._workflow_commands import garbage_collect
+from dbos import DBOS, WorkflowStatusString
 from sqlalchemy import Connection, Engine, bindparam, create_engine, text
 from sqlalchemy.pool import NullPool
 
 from curate_d.config import Settings
 from curate_d.observability.logging import get_logger
 from curate_d.runtime.datasource import TRACKING_SCHEMA
-from curate_d.runtime.dbos_app import SYSTEM_SCHEMA, system_database_url
+from curate_d.runtime.dbos_app import system_database_url
 
 logger = get_logger(__name__)
 
 MILLISECONDS_PER_SECOND = 1000
 
-# Workflow IDs one pass examines; each pass deletes in its own transaction. Not a setting:
-# it bounds how many IDs one query binds and how long one delete holds its locks, not what
-# is pruned. That is the retention period's job, which is why the period is configuration.
-# DBOS fixes its own collector's batch the same way. Revisit only when a measured prune
+# Workflow IDs one pass examines, for both the workflow records and the checkpoints; each
+# pass deletes in its own transaction. Not a setting: it bounds how many IDs one query binds
+# and how long one delete holds its locks, not what is pruned. That is the retention
+# period's job, which is why the period is configuration. Revisit only when a measured prune
 # contends with live ledger transactions.
 CHECKPOINT_BATCH_SIZE = 1000
+
+# The statuses DBOS stamps `completed_at` on; the only ones a prune may delete.
+TERMINAL_STATUSES: Final = (
+    WorkflowStatusString.SUCCESS.value,
+    WorkflowStatusString.ERROR.value,
+    WorkflowStatusString.CANCELLED.value,
+    WorkflowStatusString.MAX_RECOVERY_ATTEMPTS_EXCEEDED.value,
+)
 
 
 @dataclass(frozen=True)
@@ -73,7 +100,7 @@ class RetentionWindow:
 
     @property
     def cutoff_epoch_ms(self) -> int:
-        """Return the cutoff as DBOS expects it: milliseconds since the epoch."""
+        """Return the cutoff in milliseconds since the epoch, the unit of checkpoint timestamps."""
         return int(self.cutoff.timestamp() * MILLISECONDS_PER_SECOND)
 
 
@@ -111,7 +138,7 @@ async def prune_workflow_history(
 
     Then delete the ledger datasource's checkpoints of the workflows that are gone. Audit
     entries are untouched: both deletions stay inside DBOS's own tables, which the audit
-    trail is not part of.
+    trail is not part of. Needs DBOS launched in this process.
 
     Returns:
         The window that was applied, so a caller can log or assert on the boundary
@@ -120,12 +147,7 @@ async def prune_workflow_history(
     window = retention_window(settings, now=now)
     # Synchronous, and it deletes in committed batches; a thread keeps a long prune from
     # stalling the event loop that the worker's I/O queues are running on.
-    await asyncio.to_thread(
-        garbage_collect,
-        _get_dbos_instance(),
-        window.cutoff_epoch_ms,
-        None,
-    )
+    workflows = await asyncio.to_thread(prune_completed_workflows, window.cutoff)
     checkpoints = await asyncio.to_thread(
         prune_datasource_checkpoints, settings, window.cutoff_epoch_ms
     )
@@ -133,9 +155,59 @@ async def prune_workflow_history(
         "workflow_history.pruned",
         retention_days=window.retention_days,
         cutoff=window.cutoff.isoformat(),
+        workflows=workflows,
         datasource_checkpoints=checkpoints,
     )
     return window
+
+
+def prune_completed_workflows(cutoff: datetime, *, batch_size: int = CHECKPOINT_BATCH_SIZE) -> int:
+    """Delete terminal workflow records that completed at or before `cutoff`, in batches.
+
+    Each batch is re-read under the same filter just before its delete, and a row that no
+    longer matches is kept and logged rather than deleted. It no longer matches the next
+    listing either, so the walk moves past it. Synchronous: DBOS refuses its synchronous
+    calls on a thread running an event loop.
+
+    Returns:
+        How many workflow records were deleted.
+    """
+    deleted = 0
+    while True:
+        batch = DBOS.list_workflows(
+            status=list(TERMINAL_STATUSES),
+            completed_before=cutoff.isoformat(),
+            load_input=False,
+            load_output=False,
+            limit=batch_size,
+        )
+        if not batch:
+            return deleted
+        listed = [status.workflow_id for status in batch]
+        eligible = _still_eligible(listed, cutoff)
+        revived = [workflow_id for workflow_id in listed if workflow_id not in eligible]
+        if revived:
+            logger.error(
+                "workflow_history.revived_during_prune",
+                workflow_ids=revived,
+                cutoff=cutoff.isoformat(),
+            )
+        kept = [workflow_id for workflow_id in listed if workflow_id in eligible]
+        if kept:
+            DBOS.delete_workflows(kept)
+            deleted += len(kept)
+
+
+def _still_eligible(workflow_ids: list[str], cutoff: datetime) -> set[str]:
+    """Return which of `workflow_ids` still read terminal and completed by `cutoff`."""
+    statuses = DBOS.list_workflows(
+        workflow_ids=workflow_ids,
+        status=list(TERMINAL_STATUSES),
+        completed_before=cutoff.isoformat(),
+        load_input=False,
+        load_output=False,
+    )
+    return {status.workflow_id for status in statuses}
 
 
 def prune_datasource_checkpoints(
@@ -143,20 +215,29 @@ def prune_datasource_checkpoints(
 ) -> int:
     """Delete datasource checkpoints older than the cutoff whose workflow no longer exists.
 
-    Run after the collector, so the workflows it just removed are the ones found missing.
-    Only rows older than the cutoff go: a deterministic workflow ID enqueued again after
-    its first run was collected writes fresh checkpoints, and those must survive.
+    Run after `prune_completed_workflows`, so the workflows it just removed are the ones
+    found missing. Only rows older than the cutoff go: a deterministic workflow ID enqueued
+    again after its first run was pruned writes fresh checkpoints, and those must survive.
+    Synchronous, like `prune_completed_workflows`: call it off the event loop.
 
     Returns:
         How many checkpoint rows were deleted; zero when no datasource has ever created
         the tracking table.
     """
-    # The tracking table and DBOS's workflow_status live in the same database (dbos_app.py).
+    # The tracking table lives in the ledger database, which also holds DBOS's (dbos_app.py).
     ledger = create_engine(system_database_url(settings), poolclass=NullPool)
     try:
         return _prune_orphaned_checkpoints(ledger, cutoff_epoch_ms, batch_size)
     finally:
         ledger.dispose()
+
+
+def _live_workflow_ids(candidates: Sequence[str]) -> set[str]:
+    """Return which of `candidates` the system database still holds, in any application."""
+    statuses = DBOS.list_workflows(
+        workflow_ids=list(candidates), load_input=False, load_output=False
+    )
+    return {status.workflow_id for status in statuses}
 
 
 def _prune_orphaned_checkpoints(ledger: Engine, cutoff_epoch_ms: int, batch_size: int) -> int:
@@ -169,9 +250,6 @@ def _prune_orphaned_checkpoints(ledger: Engine, cutoff_epoch_ms: int, batch_size
         " WHERE created_at < :cutoff AND workflow_id > :after"
         " ORDER BY workflow_id LIMIT :limit"
     )
-    live_sql = text(
-        f"SELECT workflow_uuid FROM {SYSTEM_SCHEMA}.workflow_status WHERE workflow_uuid IN :ids"
-    ).bindparams(bindparam("ids", expanding=True))
     delete_sql = text(
         f"DELETE FROM {TRACKING_SCHEMA}.datasource_outputs"
         " WHERE workflow_id IN :ids AND created_at < :cutoff"
@@ -189,8 +267,7 @@ def _prune_orphaned_checkpoints(ledger: Engine, cutoff_epoch_ms: int, batch_size
             )
         if not candidates:
             return deleted
-        with ledger.connect() as connection:
-            live = set(connection.scalars(live_sql, {"ids": candidates}))
+        live = _live_workflow_ids(candidates)
         orphaned = [workflow_id for workflow_id in candidates if workflow_id not in live]
         if orphaned:
             with ledger.begin() as connection:

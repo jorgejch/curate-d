@@ -3,6 +3,11 @@
   "diagram_type": "workflow",
   "meta": {
     "title": "curate.d content pipeline",
+    "repository": {
+      "url": "git@github.com:jorgejch/curate-d.git",
+      "link_mode": "local-only",
+      "revision": "6c231b40fcd1b3df3f5f06e69909d2816482e883"
+    },
     "locale": "en",
     "quality_profile": "showcase",
     "output": "docs/diagrams/internals/curate-d-pipeline.html",
@@ -503,8 +508,8 @@
       "sources": [
         {
           "path": "src/curate_d/worker/main.py",
-          "line": 733,
-          "end_line": 747,
+          "line": 682,
+          "end_line": 694,
           "label": "lease, launch, register, apply"
         },
         {
@@ -515,8 +520,8 @@
         },
         {
           "path": "src/curate_d/runtime/queues.py",
-          "line": 200,
-          "end_line": 220,
+          "line": 211,
+          "end_line": 231,
           "label": "IO and CPU queue split"
         }
       ]
@@ -538,8 +543,8 @@
         },
         {
           "path": "src/curate_d/worker/main.py",
-          "line": 787,
-          "end_line": 803,
+          "line": 740,
+          "end_line": 756,
           "label": "exit 75 when lost"
         }
       ]
@@ -550,25 +555,25 @@
       "col": 2,
       "type": "security",
       "label": "apply_schedules",
-      "sublabel": "xact lock \u00b7 I/O only",
-      "width": 130,
+      "sublabel": "session lock \u00b7 I/O only \u00b7 re-applied",
+      "width": 185,
       "sources": [
         {
-          "path": "src/curate_d/worker/main.py",
-          "line": 597,
-          "end_line": 645,
-          "label": "apply_schedules"
+          "path": "src/curate_d/worker/schedules.py",
+          "line": 121,
+          "end_line": 276,
+          "label": "apply, verify, re-apply periodically"
         },
         {
           "path": "src/curate_d/runtime/schedule_authority.py",
           "line": 1,
-          "end_line": 12,
-          "label": "pg_advisory_xact_lock authority"
+          "end_line": 11,
+          "label": "session-lock authority"
         },
         {
           "path": "src/curate_d/workflows/registry.py",
-          "line": 28,
-          "end_line": 47,
+          "line": 29,
+          "end_line": 49,
           "label": "schedules_for"
         }
       ]
@@ -590,8 +595,8 @@
         },
         {
           "path": "src/curate_d/runtime/dbos_app.py",
-          "line": 89,
-          "end_line": 94,
+          "line": 88,
+          "end_line": 93,
           "label": "schema dbos, ledger URL"
         }
       ]
@@ -608,15 +613,15 @@
       "sources": [
         {
           "path": "src/curate_d/workflows/retention.py",
-          "line": 23,
-          "end_line": 48,
+          "line": 22,
+          "end_line": 47,
           "label": "prune_history schedule"
         },
         {
           "path": "src/curate_d/runtime/retention.py",
-          "line": 107,
-          "end_line": 138,
-          "label": "garbage_collect + checkpoints"
+          "line": 128,
+          "end_line": 178,
+          "label": "list/delete + checkpoints"
         }
       ],
       "yOffset": -44
@@ -627,19 +632,19 @@
       "col": 4,
       "type": "backend",
       "label": "run_recovery_sweep",
-      "sublabel": "library \u00b7 not wired",
+      "sublabel": "scheduled \u00b7 operator",
       "width": 135,
       "sources": [
         {
           "path": "src/curate_d/runtime/sweep.py",
           "line": 1,
-          "end_line": 23,
-          "label": "re-enqueue or fork stranded work"
+          "end_line": 24,
+          "label": "redispatch or fork stranded work"
         },
         {
           "path": "src/curate_d/runtime/sweep.py",
-          "line": 286,
-          "end_line": 360,
+          "line": 801,
+          "end_line": 880,
           "label": "lease as liveness test"
         }
       ],
@@ -873,8 +878,8 @@
       "dot": "amber",
       "title": "Persisted schedules (maintenance queue)",
       "items": [
-        "connections-refresh, scan-all, full-rescan-all, classification-holds, group-events, reconcile, check-destinations, prune-workflow-history",
-        "Only the I/O profile applies them, and only a worker on the latest application version; undeclared schedules are deleted",
+        "connections-refresh, scan-all, full-rescan-all, classification-holds, group-events, reconcile, check-destinations, prune-workflow-history, recovery-sweep",
+        "Only the I/O profile applies them, at startup and every schedule_reconciliation_interval_seconds, and only a worker on the latest application version; undeclared schedules are deleted",
         "check-destinations lists each destination, marks lost copies ABSENT and reconciles that content"
       ]
     },
@@ -884,7 +889,7 @@
       "items": [
         "A worker takes its lease before DBOS.launch() runs startup recovery, and exits 75 if the lease is lost",
         "run_recovery_sweep re-enqueues a dead executor's work while holding its lease, and forks work pinned to a retired version",
-        "The sweep exists as a library function only: no schedule or entry point calls it at this revision",
+        "The recovery-sweep schedule runs it on the maintenance queue, and python -m curate_d.runtime.operator_sweep runs it on demand",
         "prune_history deletes completed workflow records and orphaned datasource checkpoints; audit entries are never pruned"
       ]
     },

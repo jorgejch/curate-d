@@ -37,7 +37,7 @@ drops the lock; an emptied reset query hands the lock to the next client.
 
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from hashlib import sha256
 from typing import Final, LiteralString, Protocol, Self
 
@@ -54,6 +54,12 @@ logger = get_logger(__name__)
 # Versioned so a change of derivation can never alias an old key held by a process
 # still running the previous build.
 _KEY_DOMAIN: Final = b"curate-d/executor-lease/v1"
+# The version lease's own domain: an executor identity and a version spelled alike must
+# still name different locks.
+_VERSION_KEY_DOMAIN: Final = b"curate-d/version-lease/v1"
+# The promotion fence's own domain, with a fixed name: one fence per application.
+_PROMOTION_FENCE_DOMAIN: Final = b"curate-d/promotion-fence/v1"
+_PROMOTION_FENCE_NAME: Final = "latest-version"
 
 # libpq settings on the lease connection. Idle probes start after 10s and give up after
 # three unanswered 5s intervals; tcp_user_timeout bounds a probe whose bytes the server
@@ -86,14 +92,37 @@ class ExecutorLeaseLostError(RuntimeError):
     """A held lease was lost; the process may no longer act as its executor identity."""
 
 
+def _advisory_key(domain: bytes, application_name: str, name: str) -> int:
+    """Return the signed 64-bit advisory-lock key for `name` under `domain`."""
+    material = b"\0".join((domain, application_name.encode(), name.encode()))
+    return int.from_bytes(sha256(material).digest()[:8], "big", signed=True)
+
+
 def lease_key(application_name: str, executor_id: str) -> int:
     """Return the signed 64-bit advisory-lock key for one executor identity.
 
     Stable across processes and releases of the same derivation, and distinct per
     (application name, executor identity) pair up to a 64-bit hash collision.
     """
-    material = b"\0".join((_KEY_DOMAIN, application_name.encode(), executor_id.encode()))
-    return int.from_bytes(sha256(material).digest()[:8], "big", signed=True)
+    return _advisory_key(_KEY_DOMAIN, application_name, executor_id)
+
+
+def version_lease_key(application_name: str, version: str) -> int:
+    """Return the signed 64-bit advisory-lock key for one application version.
+
+    Derived like `lease_key` under its own domain, so it collides with an executor key,
+    the schedule authority or a placement locator only on a 64-bit hash collision.
+    """
+    return _advisory_key(_VERSION_KEY_DOMAIN, application_name, version)
+
+
+def promotion_fence_key(application_name: str) -> int:
+    """Return the signed 64-bit advisory-lock key fencing promotion against the sweep.
+
+    Derived like `lease_key` under its own domain, so it collides with an executor or
+    version key only on a 64-bit hash collision.
+    """
+    return _advisory_key(_PROMOTION_FENCE_DOMAIN, application_name, _PROMOTION_FENCE_NAME)
 
 
 class LeaseSession(Protocol):
@@ -103,12 +132,20 @@ class LeaseSession(Protocol):
         """Take the session lock on `key` without waiting; return whether it was taken."""
         ...
 
+    def try_lock_shared(self, key: int) -> bool:
+        """Take the shared session lock on `key` without waiting; return whether it was taken."""
+        ...
+
     def holds(self, key: int) -> bool:
         """Return whether this session still holds the lock on `key`."""
         ...
 
     def unlock(self, key: int) -> None:
         """Release this session's lock on `key`."""
+        ...
+
+    def unlock_shared(self, key: int) -> None:
+        """Release this session's shared lock on `key`."""
         ...
 
     def holder(self, key: int) -> str | None:
@@ -124,6 +161,11 @@ type SessionFactory = Callable[[], LeaseSession]
 
 _TRY_LOCK: Final = "SELECT pg_try_advisory_lock(%(key)s)"
 _UNLOCK: Final = "SELECT pg_advisory_unlock(%(key)s)"
+_TRY_LOCK_SHARED: Final = "SELECT pg_try_advisory_lock_shared(%(key)s)"
+_UNLOCK_SHARED: Final = "SELECT pg_advisory_unlock_shared(%(key)s)"
+_LOCK: Final = "SELECT pg_advisory_lock(%(key)s)"
+# Session-wide (is_local false): autocommit has no transaction to scope it to.
+_SET_LOCK_TIMEOUT: Final = "SELECT set_config('lock_timeout', %(timeout)s, false)"
 # pg_locks reports a bigint advisory key as classid = high 32 bits, objid = low 32 bits.
 _HOLDS: Final = """
     SELECT EXISTS (
@@ -143,6 +185,16 @@ _HOLDER: Final = """
 """
 
 
+# Another session's mode on the key: 'ExclusiveLock' or 'ShareLock' for advisory locks.
+_HOLDER_MODES: Final = """
+    SELECT DISTINCT mode FROM pg_locks
+    WHERE locktype = 'advisory' AND granted AND objsubid = 1
+      AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+      AND classid = %(high)s::bigint::oid AND objid = %(low)s::bigint::oid
+      AND pid <> pg_backend_pid()
+"""
+
+
 def _key_halves(key: int) -> dict[str, int]:
     """Split a signed 64-bit key into the unsigned halves pg_locks reports."""
     unsigned = key & 0xFFFF_FFFF_FFFF_FFFF
@@ -155,7 +207,7 @@ class PostgresLeaseSession:
     def __init__(self, connection: psycopg.Connection[TupleRow]) -> None:
         self._connection = connection
 
-    def _scalar(self, query: LiteralString, params: dict[str, int]) -> object:
+    def _scalar(self, query: LiteralString, params: Mapping[str, int | str]) -> object:
         """Run `query` and return the first column of its single row."""
         row = self._connection.execute(query, params).fetchone()
         return None if row is None else row[0]
@@ -163,6 +215,26 @@ class PostgresLeaseSession:
     def try_lock(self, key: int) -> bool:
         """Take the session lock on `key` without waiting; return whether it was taken."""
         return self._scalar(_TRY_LOCK, {"key": key}) is True
+
+    def try_lock_shared(self, key: int) -> bool:
+        """Take the shared session lock on `key` without waiting; return whether it was taken."""
+        return self._scalar(_TRY_LOCK_SHARED, {"key": key}) is True
+
+    def lock_within(self, key: int, timeout: float) -> bool:
+        """Wait up to `timeout` seconds for the session lock on `key`; return whether taken.
+
+        The wait is PostgreSQL's `lock_timeout`, reset afterwards. A waiting exclusive
+        request also refuses later shared `try` requests on the key, so it is not starved.
+        """
+        milliseconds = max(1, round(timeout * 1000))
+        self._scalar(_SET_LOCK_TIMEOUT, {"timeout": f"{milliseconds}ms"})
+        try:
+            self._scalar(_LOCK, {"key": key})
+        except psycopg.errors.LockNotAvailable:
+            return False
+        finally:
+            self._scalar(_SET_LOCK_TIMEOUT, {"timeout": "0"})
+        return True
 
     def holds(self, key: int) -> bool:
         """Return whether this session still holds the lock on `key`, per pg_locks."""
@@ -172,6 +244,10 @@ class PostgresLeaseSession:
         """Release this session's lock on `key`."""
         self._scalar(_UNLOCK, {"key": key})
 
+    def unlock_shared(self, key: int) -> None:
+        """Release this session's shared lock on `key`."""
+        self._scalar(_UNLOCK_SHARED, {"key": key})
+
     def holder(self, key: int) -> str | None:
         """Describe the session holding `key` as pid, application, address and start."""
         row = self._connection.execute(_HOLDER, _key_halves(key)).fetchone()
@@ -179,6 +255,13 @@ class PostgresLeaseSession:
             return None
         pid, application, address, started = row
         return f"pid {pid} ({application or 'unknown'} from {address or 'local'}, since {started})"
+
+    def holder_mode(self, key: int) -> str | None:
+        """Return the mode another session holds `key` in: `exclusive`, `shared` or None."""
+        modes = {row[0] for row in self._connection.execute(_HOLDER_MODES, _key_halves(key))}
+        if "ExclusiveLock" in modes:
+            return "exclusive"
+        return "shared" if "ShareLock" in modes else None
 
     def close(self) -> None:
         """Close the connection, which ends the session and releases its locks."""
@@ -191,14 +274,14 @@ def lease_conninfo(settings: Settings) -> str:
     return url.render_as_string(hide_password=False)
 
 
-def connect_session(conninfo: str, *, application_name: str) -> PostgresLeaseSession:
-    """Open a dedicated lease connection with client-side keepalives.
+def connect_dedicated(conninfo: str, *, application_name: str) -> psycopg.Connection[TupleRow]:
+    """Open a dedicated autocommit connection with client-side keepalives.
 
     Autocommit, because a session lock must not ride inside a transaction that could be
     left idle, and outside any pool, because a pooled connection is handed to other code
     and returned with whatever session state that code left on it.
     """
-    connection = psycopg.connect(
+    return psycopg.connect(
         conninfo,
         autocommit=True,
         application_name=application_name[:_APPLICATION_NAME_LIMIT],
@@ -209,7 +292,11 @@ def connect_session(conninfo: str, *, application_name: str) -> PostgresLeaseSes
         keepalives_count=KEEPALIVES_COUNT,
         tcp_user_timeout=TCP_USER_TIMEOUT_MILLISECONDS,
     )
-    return PostgresLeaseSession(connection)
+
+
+def connect_session(conninfo: str, *, application_name: str) -> PostgresLeaseSession:
+    """Open a dedicated lease session (see `connect_dedicated`)."""
+    return PostgresLeaseSession(connect_dedicated(conninfo, application_name=application_name))
 
 
 def _close_quietly(session: LeaseSession) -> None:
@@ -221,7 +308,13 @@ def _close_quietly(session: LeaseSession) -> None:
 
 
 class ExecutorLease:
-    """The session-level advisory lock on one executor identity.
+    """The session-level advisory lock on one executor identity, and a worker's version.
+
+    A worker's lease holds two keys on one session: its executor identity exclusively,
+    then its version shared (see `version_lease.py`). It counts as held only when both
+    are; one probe checks both, and a broken session drops both, so the worker can never
+    run on with its version looking dead. A refused version key gives the executor key
+    back, since session locks stack and the next attempt retakes both in order.
 
     Thread-safe: the monitor thread and the owner share the session under one lock.
     """
@@ -233,6 +326,7 @@ class ExecutorLease:
         connect: SessionFactory,
         application_name: str = APPLICATION_NAME,
         probe_interval: float = PROBE_INTERVAL_SECONDS,
+        version: str | None = None,
     ) -> None:
         """Bind a lease to an identity without connecting.
 
@@ -241,32 +335,49 @@ class ExecutorLease:
             connect: Opens a new dedicated session; called again after a broken one.
             application_name: The DBOS application name, part of the lock key.
             probe_interval: Seconds between checks of a monitored lease.
+            version: The application version a worker runs. When set, the lease also
+                holds that version's lock, shared, on the same session; the sweep's
+                dead-executor checks leave it unset and take only the executor key.
         """
         self.executor_id = executor_id
+        self.version = version
         self._probe_interval = probe_interval
         self.key = lease_key(application_name, executor_id)
+        self.version_key = None if version is None else version_lease_key(application_name, version)
         self._connect = connect
         self._session: LeaseSession | None = None
         self._held = False
+        self._refused_key: int | None = None
         self._guard = threading.Lock()
         self._monitor: threading.Thread | None = None
         self._stop_monitoring = threading.Event()
 
     @classmethod
     def for_settings(
-        cls, settings: Settings, executor_id: str, *, purpose: str = "executor lease"
+        cls,
+        settings: Settings,
+        executor_id: str,
+        *,
+        version: str | None = None,
+        purpose: str = "executor lease",
     ) -> Self:
         """Return a lease on the configured DBOS system database.
 
         Args:
             settings: Resolved configuration naming the system database.
             executor_id: The identity to lease.
+            version: The version a worker runs, whose lock the lease also holds shared.
+                Omitted by the sweep's dead-executor checks.
             purpose: Shown in pg_stat_activity, so an operator can tell a worker's lease
                 from a sweep's momentary claim.
         """
         conninfo = lease_conninfo(settings)
         name = f"{APPLICATION_NAME} {purpose} {executor_id}"
-        return cls(executor_id, connect=lambda: connect_session(conninfo, application_name=name))
+        return cls(
+            executor_id,
+            connect=lambda: connect_session(conninfo, application_name=name),
+            version=version,
+        )
 
     @property
     def held(self) -> bool:
@@ -289,11 +400,41 @@ class ExecutorLease:
             if self._session is None:
                 self._session = self._connect()
             try:
-                self._held = self._session.try_lock(self.key)
+                self._held = self._take(self._session)
             except BaseException:
                 self._discard_session()
                 raise
             return self._held
+
+    def _take(self, session: LeaseSession) -> bool:
+        """Take every key this lease holds, in order, or none of them."""
+        if not session.try_lock(self.key):
+            self._refused_key = self.key
+            return False
+        if self.version_key is None or session.try_lock_shared(self.version_key):
+            self._refused_key = None
+            return True
+        session.unlock(self.key)
+        self._refused_key = self.version_key
+        return False
+
+    def _holds_all(self, session: LeaseSession) -> bool:
+        """Return whether `session` still holds every key this lease holds."""
+        if not session.holds(self.key):
+            return False
+        return self.version_key is None or session.holds(self.version_key)
+
+    def _give_back(self, session: LeaseSession) -> None:
+        """Release every key this lease holds, in reverse order."""
+        if self.version_key is not None:
+            session.unlock_shared(self.version_key)
+        session.unlock(self.key)
+
+    def _obstacle_subject(self) -> str:
+        """Name what the last refused attempt could not take, for logs and errors."""
+        if self.version is not None and self._refused_key == self.version_key:
+            return f"version {self.version!r} of executor identity {self.executor_id!r}"
+        return f"executor identity {self.executor_id!r}"
 
     def acquire(
         self,
@@ -325,7 +466,10 @@ class ExecutorLease:
             try:
                 if self.try_acquire():
                     logger.info(
-                        "executor_lease.acquired", executor_id=self.executor_id, attempts=attempt
+                        "executor_lease.acquired",
+                        executor_id=self.executor_id,
+                        version=self.version,
+                        attempts=attempt,
                     )
                     return
                 holder = self._describe_holder()
@@ -336,14 +480,15 @@ class ExecutorLease:
             if remaining <= 0:
                 self.release()
                 raise ExecutorLeaseUnavailableError(
-                    f"executor identity {self.executor_id!r} is still {obstacle} after "
-                    f"{timeout:.0f}s; another live process may be using it. A worker never "
-                    f"starts as an identity it cannot lease"
+                    f"{self._obstacle_subject()} is still {obstacle} after "
+                    f"{timeout:.0f}s; another live process, or a recovery sweep of the "
+                    f"version, may be using it. A worker never starts on a lease it cannot take"
                 )
             wait = min(delay, remaining)
             logger.warning(
                 "executor_lease.waiting",
                 executor_id=self.executor_id,
+                version=self.version,
                 obstacle=obstacle,
                 attempt=attempt,
                 retry_in_seconds=round(wait, 3),
@@ -386,7 +531,7 @@ class ExecutorLease:
         if session is not None:
             if held:
                 try:
-                    session.unlock(self.key)
+                    self._give_back(session)
                 except Exception as error:  # Closing the session releases it regardless.
                     logger.warning(
                         "executor_lease.unlock_failed",
@@ -407,7 +552,7 @@ class ExecutorLease:
             if session is None:
                 return None
             try:
-                return session.holder(self.key)
+                return session.holder(self._refused_key or self.key)
             except psycopg.Error:
                 self._discard_session()
                 return None
@@ -427,8 +572,8 @@ class ExecutorLease:
             session = self._session
             failure: str | None = None
             try:
-                if session is None or not session.holds(self.key):
-                    failure = "the session no longer holds the lock"
+                if session is None or not self._holds_all(session):
+                    failure = "the session no longer holds every lock"
             except Exception as error:  # Any failure to vouch for the lease is a loss.
                 failure = f"the lease connection failed ({type(error).__name__})"
             if failure is None:
