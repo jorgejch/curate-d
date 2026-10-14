@@ -4,11 +4,13 @@ name: Unit Tests
 # becomes a pull request. main, dev and release tags are excluded: docker-publish.yml's
 # `check` job already runs this suite on them, with lint, type check and the staging
 # integration steps on top. A `branches-ignore` filter alone also leaves tags out.
+# `badges` holds only README badge data, written by docker-publish.yml's `badges` job.
 on:
   push:
     branches-ignore:
       - main
       - dev
+      - badges
 
 # A newer push to the same branch supersedes the run in progress.
 concurrency:

@@ -43,6 +43,10 @@ jobs:
   # enough that gating on them costs less than finding out from the cluster.
   check:
     runs-on: ubuntu-24.04
+    # shields.io endpoint documents for the README badges; the `badges` job publishes them.
+    outputs:
+      tests-badge: ${{ steps.badge-data.outputs.tests }}
+      coverage-badge: ${{ steps.badge-data.outputs.coverage }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -98,7 +102,9 @@ jobs:
       # Unit suite only. The integration suite needs PostgreSQL, and its coverage
       # deliberately does not count toward the floor.
       - name: Unit tests
-        run: uv run pytest -n auto
+        run: >-
+          uv run pytest -n auto
+          --junitxml=unit-tests.xml --cov-report=json:coverage.json
 
       # This fixture uses the pinned Compose images and the same adapter suite as OVH.
       # Selecting RustFS explicitly leaves remote verification visibly PENDING.
@@ -138,6 +144,7 @@ jobs:
           tests/integration/test_staging_coordination.py
           tests/integration/test_staging_cache_schema.py
           --no-cov -m integration
+          --junitxml=staging-coordination.xml -o junit_family=legacy
 
       - name: RustFS staging contract (OVH verification remains PENDING)
         run: >-
@@ -186,6 +193,70 @@ jobs:
           echo "Rows 30/31 need a multi-day observation no job outlasts; a budget short"
           echo "enough to pass here would record unobserved reclamation as verified."
           exit 1
+
+      # Every suite above, unit and integration, feeds the tests badge; coverage stays the
+      # unit suite's, as the floor does. Runs even when a suite fails, so a red branch
+      # shows red rather than its last green. Only pushes to a branch publish badges; a
+      # pull request has no branch badge. A suite whose step never ran (an earlier step
+      # failed) has no report, and the badge says so rather than counting it as passed.
+      - name: Summarize test results for the badges
+        id: badge-data
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref_type == 'branch' }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from xml.etree import ElementTree
+
+          REPORTS = [
+              "unit-tests.xml",
+              "staging-coordination.xml",
+              "staging-contract-rustfs.xml",
+              "staging-backend-checks-rustfs.xml",
+              "staging-lifecycle-rustfs.xml",
+          ]
+
+          def badge(label: str, message: str, color: str) -> str:
+              return json.dumps(
+                  {"schemaVersion": 1, "label": label, "message": message, "color": color}
+              )
+
+          total = failed = skipped = 0
+          missing = 0
+          for name in REPORTS:
+              report = Path(name)
+              if not report.exists():
+                  missing += 1
+                  continue
+              for suite in ElementTree.parse(report).getroot().iter("testsuite"):
+                  total += int(suite.get("tests", 0))
+                  failed += int(suite.get("failures", 0)) + int(suite.get("errors", 0))
+                  skipped += int(suite.get("skipped", 0))
+          passed = total - failed - skipped
+
+          if failed:
+              tests = badge("tests", f"{failed} failed", "red")
+          elif missing == len(REPORTS):
+              tests = badge("tests", "not run", "lightgrey")
+          elif missing:
+              tests = badge("tests", f"{passed} passed, {missing} suites not run", "orange")
+          else:
+              tests = badge("tests", f"{passed} passed", "brightgreen")
+
+          # The floor is pyproject.toml's --cov-fail-under=80: below it is red.
+          data = Path("coverage.json")
+          if data.exists():
+              percent = json.loads(data.read_text())["totals"]["percent_covered"]
+              color = "red" if percent < 80 else "yellow" if percent < 90 else "brightgreen"
+              # Truncated, not rounded: 79.96% must not read as the 80% floor it misses.
+              coverage = badge("coverage", f"{int(percent * 10) / 10}%", color)
+          else:
+              coverage = badge("coverage", "unknown", "lightgrey")
+
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as out:
+              out.write(f"tests={tests}\ncoverage={coverage}\n")
+          PY
 
       - name: Record RustFS contract evidence
         if: always()
@@ -302,3 +373,60 @@ jobs:
             CURATE_D_BUILD_REVISION=${{ github.ref == 'refs/heads/dev' && steps.meta.outputs.version || '' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # README badges, one pair per branch: `badges` is an orphan branch holding
+  # <branch>/tests.json and <branch>/coverage.json, which shields.io renders through its
+  # endpoint badge. A GITHUB_TOKEN push triggers no workflow, so this cannot loop.
+  badges:
+    needs: check
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref_type == 'branch' && needs.check.outputs.tests-badge != '' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    # One publish per branch at a time; main and dev can still race, hence the retry.
+    concurrency:
+      group: badges-${{ github.ref_name }}
+    steps:
+      - name: Publish this branch's badges
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ github.ref_name }}
+          TESTS: ${{ needs.check.outputs.tests-badge }}
+          COVERAGE: ${{ needs.check.outputs.coverage-badge }}
+        run: |
+          remote="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          # A run that finishes after a newer push to the same branch would otherwise
+          # overwrite the newer result with its own.
+          head=$(git ls-remote "$remote" "refs/heads/${BRANCH}" | cut -f1)
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "${BRANCH} has moved past ${GITHUB_SHA}; leaving its badges to the newer run."
+            exit 0
+          fi
+
+          # Each attempt starts from a fresh clone of the badges branch, so a push rejected
+          # because the other branch's run got there first just retries on top of it.
+          publish() (
+            rm -rf work && git init -q work && cd work
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            if git fetch -q --depth 1 "$remote" badges; then
+              git checkout -q -b badges FETCH_HEAD
+            else
+              git checkout -q -b badges
+            fi
+            mkdir -p "$BRANCH"
+            printf '%s\n' "$TESTS" > "$BRANCH/tests.json"
+            printf '%s\n' "$COVERAGE" > "$BRANCH/coverage.json"
+            git add -A
+            git diff --cached --quiet && return 0
+            git commit -qm "badges: ${BRANCH} at ${GITHUB_SHA::7}"
+            git push -q "$remote" HEAD:refs/heads/badges
+          )
+
+          for attempt in 1 2 3 4 5; do
+            publish && exit 0
+            sleep $((attempt * 3))
+          done
+          echo "::error::Could not push the ${BRANCH} badges after 5 attempts."
+          exit 1

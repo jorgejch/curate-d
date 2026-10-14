@@ -1,5 +1,10 @@
 # curate.d
 
+[![dev tests](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fjorgejch%2Fcurate-d%2Fbadges%2Fdev%2Ftests.json&label=dev%20tests)](https://github.com/jorgejch/curate-d/actions/workflows/docker-publish.yml?query=branch%3Adev)
+[![dev coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fjorgejch%2Fcurate-d%2Fbadges%2Fdev%2Fcoverage.json&label=dev%20coverage)](https://github.com/jorgejch/curate-d/actions/workflows/docker-publish.yml?query=branch%3Adev)
+[![main tests](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fjorgejch%2Fcurate-d%2Fbadges%2Fmain%2Ftests.json&label=main%20tests)](https://github.com/jorgejch/curate-d/actions/workflows/docker-publish.yml?query=branch%3Amain)
+[![main coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fjorgejch%2Fcurate-d%2Fbadges%2Fmain%2Fcoverage.json&label=main%20coverage)](https://github.com/jorgejch/curate-d/actions/workflows/docker-publish.yml?query=branch%3Amain)
+
 Autonomous multi-cloud file and media organizer.
 
 Curate.d ingests files and media from multiple cloud storage and photo providers,
