@@ -11,6 +11,7 @@ import pytest
 from dbos import DBOS
 
 from curate_d.config import Settings, StagingRole
+from curate_d.runtime import dbos_app
 from curate_d.runtime.lease import ExecutorLease
 from curate_d.runtime.profiles import WorkerProfile
 from curate_d.runtime.version_lease import VersionRegistryError
@@ -315,6 +316,10 @@ def startup_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     monkeypatch.setattr(worker, "prepare_services", lambda settings, profile, staging: None)
     monkeypatch.setattr(worker, "apply_schedules", lambda profile, settings: None)
     monkeypatch.setattr(DBOS, "destroy", lambda **kw: calls.append("drain"))
+    # The drain reads what is left running through a client; nothing is.
+    drained = Mock()
+    drained.list_workflows.return_value = []
+    monkeypatch.setattr(dbos_app, "client", lambda settings, **kw: drained)
     monkeypatch.setattr(worker, "_install_shutdown_handler", lambda stop: None)
     monkeypatch.setattr(worker, "register_version", lambda settings, version: None)
     locks = FakeLockServer(events=calls)
