@@ -139,13 +139,7 @@ async def plan_at(
     destination: DestinationConfig,
 ) -> PlacementPlan | RenderFailure:
     """Plan one placement at `destination`, resolved against what the ledger has there."""
-    profile = PROFILES.get(destination.profile)
-    if profile is None:
-        return RenderFailure(
-            content_object_id=content_object_id,
-            destination_name=destination.name,
-            reason=f"unknown capability profile {destination.profile!r}",
-        )
+    profile = PROFILES[destination.profile]
 
     def attempt(occupants: Mapping[str, Placement]) -> PlacementPlan | RenderFailure:
         """Plan against `occupants`."""

@@ -5,38 +5,35 @@ should have copies at; every matching rule contributes, so policies compose. Ret
 separate: an original is kept unless a retention rule explicitly permits release, and even
 then only once enough strongly verified copies exist — counting the original itself when
 the policy says it is one of the copies.
+
+Every value a policy names is checked when it is parsed: a condition's `media_kind` must
+be a `MediaKind`, and a destination's `profile` a `CapabilityProfileName`. Category and
+subcategory conditions are checked against the taxonomy only when a validation context
+carries one, which activation does (`domain.conditions`).
 """
 
 from collections.abc import Mapping
+from enum import StrEnum
 from typing import Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, ValidationInfo, model_validator
 
 from curate_d.domain.base import DomainModel
+from curate_d.domain.conditions import check_conditions, matches, taxonomy_in
 from curate_d.domain.facts import Facts
 from curate_d.domain.placement import VerificationLevel
 from curate_d.domain.source import Provider
 
-_CONDITION_FIELDS = frozenset({"media_kind", "category", "subcategory"})
 
+class CapabilityProfileName(StrEnum):
+    """The capability profiles a destination can name.
 
-def _matches(when: Mapping[str, str], facts: Facts) -> bool:
-    """Whether every condition matches the facts."""
-    values = facts.model_dump(mode="json")
-    return all(values.get(field) == value for field, value in when.items())
-
-
-def _check_conditions(owner: str, when: Mapping[str, str]) -> None:
-    """Reject a condition on a fact that cannot select.
-
-    Raises:
-        ValueError: the condition names another fact.
+    Rendering holds a profile for each (`rendering.templates.PROFILES`); the domain holds
+    only the names, so a policy naming another is refused when it is parsed.
     """
-    unknown = set(when) - _CONDITION_FIELDS
-    if unknown:
-        raise ValueError(
-            f"{owner} selects on {sorted(unknown)}; only {sorted(_CONDITION_FIELDS)} can select"
-        )
+
+    PCLOUD = "pcloud"
+    PORTABLE = "portable"
 
 
 class DestinationConfig(DomainModel):
@@ -46,7 +43,9 @@ class DestinationConfig(DomainModel):
     provider: Provider
     account: str = Field(min_length=1)
     root_path: str = Field(min_length=1, pattern=r"^/")
-    profile: str = Field(default="pcloud", description="Capability profile name.")
+    profile: CapabilityProfileName = Field(
+        default=CapabilityProfileName.PCLOUD, description="Capability profile name."
+    )
 
 
 class PlacementRule(DomainModel):
@@ -57,13 +56,16 @@ class PlacementRule(DomainModel):
     destinations: tuple[str, ...] = Field(min_length=1)
 
     @model_validator(mode="after")
-    def _check(self) -> Self:
-        """Reject conditions on facts that cannot select.
+    def _check(self, info: ValidationInfo[object]) -> Self:
+        """Reject conditions that cannot match.
 
         Raises:
-            ValueError: a condition names another fact.
+            ValueError: a condition names another fact or a value no fact can hold, or,
+                with a taxonomy in the validation context, a value it does not list.
         """
-        _check_conditions(f"placement rule {self.name!r}", self.when)
+        check_conditions(
+            f"placement rule {self.name!r}", self.when, taxonomy=taxonomy_in(info.context)
+        )
         return self
 
 
@@ -78,14 +80,17 @@ class RetentionRule(DomainModel):
     minimum_level: VerificationLevel = VerificationLevel.STRONG_IN_TRANSIT
 
     @model_validator(mode="after")
-    def _check(self) -> Self:
-        """Reject conditions on unknown facts and a release below the strong rungs.
+    def _check(self, info: ValidationInfo[object]) -> Self:
+        """Reject conditions that cannot match and a release below the strong rungs.
 
         Raises:
-            ValueError: a condition names another fact, or release would accept a copy
-                weaker than the strong rungs.
+            ValueError: a condition names another fact or a value no fact can hold, or,
+                with a taxonomy in the validation context, a value it does not list; or
+                release would accept a copy weaker than the strong rungs.
         """
-        _check_conditions(f"retention rule {self.name!r}", self.when)
+        check_conditions(
+            f"retention rule {self.name!r}", self.when, taxonomy=taxonomy_in(info.context)
+        )
         if self.release_source and not self.minimum_level.permits_source_release:
             raise ValueError(
                 f"retention rule {self.name!r} would release sources on "
@@ -126,13 +131,13 @@ class PlacementPolicy(DomainModel):
     def desired_destinations(self, facts: Facts) -> tuple[str, ...]:
         """Every destination a matching rule asks for, in a stable order."""
         wanted = {
-            name for rule in self.rules if _matches(rule.when, facts) for name in rule.destinations
+            name for rule in self.rules if matches(rule.when, facts) for name in rule.destinations
         }
         return tuple(sorted(wanted))
 
     def retention_for(self, facts: Facts) -> RetentionRule | None:
         """The first retention rule that applies, or None: retain by default."""
-        return next((rule for rule in self.retention if _matches(rule.when, facts)), None)
+        return next((rule for rule in self.retention if matches(rule.when, facts)), None)
 
 
 # No destinations: nothing is placed until a person configures where things go.

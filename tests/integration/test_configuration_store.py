@@ -3,7 +3,8 @@
 from collections.abc import AsyncIterator
 
 import pytest
-from sqlalchemy import delete
+from sqlalchemy import delete, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from curate_d.configuration.documents import parse_taxonomy
@@ -95,3 +96,43 @@ async def test_only_one_version_is_active_at_a_time(
             created_by="t",
         )
     assert [v.version for v in await repository.history(_KIND) if v.active] == [3]
+
+
+async def test_a_shared_hold_on_the_taxonomy_blocks_its_activation_until_released(
+    ledger_engine: AsyncEngine,
+) -> None:
+    """A policy activation's shared hold keeps a taxonomy change waiting; readers share it."""
+    async with (
+        ledger_engine.connect() as holder,
+        ledger_engine.connect() as reader,
+        ledger_engine.connect() as writer,
+    ):
+        await holder.begin()
+        await reader.begin()
+        await writer.begin()
+        try:
+            await ConfigurationRepository(holder).lock_shared(_KIND)
+            await reader.execute(text("SET LOCAL lock_timeout = '2s'"))
+            await ConfigurationRepository(reader).lock_shared(_KIND)
+            await reader.rollback()
+
+            await writer.execute(text("SET LOCAL lock_timeout = '200ms'"))
+            with pytest.raises(OperationalError, match="lock timeout"):
+                await ConfigurationRepository(writer).activate(
+                    _KIND,
+                    SEED_TAXONOMY.model_dump(mode="json"),
+                    parse_taxonomy,
+                    created_by="t",
+                )
+            await writer.rollback()
+
+            await holder.rollback()
+            await writer.begin()
+            await writer.execute(text("SET LOCAL lock_timeout = '2s'"))
+            assert await ConfigurationRepository(writer).activate(
+                _KIND, SEED_TAXONOMY.model_dump(mode="json"), parse_taxonomy, created_by="t"
+            )
+        finally:
+            for connection in (holder, reader, writer):
+                if connection.in_transaction():
+                    await connection.rollback()

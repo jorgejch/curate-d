@@ -3,7 +3,8 @@
 from dataclasses import replace
 
 from curate_d.api.configuration import OPERATOR_HEADER
-from curate_d.domain import ConfigurationKind
+from curate_d.configuration.consistency import OrphanedCondition
+from curate_d.domain import SEED_TAXONOMY, ConfigurationKind, TaxonomyField
 from curate_d.rendering.templates import SEED_TEMPLATES
 from tests.unit.api.fakes import FakeConfiguration, backends, client
 
@@ -87,3 +88,81 @@ def test_history_of_an_unknown_kind_is_refused() -> None:
     """Only the three kinds exist."""
     with client() as http:
         assert http.get("/configuration/layouts/history").status_code == 422
+
+
+_DESTINATION = {"name": "archive", "provider": "pcloud", "account": "1", "root_path": "/"}
+
+
+def test_a_policy_selecting_an_unknown_media_kind_is_refused_and_nothing_changes() -> None:
+    """The error locates the rule and names the value; version 1 stays in force."""
+    fake = FakeConfiguration()
+    with client(replace(backends(), configuration=fake)) as http:
+        response = http.put(
+            "/configuration/policy",
+            json={
+                "destinations": [_DESTINATION],
+                "rules": [
+                    {"name": "x", "when": {"media_kind": "photos"}, "destinations": ["archive"]}
+                ],
+            },
+        )
+        current = http.get("/configuration/policy").json()
+    assert response.status_code == 422
+    [error] = response.json()["detail"]
+    assert error["loc"] == ["body", "rules", 0]
+    assert "media_kind 'photos'" in error["msg"]
+    assert current["version"] == 1
+
+
+def test_a_policy_naming_an_unknown_profile_is_refused_and_nothing_changes() -> None:
+    """The error locates the destination's profile; version 1 stays in force."""
+    fake = FakeConfiguration()
+    with client(replace(backends(), configuration=fake)) as http:
+        response = http.put(
+            "/configuration/policy",
+            json={"destinations": [_DESTINATION | {"profile": "dropbox"}], "rules": []},
+        )
+        current = http.get("/configuration/policy").json()
+    assert response.status_code == 422
+    [error] = response.json()["detail"]
+    assert error["loc"] == ["body", "destinations", 0, "profile"]
+    assert current["version"] == 1
+
+
+def test_a_template_selecting_an_unknown_media_kind_is_refused() -> None:
+    """The error locates the template; version 1 stays in force."""
+    fake = FakeConfiguration()
+    with client(replace(backends(), configuration=fake)) as http:
+        response = http.put("/configuration/templates", json=_templates(when={"media_kind": "x"}))
+        current = http.get("/configuration/templates").json()
+    assert response.status_code == 422
+    [error] = response.json()["detail"]
+    assert error["loc"] == ["body", "templates", 0]
+    assert "media_kind 'x'" in error["msg"]
+    assert current["version"] == 1
+
+
+def test_a_taxonomy_change_answers_with_the_conditions_it_orphans() -> None:
+    """The backend's orphans are reported; reading the taxonomy reports none."""
+    orphan = OrphanedCondition(
+        kind=ConfigurationKind.POLICY,
+        owner="placement rule 'docs'",
+        field=TaxonomyField.CATEGORY,
+        value="Documents",
+    )
+    fake = FakeConfiguration(orphaned=(orphan,))
+    with client(replace(backends(), configuration=fake)) as http:
+        changed = http.put(
+            "/configuration/taxonomy", json=SEED_TAXONOMY.model_dump(mode="json")
+        ).json()
+        current = http.get("/configuration/taxonomy").json()
+    assert changed["version"] == 2
+    assert changed["orphaned"] == [
+        {
+            "kind": "policy",
+            "owner": "placement rule 'docs'",
+            "field": "category",
+            "value": "Documents",
+        }
+    ]
+    assert current["orphaned"] == []

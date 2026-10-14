@@ -1,5 +1,7 @@
 """Configuration endpoints over the ledger: changes persist, refusals change nothing."""
 
+import asyncio
+import copy
 import uuid
 from collections.abc import AsyncIterator, Iterator
 
@@ -9,15 +11,20 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from curate_d.api.app import create_app
+from curate_d.api.configuration import LedgerConfiguration
+from curate_d.classification.taxonomy import active_taxonomy, promote
 from curate_d.config import Settings
+from curate_d.configuration.consistency import taxonomy_in_force
 from curate_d.configuration.documents import parse_policy, parse_taxonomy
-from curate_d.configuration.store import ConfigurationRepository
+from curate_d.configuration.store import ConfigurationRepository, DocumentValidator
 from curate_d.domain import (
     ConfigurationKind,
     ContentObject,
     HashAlgorithm,
     Placement,
+    RejectedValue,
     StrongFingerprint,
+    TaxonomyField,
 )
 from curate_d.ledger import ContentObjectRepository, PlacementRepository
 from curate_d.ledger.tables import content_objects, placements
@@ -25,11 +32,14 @@ from curate_d.rendering.templates import parse_templates
 
 pytestmark = pytest.mark.integration
 
-_PARSERS = {
-    ConfigurationKind.TAXONOMY: parse_taxonomy,
-    ConfigurationKind.TEMPLATES: parse_templates,
+# Restored in this order. Without a taxonomy context any order is valid; the taxonomy
+# goes last anyway, after the documents whose conditions it lists.
+_PARSERS: dict[ConfigurationKind, DocumentValidator] = {
     ConfigurationKind.POLICY: parse_policy,
+    ConfigurationKind.TEMPLATES: parse_templates,
+    ConfigurationKind.TAXONOMY: parse_taxonomy,
 }
+_DESTINATION = {"name": "archive", "provider": "pcloud", "account": "1", "root_path": "/"}
 
 
 @pytest.fixture
@@ -140,3 +150,236 @@ async def test_a_template_change_leaves_existing_placements_untouched(
             await connection.execute(
                 delete(content_objects).where(content_objects.c.id == content.id)
             )
+
+
+async def _policy_versions(ledger_engine: AsyncEngine) -> list[int]:
+    """Return every stored policy version, newest first."""
+    async with ledger_engine.connect() as connection:
+        history = await ConfigurationRepository(connection).history(ConfigurationKind.POLICY)
+    return [version.version for version in history]
+
+
+@pytest.mark.parametrize(
+    ("document", "location"),
+    [
+        (
+            {
+                "destinations": [_DESTINATION],
+                "rules": [
+                    {"name": "x", "when": {"media_kind": "photos"}, "destinations": ["archive"]}
+                ],
+            },
+            ["body", "rules", 0],
+        ),
+        (
+            {"destinations": [_DESTINATION | {"profile": "dropbox"}], "rules": []},
+            ["body", "destinations", 0, "profile"],
+        ),
+    ],
+)
+async def test_a_policy_with_an_unknown_media_kind_or_profile_changes_nothing(
+    http: TestClient,
+    ledger_engine: AsyncEngine,
+    document: dict[str, object],
+    location: list[object],
+) -> None:
+    """Refused with the location; the version in force and the history are unchanged."""
+    before = http.get("/configuration/policy").json()
+    versions = await _policy_versions(ledger_engine)
+
+    refused = http.put("/configuration/policy", json=document)
+
+    assert refused.status_code == 422
+    assert [error["loc"] for error in refused.json()["detail"]] == [location]
+    assert http.get("/configuration/policy").json() == before
+    assert await _policy_versions(ledger_engine) == versions
+
+
+async def test_a_template_with_an_unknown_media_kind_changes_nothing(http: TestClient) -> None:
+    """Refused with the template's location; the set in force is unchanged."""
+    before = http.get("/configuration/templates").json()
+    document = copy.deepcopy(before["document"])
+    document["templates"][0]["when"] = {"media_kind": "photos"}
+
+    refused = http.put("/configuration/templates", json=document)
+
+    assert refused.status_code == 422
+    assert ["body", "templates", 0] in [error["loc"] for error in refused.json()["detail"]]
+    assert http.get("/configuration/templates").json() == before
+
+
+async def test_a_policy_category_the_taxonomy_lacks_is_refused_until_it_is_added(
+    http: TestClient, ledger_engine: AsyncEngine
+) -> None:
+    """Checked against the taxonomy in force at activation; accepted once it lists the value."""
+    category = f"Unlisted-{uuid.uuid4().hex[:8]}"
+    document = {
+        "destinations": [_DESTINATION],
+        "rules": [{"name": "odd", "when": {"category": category}, "destinations": ["archive"]}],
+    }
+    before = http.get("/configuration/policy").json()
+    versions = await _policy_versions(ledger_engine)
+
+    refused = http.put("/configuration/policy", json=document)
+
+    assert refused.status_code == 422
+    detail = refused.json()["detail"]
+    assert detail.startswith("invalid policy configuration: rules.0: ")
+    assert f"placement rule 'odd' selects category {category!r}" in detail
+    assert http.get("/configuration/policy").json() == before
+    assert await _policy_versions(ledger_engine) == versions
+
+    taxonomy = http.get("/configuration/taxonomy").json()["document"]
+    taxonomy["categories"][category] = []
+    assert http.put("/configuration/taxonomy", json=taxonomy).status_code == 200
+
+    accepted = http.put("/configuration/policy", json=document)
+    assert accepted.status_code == 200
+    assert accepted.json()["version"] == before["version"] + 1
+
+
+async def test_a_template_subcategory_outside_its_category_is_refused(http: TestClient) -> None:
+    """The template's subcategory must be listed under the category it names."""
+    before = http.get("/configuration/templates").json()
+    document = copy.deepcopy(before["document"])
+    document["templates"].insert(
+        0,
+        {
+            "name": f"odd-{uuid.uuid4().hex[:8]}",
+            "path": "{original_name}",
+            "when": {"category": "Photos", "subcategory": f"Unlisted-{uuid.uuid4().hex[:8]}"},
+        },
+    )
+
+    refused = http.put("/configuration/templates", json=document)
+
+    assert refused.status_code == 422
+    assert "invalid templates configuration: templates.0: " in refused.json()["detail"]
+    assert http.get("/configuration/templates").json() == before
+
+
+async def test_a_taxonomy_that_drops_a_value_in_use_is_activated_and_reports_it(
+    http: TestClient,
+) -> None:
+    """Never refused for orphans: answered with each orphaned condition; the policy still reads."""
+    category = f"Doomed-{uuid.uuid4().hex[:8]}"
+    rule, template = f"rule-{category}", f"template-{category}".lower()
+    taxonomy = http.get("/configuration/taxonomy").json()
+    widened = taxonomy["document"]
+    widened["categories"][category] = []
+    assert http.put("/configuration/taxonomy", json=widened).status_code == 200
+    assert (
+        http.put(
+            "/configuration/policy",
+            json={
+                "destinations": [_DESTINATION],
+                "rules": [
+                    {"name": rule, "when": {"category": category}, "destinations": ["archive"]}
+                ],
+            },
+        ).status_code
+        == 200
+    )
+    templates = http.get("/configuration/templates").json()["document"]
+    templates["templates"].insert(
+        0, {"name": template, "path": "{original_name}", "when": {"category": category}}
+    )
+    assert http.put("/configuration/templates", json=templates).status_code == 200
+
+    del widened["categories"][category]
+    narrowed = http.put("/configuration/taxonomy", json=widened)
+
+    assert narrowed.status_code == 200
+    body = narrowed.json()
+    assert body["version"] == taxonomy["version"] + 2
+    assert [o for o in body["orphaned"] if o["value"] == category] == [
+        {
+            "kind": "policy",
+            "owner": f"placement rule {rule!r}",
+            "field": "category",
+            "value": category,
+        },
+        {
+            "kind": "templates",
+            "owner": f"template {template!r}",
+            "field": "category",
+            "value": category,
+        },
+    ]
+    policy = http.get("/configuration/policy")
+    assert policy.status_code == 200
+    assert policy.json()["document"]["rules"][0]["when"] == {"category": category}
+    assert http.get("/configuration/taxonomy").json()["orphaned"] == []
+
+
+async def test_a_policy_activation_waits_for_a_taxonomy_activation_in_flight(
+    ledger_engine: AsyncEngine, restore: None
+) -> None:
+    """The policy is checked against the taxonomy that commits, never one about to change."""
+    category = f"Pending-{uuid.uuid4().hex[:8]}"
+    configuration = LedgerConfiguration(ledger_engine)
+    policy = parse_policy(
+        {
+            "destinations": [_DESTINATION],
+            "rules": [{"name": "p", "when": {"category": category}, "destinations": ["archive"]}],
+        }
+    )
+    async with ledger_engine.connect() as holder:
+        await holder.begin()
+        repository = ConfigurationRepository(holder)
+        taxonomy = await taxonomy_in_force(repository)
+        widened = taxonomy.promote(TaxonomyField.CATEGORY, category)
+        await repository.activate(
+            ConfigurationKind.TAXONOMY,
+            widened.model_dump(mode="json"),
+            parse_taxonomy,
+            created_by="test",
+        )
+        waiting = asyncio.create_task(
+            configuration.activate(ConfigurationKind.POLICY, policy, by="test")
+        )
+        await asyncio.sleep(0.5)
+        assert not waiting.done()
+        await holder.commit()
+    activated = await asyncio.wait_for(waiting, timeout=10)
+    assert activated.orphaned == ()
+
+
+async def test_a_promotion_extends_a_taxonomy_activated_while_it_waited(
+    ledger_engine: AsyncEngine, restore: None
+) -> None:
+    """Promotion reads the taxonomy under its lock, so it never drops a value just added."""
+    added, promoted = (f"{name}-{uuid.uuid4().hex[:8]}" for name in ("Added", "Promoted"))
+
+    async def promoting() -> object:
+        """Promote `promoted` in a transaction of its own."""
+        async with ledger_engine.begin() as connection:
+            return await promote(
+                ConfigurationRepository(connection),
+                [RejectedValue(field=TaxonomyField.CATEGORY, value=promoted)],
+                promoted_by="test",
+            )
+
+    async with ledger_engine.begin() as connection:
+        # Stored first, so promotion has a version in force to read without waiting.
+        await active_taxonomy(ConfigurationRepository(connection))
+    async with ledger_engine.connect() as holder:
+        await holder.begin()
+        repository = ConfigurationRepository(holder)
+        taxonomy = await taxonomy_in_force(repository)
+        await repository.activate(
+            ConfigurationKind.TAXONOMY,
+            taxonomy.promote(TaxonomyField.CATEGORY, added).model_dump(mode="json"),
+            parse_taxonomy,
+            created_by="test",
+        )
+        waiting = asyncio.create_task(promoting())
+        await asyncio.sleep(0.5)
+        assert not waiting.done()
+        await holder.commit()
+    await asyncio.wait_for(waiting, timeout=10)
+
+    async with ledger_engine.connect() as connection:
+        in_force = await taxonomy_in_force(ConfigurationRepository(connection))
+    assert in_force.accepts(TaxonomyField.CATEGORY, added)
+    assert in_force.accepts(TaxonomyField.CATEGORY, promoted)

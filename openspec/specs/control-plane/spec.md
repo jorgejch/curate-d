@@ -32,6 +32,23 @@ The control plane SHALL allow a user to view and edit the taxonomy, path templat
 - **THEN** the change is rejected with an error identifying the problem
 - **AND** the previously active configuration remains in effect
 
+#### Scenario: Condition that can never match rejected
+- **WHEN** a user submits a placement policy or template set with a condition on a `media_kind` that is not a known media kind, or a policy naming a destination capability profile that does not exist
+- **THEN** the change is rejected with an error locating the condition or destination and naming the value
+- **AND** the previously active configuration remains in effect
+
+#### Scenario: Condition value outside the taxonomy rejected
+- **WHEN** a user submits a placement policy or template set with a category condition the taxonomy in force does not list, or a subcategory condition not listed under its category (or under any category, when the condition names none)
+- **THEN** the change is rejected with an error locating the rule or template and naming the value
+- **AND** the previously active configuration remains in effect
+- **AND** the check runs against the taxonomy in force when the change is activated, never when a stored policy or template set is read
+
+#### Scenario: Taxonomy change reports orphaned conditions
+- **WHEN** a user activates a taxonomy version that no longer lists a value a placement rule, retention rule or template selects on
+- **THEN** the taxonomy version is activated
+- **AND** the response lists each orphaned condition with its document, its rule or template, the field and the value
+- **AND** the policy and template set in force stay readable and unchanged
+
 #### Scenario: Template change does not disturb existing placements
 - **WHEN** a user changes the active path template version
 - **THEN** existing placements remain valid and untouched until reconciliation acts on them

@@ -12,7 +12,9 @@ Placeholders name a fact (`{category}`, `{captured_at:%Y-%m}` with a strftime fo
 timestamps) or one of the values rendering supplies itself: `{original_name}`,
 `{original_stem}`, `{extension}` and `{content_id}`. A placeholder naming anything else is
 a configuration error, caught when the template is loaded rather than when a file first
-reaches it.
+reaches it. A condition's values are checked the same way: a `media_kind` must be a
+`MediaKind`, and when a template set is activated, a category or subcategory must be one
+the taxonomy in force lists (`domain.conditions`). Reading a stored set checks no taxonomy.
 
 A capability profile describes what a destination accepts: whether it nests folders,
 which characters names may not contain, and how long a name may be.
@@ -22,16 +24,23 @@ import re
 from collections.abc import Mapping
 from typing import Final, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, ValidationInfo, model_validator
 
-from curate_d.domain import DomainModel, Facts
+from curate_d.domain import (
+    CapabilityProfileName,
+    DomainModel,
+    Facts,
+    Taxonomy,
+    check_conditions,
+    matches,
+)
+from curate_d.domain.conditions import taxonomy_in
 
 # Values rendering computes itself rather than reading from facts.
 BUILTINS: Final = frozenset({"original_name", "original_stem", "extension", "content_id"})
 FACT_FIELDS: Final = frozenset(Facts.model_fields)
 _TIMESTAMP_FACTS: Final = frozenset({"captured_at"})
 _PLACEHOLDER: Final = re.compile(r"\{([a-z_]+)(?::([^{}]+))?\}")
-_CONDITION_FIELDS: Final = frozenset({"media_kind", "category", "subcategory"})
 
 
 class Placeholder(DomainModel):
@@ -69,9 +78,10 @@ PORTABLE_PROFILE: Final = CapabilityProfile(
     max_component_bytes=255,
     reserved_names=frozenset({"CON", "PRN", "AUX", "NUL", "COM1", "LPT1"}),
 )
-PROFILES: Final[Mapping[str, CapabilityProfile]] = {
-    "pcloud": PCLOUD_PROFILE,
-    "portable": PORTABLE_PROFILE,
+# Every name a destination can give has a profile; a unit test holds the two together.
+PROFILES: Final[Mapping[CapabilityProfileName, CapabilityProfile]] = {
+    CapabilityProfileName.PCLOUD: PCLOUD_PROFILE,
+    CapabilityProfileName.PORTABLE: PORTABLE_PROFILE,
 }
 
 
@@ -87,11 +97,13 @@ class Template(DomainModel):
     )
 
     @model_validator(mode="after")
-    def _check(self) -> Self:
-        """Reject unknown placeholders, requirements and conditions, and absolute paths.
+    def _check(self, info: ValidationInfo[object]) -> Self:
+        """Reject unknown names, unmatchable conditions, and absolute paths.
 
         Raises:
-            ValueError: the template names something rendering does not know.
+            ValueError: the template names a placeholder or requirement rendering does
+                not know, or a condition that cannot match (with a taxonomy in the
+                validation context, a value it does not list).
         """
         known = FACT_FIELDS | BUILTINS
         for placeholder in placeholders(self.path):
@@ -104,20 +116,14 @@ class Template(DomainModel):
         for fact in self.required:
             if fact not in FACT_FIELDS:
                 raise ValueError(f"template {self.name!r} requires unknown fact {fact!r}")
-        for field in self.when:
-            if field not in _CONDITION_FIELDS:
-                raise ValueError(
-                    f"template {self.name!r} selects on {field!r}; only "
-                    f"{', '.join(sorted(_CONDITION_FIELDS))} can select a template"
-                )
+        check_conditions(f"template {self.name!r}", self.when, taxonomy=taxonomy_in(info.context))
         if self.path.startswith("/") or "//" in self.path or ".." in self.path.split("/"):
             raise ValueError(f"template {self.name!r} path must be relative and plain")
         return self
 
     def applies_to(self, facts: Facts) -> bool:
-        """Whether every condition matches the facts."""
-        values = facts.model_dump(mode="json")
-        return all(values.get(field) == value for field, value in self.when.items())
+        """Return whether every condition matches the facts."""
+        return matches(self.when, facts)
 
 
 class TemplateSet(DomainModel):
@@ -179,10 +185,17 @@ SEED_TEMPLATES: Final = TemplateSet(
 )
 
 
-def parse_templates(document: Mapping[str, object]) -> TemplateSet:
+def parse_templates(
+    document: Mapping[str, object], *, taxonomy: Taxonomy | None = None
+) -> TemplateSet:
     """Parse a templates configuration document.
+
+    Args:
+        document: The document, in its JSON form.
+        taxonomy: The taxonomy in force, when the set is being activated: every category
+            and subcategory condition must be one it lists. Reads pass none.
 
     Raises:
         ValidationError: the document is not a valid template set.
     """
-    return TemplateSet.model_validate(dict(document), strict=False)
+    return TemplateSet.model_validate(dict(document), strict=False, context={"taxonomy": taxonomy})
