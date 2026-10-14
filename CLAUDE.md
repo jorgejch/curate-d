@@ -97,7 +97,11 @@ how it is made idempotent, whether it belongs in a workflow — against the `dbo
   DBOS's documented tables by raw SQL. That is a schema dependency, not a private API:
   re-check it on every DBOS upgrade (`tests/integration/test_workflow_views.py`,
   `test_migrations.py`). Those migrations need the DBOS system schema, so
-  `migrations/env.py` brings it up to date before Alembic's own migrations run.
+  `migrations/env.py` brings it up to date before Alembic's own migrations run. The
+  workflow-history prune itself goes through the public `list_workflows` and
+  `delete_workflows`; it re-reads each batch's status before deleting it, and since a
+  delete has no read-back, the re-read→delete window is a documented gap
+  (`docs/recovery.md`, `workflow_history.revived_during_prune`).
 - The recovery sweep (`runtime/sweep.py`, scheduled by `workflows/recovery.py`) forks,
   cancels and resumes from inside one `@DBOS.step`, and those DBOS calls are not
   checkpointed. That departs from the skill's rule against starting workflows from a step.
