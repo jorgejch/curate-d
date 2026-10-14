@@ -109,7 +109,7 @@ how it is made idempotent, whether it belongs in a workflow — against the `dbo
   (`recovery_sweep.lineage_unverified`). A resume resets DBOS's recovery-attempt count, so
   the sweep counts its own resumes of a row in its workflow attributes and stops at
   `MAX_SWEEP_REDISPATCHES` per application version (`recovery_sweep.redispatch_cap`). Before
-  each fork, and before its cancel, it asks the fence's and the version lock's sessions
+  each fork and before every cancel, it asks the fence's and the version lock's sessions
   whether they still hold; a loss stops the batch (`recovery_sweep.version_lock_lost`).
   `harden-recovery-sweep` moves the writes out of the step.
 - Version lease: every process that runs workflows (the workers, nothing else) registers its

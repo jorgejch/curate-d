@@ -42,11 +42,13 @@ those rows once the old target's workers are gone.
 
 DBOS commits each fork and cancel on its own connection, so losing a lock's session does
 not undo them. The sweep asks the fence's session, and the source version lock's, before
-each fork and again, once forked, before the original's cancel. Lost before the fork, the
-row fails and the batch stops, the rest skipped. Lost after it, the original is still
-cancelled, since two live lineages are worse, then the row fails and the batch stops; the
-next tick's RETIRE plan finishes whatever this one left. After every fork's cancel the
-original must read CANCELLED, or the row fails as an unverified lineage.
+each fork and before every cancel, a stale tick's included. Lost before the fork, the row
+fails and the batch stops, the rest skipped. Lost before the cancel of an original whose
+successor is confirmed, whether forked by this call or found committed, the original is
+still cancelled, since two live lineages are worse, then the row fails and the batch stops;
+a stale tick is left uncancelled. The next tick's plan finishes whatever this one left.
+After every fork's cancel the original must read CANCELLED, or the row fails as an
+unverified lineage.
 
 A stale tick of the sweep's own schedule is cancelled under the same gates rather than
 forked or redispatched: the next tick does its work. A row whose queue is NULL, or names a
@@ -476,11 +478,11 @@ async def _confirmed_successor(control: RecoveryControl, original: str, successo
 
 
 type LockCheck = Callable[[], Awaitable[str | None]]
-"""Names the lock the sweep forks under that its session no longer holds, or None."""
+"""Names the lock the sweep forks and retires under that its session lost, or None."""
 
 
 class _LockLostError(Exception):
-    """A lock the fork depends on was found lost; the sweep stops forking this tick."""
+    """A lock the sweep forks and retires under was found lost; it stops for this tick."""
 
     def __init__(self, reason: str, *, unverified_status: str | None = None) -> None:
         """Record `reason`, and the status an already-cancelled original reads, if wrong."""
@@ -511,9 +513,9 @@ async def _recover_version(
     Control errors also propagate, including cancellation failures after the successor
     has been committed.
 
-    `lost` is asked right before the fork and, if this call forked, again before the
-    cancel. Lost after the fork, the original is still cancelled: a successor already
-    exists, and two live lineages are worse than one unconfirmed fork.
+    `lost` is asked right before the fork and again before the cancel, whether this call
+    forked or found the successor committed. Lost before the cancel, the original is still
+    cancelled: its successor is confirmed, and two live lineages are worse than one.
 
     Returns:
         The successor ID and whether this call created it, rather than reusing a
@@ -526,7 +528,7 @@ async def _recover_version(
         IntegrityError: The fork violated a constraint other than the workflow primary
             key, or a primary-key conflict had no confirmed matching successor.
         _LockLostError: A lock was found lost before the fork, which was then not made,
-            or after it, in which case the original was still cancelled.
+            or before the cancel, in which case the original was still cancelled.
         _LineageUnverifiedError: The original does not read CANCELLED after its cancel.
     """
     original = workflow.workflow_id
@@ -569,11 +571,12 @@ async def _recover_version(
                     raise
             if not await _confirmed_successor(control, original, successor):
                 raise ValueError(f"fork of {original!r} did not publish its expected successor")
-    lock = await lost() if created else None
+    lock = await lost()
     unverified = await _cancel_verified(control, original)
     if lock is not None:
+        stage = "after fork" if created else "before retirement"
         raise _LockLostError(
-            f"{lock} lost after fork; the original was cancelled", unverified_status=unverified
+            f"{lock} lost {stage}; the original was cancelled", unverified_status=unverified
         )
     if unverified is not None:
         raise _LineageUnverifiedError(
@@ -880,7 +883,7 @@ class _Sweep:
         )
 
     async def lost_lock(self, hold: VersionHold | None) -> str | None:
-        """Name the lock this sweep forks under that is no longer held, or return None.
+        """Name the lock this sweep forks and retires under that is lost, or return None.
 
         The fence is checked first, then `hold`, the source version's lock, if any.
         """
@@ -910,6 +913,9 @@ class _Sweep:
         )
         try:
             if workflow.is_own_tick and not workflow.was_forked_from:
+                lock = await self.lost_lock(hold)
+                if lock is not None:
+                    raise _LockLostError(f"{lock} lost before retiring a stale tick; it was left")
                 if await _retire_tick(self.control, workflow):
                     self.tally.retired_ticks.append(original)
                     logger.info(

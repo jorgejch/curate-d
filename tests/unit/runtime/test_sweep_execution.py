@@ -986,6 +986,97 @@ async def test_a_version_lock_lost_after_a_fork_still_cancels_the_original() -> 
     assert holds.events == ["hold:v1", "release:v1"]
 
 
+async def test_a_version_lock_lost_before_a_retirement_still_cancels_and_stops() -> None:
+    """A confirmed successor's original is cancelled under a lost version lock; the batch stops."""
+    control = FakeRecoveryControl(
+        [
+            workflow_status("a", was_forked_from=True),
+            workflow_status(
+                recovery_successor_id("a"), status="ENQUEUED", version="v2", forked_from="a"
+            ),
+            workflow_status("b"),
+        ]
+    )
+    holds = FakeVersionHolds()
+    holds.lose_after(0)
+    with capture_logs() as events:
+        outcome = await _sweep(control, holds=holds)
+    assert control.writes() == [("cancel", "a")]
+    assert control.rows["a"].status == "CANCELLED"
+    assert outcome.retired == ()
+    assert outcome.failed == (
+        (
+            "a",
+            "recovering workflow 'a' from version 'v1' onto 'v2' failed: "
+            "version lock lost before retirement; the original was cancelled",
+        ),
+    )
+    assert outcome.skipped == ("b",)
+    assert [event["event"] for event in events if event["log_level"] == "error"] == [
+        "recovery_sweep.version_lock_lost"
+    ]
+
+
+async def test_a_fence_lost_before_an_on_target_retirement_stops_the_batch() -> None:
+    """A fence lost before an on-target retirement stops the batch."""
+    control = FakeRecoveryControl(
+        [
+            workflow_status("a", version="v2", was_forked_from=True),
+            workflow_status(
+                recovery_successor_id("a"), status="ENQUEUED", version="v2", forked_from="a"
+            ),
+            workflow_status("b"),
+        ]
+    )
+    fence = FakePromotionFence()
+    fence.lose_after(0)
+    with capture_logs() as events:
+        outcome = await _sweep(control, fence=fence)
+    assert control.writes() == [("cancel", "a")]
+    assert outcome.retired == ()
+    assert outcome.failed == (
+        (
+            "a",
+            "recovering workflow 'a' from version 'v2' onto 'v2' failed: "
+            "promotion fence lost before retirement; the original was cancelled",
+        ),
+    )
+    assert outcome.skipped == ("b",)
+    assert [event["event"] for event in events if event["log_level"] == "error"] == [
+        "recovery_sweep.version_lock_lost"
+    ]
+
+
+async def test_a_lost_lock_leaves_a_stale_tick_alone_and_stops_the_batch() -> None:
+    """A stale own tick is left alone once a lock is lost; the batch stops."""
+    control = FakeRecoveryControl(
+        [
+            workflow_status(
+                "tick", version="v1", queue_name="maintenance", schedule_name=RECOVERY_SCHEDULE_NAME
+            ),
+            workflow_status("b"),
+        ]
+    )
+    holds = FakeVersionHolds()
+    holds.lose_after(0)
+    with capture_logs() as events:
+        outcome = await _sweep(control, holds=holds)
+    assert control.writes() == []
+    assert control.rows["tick"].status == "PENDING"
+    assert outcome.retired_ticks == ()
+    assert outcome.failed == (
+        (
+            "tick",
+            "recovering workflow 'tick' from version 'v1' onto 'v2' failed: "
+            "version lock lost before retiring a stale tick; it was left",
+        ),
+    )
+    assert outcome.skipped == ("b",)
+    assert [event["event"] for event in events if event["log_level"] == "error"] == [
+        "recovery_sweep.version_lock_lost"
+    ]
+
+
 async def test_an_original_that_survives_its_cancel_fails_as_an_unverified_lineage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
