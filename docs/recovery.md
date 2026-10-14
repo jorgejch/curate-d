@@ -215,15 +215,32 @@ the only source of a schedule's cron, queue and context: a hand edit to a DBOS s
 reverted within one `schedule_reconciliation_interval_seconds`. Pause the schedule, which
 survives reconciliation, or change `recovery_sweep_schedule` and restart the I/O workers.
 
-**Cancelling a dead executor's rows.** Pause the `recovery-sweep` schedule first (Kill switch)
-and don't run the operator sweep, then cancel, then resume the schedule. A resume is
-unconditional, so a sweep resuming a PENDING row of a dead executor can undo a cancel that
-lands just before it (Known gaps: resume after a cancel). A cancel at any other time is safe.
+**Cancelling a dead executor's rows.** A resume is unconditional, so a sweep resuming a
+PENDING row of a dead executor can undo a cancel that lands just before it (Known gaps: resume
+after a cancel). Pausing the schedule stops future ticks only: a tick already ENQUEUED or
+running still finishes. So:
+
+1. Pause the `recovery-sweep` schedule (Kill switch), and don't run the operator sweep.
+2. Wait until no tick is ENQUEUED or PENDING, that is until this returns an empty list:
+
+   ```python
+   dbos.list_workflows(name="recover_stranded_workflows", status=["ENQUEUED", "PENDING"])
+   ```
+
+   A tick left PENDING by a dead executor waits for that executor's recovery; cancel it with
+   the rows rather than wait.
+3. Cancel the rows.
+4. Resume the schedule.
+
+A cancel is safe once no sweep is running: the next sweep's re-read sees CANCELLED and leaves
+the row.
 
 **Clearing a row's redispatch count.** The sweep keeps it in the row's workflow attributes,
 under `curate_d.recovery_redispatches` and `curate_d.recovery_redispatch_version`, and starts
-again from zero under a new application version. To let it resume a row at the cap under the
-same version, remove both keys. An update replaces every attribute, so keep the others:
+again from zero under a new application version. A row enqueued without a version, as the API
+enqueues, takes the dequeuing worker's version, so the count is always keyed by a real version.
+To let it resume a row at the cap under the same version, remove both keys. An update
+replaces every attribute, so keep the others:
 
 ```python
 from curate_d.config import get_settings
@@ -252,7 +269,11 @@ prints that version.
 
 ## Known gaps
 
-The sweep's are left to the follow-up `harden-recovery-sweep`; the last two are accepted.
+The follow-up `harden-recovery-sweep`, which moves the sweep's writes out of its step,
+addresses the two that depend on that: writes outside the lock and the fork boundary.
+dbos-transact-py#886 is an upstream DBOS bug, left to a DBOS fix. The rest are accepted for
+this release: no replay compatibility check, redispatch count before the resume, resume after
+a cancel, schedule authority check to write, and prune re-read to delete.
 
 - **Writes outside the lock.** Forks, cancels and resumes still commit on DBOS's own
   connections, not on the lock's session. The sweep detects a lost fence or version lock
@@ -276,8 +297,10 @@ The sweep's are left to the follow-up `harden-recovery-sweep`; the last two are 
 - **Resume after a cancel.** A resume is unconditional; an operator cancel of a dead
   executor's PENDING row landing between the sweep's last re-read and its resume is undone,
   and the read-back cannot tell. Before cancelling a dead executor's rows, pause the
-  `recovery-sweep` schedule and don't run the operator sweep; resume the schedule after. A
-  cancel at any other time is safe: the next sweep's re-read sees CANCELLED and leaves the row.
+  `recovery-sweep` schedule, wait until no `recover_stranded_workflows` tick is ENQUEUED or
+  PENDING, and don't run the operator sweep; resume the schedule after (Triage: cancelling a
+  dead executor's rows). A cancel is safe once no sweep is running: the next sweep's re-read
+  sees CANCELLED and leaves the row.
 - **Schedule authority, check to write.** A reconciliation's writes commit on DBOS's pool, not
   on the authority's session, so a worker that loses the authority, or sees latest move,
   between its check and its write can leave a stale schedule row. It reads back after and
