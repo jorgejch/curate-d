@@ -31,6 +31,7 @@ __pycache__/
 htmlcov/
 /curate-d.coverage
 /curate-d.xml
+/coverage.xml
 /.mcp.json
 # Agent tool state stays local; the vendored dbos-python skill (skills-lock.json) is tracked.
 /.agents/*
