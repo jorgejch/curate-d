@@ -44,6 +44,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          # The suite runs the pull request's code; no step authenticates to the remote.
+          persist-credentials: false
 
       # Rows 30/31 (lifecycle expiry and stale-upload reclamation) need a multi-day
       # observation on a real clock, which no job outlasts. Without a budget they skip,
