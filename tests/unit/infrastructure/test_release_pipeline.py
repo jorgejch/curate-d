@@ -51,9 +51,8 @@ def _emitted_tags() -> list[str]:
 def test_only_the_dev_branch_triggers_a_branch_build() -> None:
     """main builds nothing by itself; a release is a tag on main.
 
-    main and pull requests are in the push/pull_request triggers so the `check` job
-    gates merges, which means the trigger list no longer carries this guarantee on its
-    own — `build-and-push` does, through the condition asserted here.
+    The trigger list carries this too; the job condition keeps a trigger added later from
+    publishing a pull request or an untagged main commit.
     """
     jobs = cast(Document, _workflow()["jobs"])
     condition = cast(str, cast(Document, jobs["build-and-push"])["if"])
@@ -65,15 +64,15 @@ def test_only_the_dev_branch_triggers_a_branch_build() -> None:
     assert "refs/heads/main" not in condition
 
 
-def test_the_check_job_gates_merges_to_main() -> None:
-    """The staging contract has to fail a change before main, not after.
-
-    Without a pull_request trigger the suite would only run on the way to a published
-    image, which is after review rather than during it.
-    """
+def test_a_pull_request_never_triggers_the_workflow() -> None:
+    """The merge gate is checks.yml and integration.yml; this workflow only publishes."""
     on = cast(Document, _workflow()[True])
-    assert cast(Document, on["pull_request"])["branches"] == ["main"]
-    assert "main" in cast(list[str], _triggers()["branches"])
+    assert set(on) == {"push"}
+
+
+def test_dev_is_the_only_branch_push_that_triggers_the_workflow() -> None:
+    """A push to main without a tag would build an image no policy selects."""
+    assert _triggers()["branches"] == ["dev"]
 
 
 def test_the_tag_trigger_is_the_semver_shape_not_a_wildcard() -> None:
@@ -98,19 +97,19 @@ def test_the_tag_trigger_accepts_a_release_tag() -> None:
     assert re.fullmatch(glob.replace(".", r"\."), "v10.2.31")
 
 
-def _check_steps() -> list[Document]:
-    """The steps of the workflow's `check` job."""
+def _build_steps() -> list[Document]:
+    """Return the steps of the workflow's `build-and-push` job."""
     jobs = cast(Document, _workflow()["jobs"])
-    return cast(list[Document], cast(Document, jobs["check"])["steps"])
+    return cast(list[Document], cast(Document, jobs["build-and-push"])["steps"])
 
 
 def _guard(name_fragment: str) -> Document:
-    """The check-job step whose name contains `name_fragment`.
+    """Return the build-and-push step whose name contains `name_fragment`.
 
     Raises:
         AssertionError: no step matches.
     """
-    step = next((s for s in _check_steps() if name_fragment in str(s.get("name", ""))), None)
+    step = next((s for s in _build_steps() if name_fragment in str(s.get("name", ""))), None)
     assert step is not None, f"no guard matching {name_fragment!r}"
     return step
 
@@ -148,19 +147,17 @@ def test_the_packaged_version_is_what_dbos_reports() -> None:
     assert not label or re.fullmatch(r"dev\.\d{14}\.[0-9a-f]{7,40}", label), label
 
 
-def test_the_release_guards_run_before_anything_slow() -> None:
-    """A guard after dependency installation still works but wastes several minutes."""
-    names = [str(s.get("name", "")) for s in _check_steps()]
-    first_slow = next(i for i, n in enumerate(names) if "Install dependencies" in n)
+def test_the_release_guards_run_before_anything_reaches_the_registry() -> None:
+    """A guard after the registry login still fails the run, but after the slow steps."""
+    names = [str(s.get("name", "")) for s in _build_steps()]
+    first_slow = next(i for i, n in enumerate(names) if "Log in" in n)
     for fragment in ("release tag is on main", "matches the packaged version"):
         assert next(i for i, n in enumerate(names) if fragment in n) < first_slow
 
 
-def test_the_checkout_has_the_history_that_check_needs() -> None:
+def test_the_checkout_has_the_history_the_tag_guard_needs() -> None:
     """`git merge-base` against a shallow clone fails in a way that looks unrelated."""
-    jobs = cast(Document, _workflow()["jobs"])
-    steps = cast(list[Document], cast(Document, jobs["check"])["steps"])
-    checkout = next(s for s in steps if "actions/checkout" in str(s.get("uses", "")))
+    checkout = next(s for s in _build_steps() if "actions/checkout" in str(s.get("uses", "")))
     assert cast(Document, checkout["with"])["fetch-depth"] == 0
 
 
@@ -172,10 +169,11 @@ def test_the_dev_tag_is_not_gated_on_the_default_branch() -> None:
     assert "refs/heads/dev" in dev_tag
 
 
-def test_publishing_is_gated_on_the_checks_passing() -> None:
-    """The build-and-push job depends on the check job."""
+def test_build_and_push_is_the_only_job_and_waits_on_none() -> None:
+    """The pull request already gated the merge; a test job here would only delay it."""
     jobs = cast(Document, _workflow()["jobs"])
-    assert cast(Document, jobs["build-and-push"])["needs"] == "check"
+    assert set(jobs) == {"build-and-push"}
+    assert "needs" not in cast(Document, jobs["build-and-push"])
 
 
 def test_the_dev_tag_sorts_by_build_time() -> None:
