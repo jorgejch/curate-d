@@ -74,10 +74,18 @@ def test_the_check_job_gates_merges_to_main() -> None:
     on = cast(Document, _workflow()[True])
     assert "main" in cast(list[str], cast(Document, on["pull_request"])["branches"])
     assert "main" in cast(list[str], _triggers()["branches"])
+
+
+def test_the_check_job_runs_on_every_event() -> None:
+    """A PR to dev that merged a lint or type error would block the dev image instead."""
     jobs = cast(Document, _workflow()["jobs"])
-    assert cast(str, cast(Document, jobs["check"])["if"]) == (
-        "github.event_name != 'pull_request' || github.base_ref == 'main'"
-    )
+    assert "if" not in cast(Document, jobs["check"])
+
+
+def test_the_check_job_keeps_the_required_check_name() -> None:
+    """The ruleset requires the check by this name; a rename leaves every PR waiting."""
+    jobs = cast(Document, _workflow()["jobs"])
+    assert cast(Document, jobs["check"])["name"] == "Lint, type check and staging contract"
 
 
 def test_pull_requests_to_dev_and_main_run_the_unit_suite() -> None:

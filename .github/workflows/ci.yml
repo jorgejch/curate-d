@@ -3,7 +3,7 @@ name: CI
 # The only CI workflow, so every job shares one unit run: `unit-tests` is the only place
 # the unit suite runs, and the jobs that need it wait on it rather than re-running it.
 #
-#   pull request to dev     -> unit-tests (required check, SonarQube PR analysis)
+#   pull request to dev     -> unit-tests, check (both required; SonarQube PR analysis)
 #   pull request to main    -> unit-tests, check
 #   push to dev             -> unit-tests, check, build-and-push
 #   push to main            -> unit-tests, check
@@ -36,9 +36,9 @@ name: CI
 # application version, so separate tags could leave the API enqueueing work on a version
 # no worker is running. The manifests choose behaviour with `command:`.
 
-# `check` also gates merges: it runs on pull requests to main and on pushes to main, where
-# there is nothing to publish, so the staging contract fails a change before it reaches
-# main rather than after. `build-and-push` stays on dev and semver tags — see its `if`.
+# `check` also gates merges: it runs on pull requests and on pushes to main, where there
+# is nothing to publish, so lint, the type check and the staging contract fail a change
+# before it reaches dev or main rather than after. `build-and-push` stays on dev and semver tags — see its `if`.
 on:
   pull_request:
     branches:
@@ -109,10 +109,13 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
   # Publishing an image that fails its own tests helps nobody, and the checks are fast
-  # enough that gating on them costs less than finding out from the cluster. A pull request
-  # to dev runs `unit-tests` alone, as it did before this workflow took that trigger.
+  # enough that gating on them costs less than finding out from the cluster. It runs on
+  # pull requests to dev too: a lint or type error that merged would fail the dev push
+  # instead, and with it build-and-push, so no dev image ships until dev is fixed.
   check:
-    if: github.event_name != 'pull_request' || github.base_ref == 'main'
+    # The ruleset requires this check by name, like `unit-tests`. Pinned by
+    # test_release_pipeline.py.
+    name: Lint, type check and staging contract
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
