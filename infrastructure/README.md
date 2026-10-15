@@ -15,7 +15,7 @@ infrastructure/
 | Concern | Where |
 | --- | --- |
 | Container image | `docker/Dockerfile` here |
-| Build and publish | `.github/workflows/docker-publish.yml` here |
+| Build and publish | `.github/workflows/ci.yml` here |
 | Kubernetes manifests | the deployment repository |
 | Operators, storage class, image policies | the deployment repository |
 
@@ -184,7 +184,7 @@ the deployment repository's checks have to hold to:
 | Executor identity in `CURATE_D_EXECUTOR_ID`, distinct and stable per pod | `curate_d.runtime.identity` |
 | Environment names in `CURATE_D_ENVIRONMENT` (`dev`, `prod`), naming the DBOS application `curate-d-<env>` on the API and both workers and labelling the API's telemetry | `curate_d.config.DeploymentEnvironment`, `curate_d.runtime.dbos_app.application_name` |
 | Queues each profile serves | `curate_d.runtime.queues` (tested here; manifests carry only the profile) |
-| Dev image tag `dev-<UTC timestamp>-<sha>` | `.github/workflows/docker-publish.yml` (pinned by `test_release_pipeline.py`) |
+| Dev image tag `dev-<UTC timestamp>-<sha>` | `.github/workflows/ci.yml` (pinned by `test_release_pipeline.py`) |
 
 ## Restore drill
 

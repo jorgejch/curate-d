@@ -12,7 +12,7 @@ import pytest
 import yaml
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "docker-publish.yml"
+WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml"
 
 type Document = dict[str, object]
 
@@ -22,7 +22,7 @@ type RawDocument = dict[object, object]
 
 
 def _workflow() -> RawDocument:
-    """Parse the docker-publish workflow YAML."""
+    """Parse the CI workflow YAML."""
     return cast(RawDocument, yaml.safe_load(WORKFLOW.read_text(encoding="utf-8")))
 
 
@@ -72,8 +72,23 @@ def test_the_check_job_gates_merges_to_main() -> None:
     image, which is after review rather than during it.
     """
     on = cast(Document, _workflow()[True])
-    assert cast(Document, on["pull_request"])["branches"] == ["main"]
+    assert "main" in cast(list[str], cast(Document, on["pull_request"])["branches"])
     assert "main" in cast(list[str], _triggers()["branches"])
+    jobs = cast(Document, _workflow()["jobs"])
+    assert cast(str, cast(Document, jobs["check"])["if"]) == (
+        "github.event_name != 'pull_request' || github.base_ref == 'main'"
+    )
+
+
+def test_pull_requests_to_dev_and_main_run_the_unit_suite() -> None:
+    """dev's ruleset requires the unit check, so a PR to dev has to produce it."""
+    on = cast(Document, _workflow()[True])
+    assert cast(Document, on["pull_request"])["branches"] == ["dev", "main"]
+
+
+def test_a_feature_branch_push_triggers_nothing() -> None:
+    """A push trigger on feature branches would run every push to an open PR twice."""
+    assert sorted(cast(list[str], _triggers()["branches"])) == ["dev", "main"]
 
 
 def test_the_tag_trigger_is_the_semver_shape_not_a_wildcard() -> None:
@@ -173,9 +188,52 @@ def test_the_dev_tag_is_not_gated_on_the_default_branch() -> None:
 
 
 def test_publishing_is_gated_on_the_checks_passing() -> None:
-    """The build-and-push job depends on the check job."""
+    """The build-and-push job depends on the check and unit-test jobs."""
     jobs = cast(Document, _workflow()["jobs"])
-    assert cast(Document, jobs["build-and-push"])["needs"] == "check"
+    assert cast(Document, jobs["build-and-push"])["needs"] == ["check", "unit-tests"]
+
+
+def _unit_steps() -> list[Document]:
+    """Return the steps of the workflow's `unit-tests` job."""
+    jobs = cast(Document, _workflow()["jobs"])
+    return cast(list[Document], cast(Document, jobs["unit-tests"])["steps"])
+
+
+def test_the_unit_job_keeps_the_required_check_name() -> None:
+    """The ruleset requires the check by this name; a rename leaves every PR waiting."""
+    jobs = cast(Document, _workflow()["jobs"])
+    assert cast(Document, jobs["unit-tests"])["name"] == "Unit tests and SonarQube analysis"
+
+
+def test_the_unit_suite_runs_in_one_job_only() -> None:
+    """Every other job reuses the unit run instead of repeating it."""
+    jobs = cast(Document, _workflow()["jobs"])
+    runners = [
+        job_id
+        for job_id, job in jobs.items()
+        for step in cast(list[Document], cast(Document, job)["steps"])
+        if "pytest -n auto" in str(step.get("run", ""))
+    ]
+    assert runners == ["unit-tests"]
+
+
+def test_only_unit_coverage_reaches_sonarqube() -> None:
+    """SonarQube merges every report into one metric, and integration coverage does not count."""
+    unit = next(s for s in _unit_steps() if s.get("name") == "Unit tests")
+    assert "--cov-report=xml" in cast(str, unit["run"])
+    integration_runs = [
+        cast(str, s["run"]) for s in _check_steps() if "pytest" in str(s.get("run", ""))
+    ]
+    assert integration_runs
+    assert all("--no-cov" in run for run in integration_runs)
+
+
+def test_the_scan_skips_tags_and_fork_pull_requests() -> None:
+    """A tag would be analysed as a branch, and a fork's PR has no SONAR_TOKEN."""
+    scan = next(s for s in _unit_steps() if "sonarqube-scan-action" in str(s.get("uses", "")))
+    condition = cast(str, scan["if"])
+    assert "!startsWith(github.ref, 'refs/tags/')" in condition
+    assert "github.event.pull_request.head.repo.full_name == github.repository" in condition
 
 
 def test_the_dev_tag_sorts_by_build_time() -> None:

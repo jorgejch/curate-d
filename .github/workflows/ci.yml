@@ -1,5 +1,17 @@
-name: Build and Publish Container
+name: CI
 
+# The only CI workflow, so every job shares one unit run: `unit-tests` is the only place
+# the unit suite runs, and the jobs that need it wait on it rather than re-running it.
+#
+#   pull request to dev     -> unit-tests (required check, SonarQube PR analysis)
+#   pull request to main    -> unit-tests, check
+#   push to dev             -> unit-tests, check, build-and-push
+#   push to main            -> unit-tests, check
+#   push tag vX.Y.Z         -> unit-tests (no scan), check, build-and-push
+#
+# Feature branches run through their pull request only: a push trigger on them would run
+# every push to a branch with an open PR twice, once per event.
+#
 # Two environments, one image.
 #
 #   push to dev       -> dev-<UTC timestamp>-<sha>, which a deployment's dev image policy
@@ -24,12 +36,13 @@ name: Build and Publish Container
 # application version, so separate tags could leave the API enqueueing work on a version
 # no worker is running. The manifests choose behaviour with `command:`.
 
-# `check` also gates merges: it runs on pull requests and on pushes to main, where there
-# is nothing to publish, so the staging contract fails a change before it reaches main
-# rather than after. `build-and-push` stays on dev and semver tags — see its `if`.
+# `check` also gates merges: it runs on pull requests to main and on pushes to main, where
+# there is nothing to publish, so the staging contract fails a change before it reaches
+# main rather than after. `build-and-push` stays on dev and semver tags — see its `if`.
 on:
   pull_request:
     branches:
+      - dev
       - main
   push:
     branches:
@@ -38,10 +51,68 @@ on:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
 
+# A newer push to the same pull request supersedes its run. Pushes to dev and main and
+# tags are never cancelled: that could interrupt a publish half-way.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  unit-tests:
+    # The ruleset requires this check by name: renaming it leaves the rule waiting on a
+    # check that never reports. Pinned by test_release_pipeline.py.
+    name: Unit tests and SonarQube analysis
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          # Full history: SonarQube tells new code from old by SCM blame.
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      # `testpaths` and the 80% floor come from pyproject.toml: the same run as `make
+      # test`, unit tests only, so this step is the coverage gate. The XML report is for
+      # SonarQube alone, which merges every report it imports into one metric; integration
+      # coverage deliberately does not count, so the integration steps pass `--no-cov`.
+      - name: Unit tests
+        run: uv run pytest -n auto --cov-report=xml
+
+      - name: Cache SonarQube packages
+        if: ${{ !cancelled() && hashFiles('coverage.xml') != '' && !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-sonar
+          restore-keys: ${{ runner.os }}-sonar
+
+      # Also runs when the unit step failed on the floor, so the analysis shows the
+      # coverage that failed it; the job stays red either way. A tag would be analysed as
+      # a branch named after it, and its commit already was, as main. A fork's pull request
+      # has no SONAR_TOKEN, a secret its author cannot supply. Every other run is scanned,
+      # so a missing token fails the job instead of skipping the analysis.
+      - name: SonarQube scan
+        if: >-
+          ${{ !cancelled() && hashFiles('coverage.xml') != '' &&
+          !startsWith(github.ref, 'refs/tags/') &&
+          (github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
   # Publishing an image that fails its own tests helps nobody, and the checks are fast
-  # enough that gating on them costs less than finding out from the cluster.
+  # enough that gating on them costs less than finding out from the cluster. A pull request
+  # to dev runs `unit-tests` alone, as it did before this workflow took that trigger.
   check:
+    if: github.event_name != 'pull_request' || github.base_ref == 'main'
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
@@ -94,11 +165,6 @@ jobs:
 
       - name: Type check
         run: uv run mypy
-
-      # Unit suite only. The integration suite needs PostgreSQL, and its coverage
-      # deliberately does not count toward the floor.
-      - name: Unit tests
-        run: uv run pytest -n auto
 
       # This fixture uses the pinned Compose images and the same adapter suite as OVH.
       # Selecting RustFS explicitly leaves remote verification visibly PENDING.
@@ -251,7 +317,7 @@ jobs:
         run: docker compose --project-name staging-contract-ci down --volumes
 
   build-and-push:
-    needs: check
+    needs: [check, unit-tests]
     # The triggers above also cover pull requests and main so that `check` gates merges.
     # Neither produces a publishable image: a pull request is unmerged code, and an
     # untagged main commit matches neither image policy. Without this, every PR would
