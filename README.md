@@ -104,14 +104,14 @@ make stack-down        # stop the local stack, keeping its data
 make stack-reset       # destroy the local stack and its data
 make migrate           # apply the Alembic migrations to the configured database
 make staging-init      # re-run RustFS staging provisioning and its access-matrix check
-make lifecycle-check   # observe lifecycle expiry and abort on a time-scaled RustFS, in seconds
+make lifecycle-check   # re-observe lifecycle expiry and abort on a time-scaled RustFS (pin bumps)
 make format            # apply formatting and autofixable lint
 make lint              # ruff check + format check + workflow database-access audit
 make typecheck         # mypy, strict
 make test              # isolated unit tests + 80% coverage gate
 make coverage          # unit coverage data in curate-d.coverage, importable by PyCharm
 make test-integration  # integration tests (needs the local stack)
-make check             # lint + typecheck + test; CI also runs the staging integration checks
+make check             # lint + typecheck + test; PRs also run the full integration suite
 make image             # build the container image
 ```
 
