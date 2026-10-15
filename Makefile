@@ -1,5 +1,5 @@
 # Developer entry points. CI runs the same commands as `lint`, `typecheck`, `test` and
-# `lifecycle-check`, so a green `make check` locally means CI's lint, type and unit checks
+# `test-integration`, so a green `make check` locally means CI's lint, type and unit checks
 # pass with the same flags.
 
 .PHONY: help install lint format typecheck test coverage test-integration check staging-init \
