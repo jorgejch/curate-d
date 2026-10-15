@@ -42,7 +42,7 @@ def test_every_branch_push_and_every_pr_to_dev_or_main_is_analysed() -> None:
 def test_only_the_unit_suite_reports_coverage() -> None:
     """SonarQube merges every report into one metric, and integration coverage does not count."""
     run = cast(str, _step("Unit tests")["run"])
-    assert run == "uv run pytest -n auto --cov-report=xml"
+    assert run == "uv run --locked --no-build pytest -n auto --cov-report=xml"
 
 
 def test_the_scan_skips_only_fork_pull_requests() -> None:

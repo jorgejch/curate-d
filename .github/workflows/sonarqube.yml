@@ -38,17 +38,19 @@ jobs:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
 
+      # `--no-build`: dependencies install from the lockfile's wheels, never by running a
+      # source distribution's build scripts.
       - name: Install dependencies
-        run: uv sync --locked
+        run: uv sync --locked --no-build
 
       # The same run as `make test`: unit tests only, with the 80% floor. The XML report
       # is for SonarQube alone.
       - name: Unit tests
-        run: uv run pytest -n auto --cov-report=xml
+        run: uv run --locked --no-build pytest -n auto --cov-report=xml
 
       - name: Cache SonarQube packages
         if: ${{ !cancelled() && hashFiles('coverage.xml') != '' }}
