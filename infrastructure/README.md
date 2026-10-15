@@ -57,10 +57,12 @@ its own repository.
 The rule for production is **a semver tag whose commit is on `main`, and nothing else**.
 The flow is `dev` → merge to `main` → bump `version` in `pyproject.toml` → tag `vX.Y.Z`.
 
-Nothing is published until lint, the in-workflow database-access audit, strict type checking,
-the unit suite, the PostgreSQL staging integration tests and the RustFS staging suites pass on
-the same commit — an image that fails its own tests only moves the
-discovery into the cluster.
+Nothing is published that has not passed the merge gate. `dev` and `main` change only by
+pull request, and a pull request merges only when lint, the in-workflow database-access audit,
+strict type checking, the unit suite and the full integration suite against the whole local
+stack pass on a head that is up to date with its base, so the tree an image is built from is
+the tree that was tested. The build does not test again: an image that fails its own tests
+only moves the discovery into the cluster, so the tests run before the merge.
 
 Three guards enforce it, because any one alone leaves a gap:
 
