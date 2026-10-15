@@ -68,10 +68,11 @@ jobs:
       - name: Type check
         run: uv run --locked --no-build mypy
 
-      # The same run as `make test`: unit tests only, with the 80% floor from
-      # pyproject.toml. The XML report is for SonarQube alone.
+      # The same run as `make test`: unit tests only, named by path because pytest's
+      # testpaths covers the whole tests tree, with the 80% floor from pyproject.toml.
+      # The XML report is for SonarQube alone.
       - name: Unit tests
-        run: uv run --locked --no-build pytest -n auto --cov-report=xml
+        run: uv run --locked --no-build pytest -n auto --cov-report=xml tests/unit
 
       - name: Cache SonarQube packages
         if: ${{ !cancelled() && hashFiles('coverage.xml') != '' }}
@@ -117,7 +118,7 @@ jobs:
         run: uv sync --locked --no-build
 
       - name: Unit tests
-        run: uv run --locked --no-build pytest -n auto --cov-report=xml
+        run: uv run --locked --no-build pytest -n auto --cov-report=xml tests/unit
 
       - name: Cache SonarQube packages
         if: ${{ !cancelled() && hashFiles('coverage.xml') != '' }}

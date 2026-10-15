@@ -25,12 +25,12 @@ typecheck: ## Strict type check
 	uv run mypy
 
 test: ## Isolated unit suite with the coverage gate, in parallel
-	uv run pytest -n auto
+	uv run pytest -n auto tests/unit
 
 # PyCharm imports the coverage.py data file itself (Run | Manage Coverage Reports) and
 # writes a same-named .xml beside it on import.
 coverage: ## Unit coverage data in curate-d.coverage, importable by PyCharm
-	COVERAGE_FILE=curate-d.coverage uv run pytest -n auto
+	COVERAGE_FILE=curate-d.coverage uv run pytest -n auto tests/unit
 
 # Integration coverage deliberately does not count toward the floor: these tests are
 # slower and flakier, and letting them cover the gap would hide untested edge cases.
