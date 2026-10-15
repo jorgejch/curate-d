@@ -24,12 +24,15 @@ name: Build and Publish Container
 # application version, so separate tags could leave the API enqueueing work on a version
 # no worker is running. The manifests choose behaviour with `command:`.
 
-# `check` also gates merges: it runs on pull requests and on pushes to main, where there
-# is nothing to publish, so the staging contract fails a change before it reaches main
-# rather than after. `build-and-push` stays on dev and semver tags — see its `if`.
+# `check` also gates merges: it runs on pull requests to dev and main and on pushes to
+# main, where there is nothing to publish, so the staging contract fails a change before
+# it reaches dev or main rather than after. Feature-branch pushes never trigger it, so the
+# integration suite runs once per pull request commit. `build-and-push` stays on dev and
+# semver tags — see its `if`.
 on:
   pull_request:
     branches:
+      - dev
       - main
   push:
     branches:

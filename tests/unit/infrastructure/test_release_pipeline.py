@@ -65,15 +65,20 @@ def test_only_the_dev_branch_triggers_a_branch_build() -> None:
     assert "refs/heads/main" not in condition
 
 
-def test_the_check_job_gates_merges_to_main() -> None:
-    """The staging contract has to fail a change before main, not after.
+def test_the_check_job_gates_merges_to_dev_and_main() -> None:
+    """The staging contract has to fail a change before dev or main, not after.
 
     Without a pull_request trigger the suite would only run on the way to a published
     image, which is after review rather than during it.
     """
     on = cast(Document, _workflow()[True])
-    assert cast(Document, on["pull_request"])["branches"] == ["main"]
+    assert cast(Document, on["pull_request"])["branches"] == ["dev", "main"]
     assert "main" in cast(list[str], _triggers()["branches"])
+
+
+def test_a_feature_branch_push_never_runs_the_integration_suite() -> None:
+    """Its PR runs the suite; a push trigger too would run it twice per commit."""
+    assert sorted(cast(list[str], _triggers()["branches"])) == ["dev", "main"]
 
 
 def test_the_tag_trigger_is_the_semver_shape_not_a_wildcard() -> None:
