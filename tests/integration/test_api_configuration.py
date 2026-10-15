@@ -9,6 +9,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from curate_d.api.app import create_app
+from curate_d.classification.taxonomy import active_taxonomy
 from curate_d.config import Settings
 from curate_d.configuration.documents import parse_policy, parse_taxonomy
 from curate_d.configuration.store import ConfigurationRepository
@@ -21,6 +22,8 @@ from curate_d.domain import (
 )
 from curate_d.ledger import ContentObjectRepository, PlacementRepository
 from curate_d.ledger.tables import content_objects, placements
+from curate_d.placement.policy import active_policy
+from curate_d.rendering.planning import active_templates
 from curate_d.rendering.templates import parse_templates
 
 pytestmark = pytest.mark.integration
@@ -38,6 +41,12 @@ async def restore(ledger_engine: AsyncEngine) -> AsyncIterator[None]:
     before = {}
     async with ledger_engine.begin() as connection:
         repository = ConfigurationRepository(connection)
+        # On a fresh database nothing is in force until the API's first read seeds the
+        # default, so there would be nothing to put back and a test's change would outlive
+        # it. Seeding through the same helpers first leaves every kind with a document.
+        await active_taxonomy(repository)
+        await active_templates(repository)
+        await active_policy(repository)
         for kind in _PARSERS:
             before[kind] = await repository.active(kind)
     yield
