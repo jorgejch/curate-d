@@ -43,6 +43,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
+      # Rows 30/31 (lifecycle expiry and stale-upload reclamation) need a multi-day
+      # observation on a real clock, which no job outlasts. Without a budget they skip,
+      # citing the recorded observation; a budget short enough to pass here would record an
+      # unobserved reclamation as verified. `make lifecycle-check` re-observes them on a
+      # time-scaled RustFS, by hand, on a pin bump.
+      - name: Refuse a CI-sized observation budget
+        if: env.CURATE_D_TEST_STAGING_LIFECYCLE_TIMEOUT_SECONDS != ''
+        run: |
+          echo "::error::CURATE_D_TEST_STAGING_LIFECYCLE_TIMEOUT_SECONDS is set in CI."
+          echo "Rows 30/31 need a multi-day observation no job outlasts; a budget short"
+          echo "enough to pass here would record unobserved reclamation as verified."
+          exit 1
+
       # test_local_ocr.py calls Tesseract from the test process, not from a container.
       - name: Install Tesseract
         run: |
@@ -95,6 +108,51 @@ jobs:
           uv run --locked --no-build pytest tests/integration
           --no-cov -m integration --staging-backend=rustfs
           --junitxml=integration.xml -o junit_family=legacy
+
+      - name: Record staging evidence
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          from xml.etree import ElementTree
+
+          report = Path("integration.xml")
+          lines = ["### Integration suite", "", "OVH verification remains PENDING.", ""]
+          if not report.exists():
+              lines.append("The suite did not produce a result; nothing was verified.")
+          else:
+              cases = ElementTree.parse(report).findall(".//testcase")
+
+              def counts(prefix: str) -> str:
+                  # Counted per module, so the contract evidence is never mistaken for
+                  # the suite's total.
+                  mine = [c for c in cases if c.get("classname", "").startswith(prefix)]
+                  failed = sum(1 for c in mine if c.find("failure") is not None)
+                  errored = sum(1 for c in mine if c.find("error") is not None)
+                  skipped = sum(1 for c in mine if c.find("skipped") is not None)
+                  return (
+                      f"Tests: {len(mine)}; failures: {failed}; errors: {errored}; "
+                      f"skipped: {skipped}."
+                  )
+
+              lines += ["Whole suite: " + counts("tests.integration."), ""]
+              lines += ["#### RustFS staging contract", "", counts("tests.integration.test_staging_contract"), ""]
+              for prop in ElementTree.parse(report).findall(".//property[@name='sdk_checksum_headers']"):
+                  lines += ["Safe SDK checksum headers:", "```json", prop.get("value", ""), "```", ""]
+              lines += [
+                  "#### RustFS backend provisioning checks",
+                  "",
+                  counts("tests.integration.test_staging_backend_checks"),
+                  "",
+                  "Rows 30 and 31 skip here, citing the recorded time-scaled observation "
+                  "(infrastructure/staging-compatibility.md); `make lifecycle-check` "
+                  "re-observes them on a RustFS pin bump. On OVH they were observed "
+                  "separately.",
+              ]
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary:
+              summary.write("\n".join(lines) + "\n")
+          PY
 
       - name: Stack logs
         if: failure()
