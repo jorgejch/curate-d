@@ -92,7 +92,7 @@ def _register_newer_version(engine: sa.Engine, settings: Settings, registered: l
             sa.text(
                 "INSERT INTO dbos.application_versions"
                 " (version_id, version_name, version_timestamp, application_name)"
-                " SELECT :id, :name, max(version_timestamp) + 1, :app"
+                " SELECT :id, :name, COALESCE(max(version_timestamp), 0) + 1, :app"
                 " FROM dbos.application_versions"
             ),
             {
