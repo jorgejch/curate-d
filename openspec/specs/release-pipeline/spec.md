@@ -8,9 +8,10 @@ into a protected branch, and when and from where a container image is published.
 ## Requirements
 
 ### Requirement: Pull requests into protected branches are the merge gate
-A pull request into `dev` or `main` MUST pass the checks job (lint, type check, the unit
-suite with its 80% line-coverage floor) and the integration job (the whole
-`tests/integration` suite against the full local stack) before it can merge. Both are
+A pull request into `dev` or `main` MUST pass the checks job (lint, the in-workflow
+database-access audit, type check, the unit suite with its 80% line-coverage floor) and
+the integration job (the whole
+`tests/integration` suite, see below) before it can merge. Both are
 required status checks, and the pull request MUST be up to date with its base when the
 checks run. Further ruleset rules (code-scanning results from CodeQL or SonarQube) MAY
 gate the merge without changing this requirement.
@@ -33,13 +34,14 @@ gate the merge without changing this requirement.
 - **THEN** the pull request cannot merge until it is updated and the checks run again
 
 ### Requirement: Feature-branch pushes run the checks without gating
-A push to any branch other than `dev` or `main` MUST run lint, the type check and the
-unit suite, and MUST upload the unit coverage to SonarQube Cloud as an analysis of that
+A push to any branch other than `dev` or `main` MUST run lint, the in-workflow
+database-access audit, the type check and the unit suite, and MUST upload the unit coverage to SonarQube Cloud as an analysis of that
 branch. A failure is reported on the commit and blocks nothing.
 
 #### Scenario: Push to a feature branch
 - **WHEN** a commit is pushed to a feature branch
-- **THEN** lint, type check and the unit suite run, and SonarQube Cloud shows an analysis
+- **THEN** lint, the database-access audit, type check and the unit suite run, and
+  SonarQube Cloud shows an analysis
   of that branch with the run's unit coverage
 
 #### Scenario: Lint fails on a feature branch
@@ -52,8 +54,8 @@ branch. A failure is reported on the commit and blocks nothing.
 
 ### Requirement: Protected-branch pushes refresh SonarQube coverage
 A push to `dev` or `main` MUST run the unit suite and upload its coverage to SonarQube
-Cloud as an analysis of that branch. Lint, the type check and the integration suite
-MUST NOT run on that push: the merged pull request already ran them. The job gates
+Cloud as an analysis of that branch. Lint, the database-access audit, the type check and
+the integration suite MUST NOT run on that push: the merged pull request already ran them. The job gates
 nothing and no publish step waits on it.
 
 #### Scenario: Merge into dev
