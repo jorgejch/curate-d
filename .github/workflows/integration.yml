@@ -143,6 +143,37 @@ jobs:
             }
           done
 
+      # `worker.ready` follows the schedule apply whether or not it wrote anything: a worker
+      # not on DBOS's latest version leaves the schedules to that version. The image's own
+      # version must hold latest here (its first launch on this database registered it),
+      # and worker-io must have stored every declared schedule and nothing else.
+      - name: Check the workers applied their schedules
+        run: |
+          uv run --locked --no-build python - <<'PY'
+          import sys
+
+          from curate_d.config import Settings
+          from curate_d.runtime import dbos_app
+          from curate_d.workflows.registry import declared_schedule_names
+
+          settings = Settings()
+          client = dbos_app.client(settings, retry_connection_errors=False)
+          try:
+              latest = client.get_latest_application_version()["version_name"]
+              stored = {entry["schedule_name"] for entry in client.list_schedules()}
+          finally:
+              client.destroy()
+          declared = declared_schedule_names(settings)
+          failures = []
+          if latest != dbos_app.APPLICATION_VERSION:
+              failures.append(f"latest version is {latest!r}, not the image's {dbos_app.APPLICATION_VERSION!r}")
+          if stored != declared:
+              failures.append(f"missing {sorted(declared - stored)}, undeclared {sorted(stored - declared)}")
+          for failure in failures:
+              print(f"::error::schedules not applied: {failure}")
+          sys.exit(1 if failures else 0)
+          PY
+
       - name: Record staging evidence
         if: always()
         run: |

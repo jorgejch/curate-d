@@ -74,7 +74,10 @@ cleanup of unrelated code.
   is wrong; never delete, loosen or skip an assertion to get a pass.
 - **Integration tests** (`make test-integration`) need the local stack. While developing, run
   the ones your change touches (`uv run pytest tests/integration/test_<area>.py --no-cov -m
-  integration`); every pull request runs the full suite.
+  integration`); every pull request runs the full suite. The suite runs under its own DBOS
+  version and hands the latest version back to the stack's when it ends. A stack whose
+  latest is still a `+test.` version from a run before that existed stopped applying its
+  schedules: promote its own version (`python -m curate_d.runtime.promote <version>`).
 
 ## Code conventions
 

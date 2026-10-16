@@ -123,3 +123,14 @@ def test_each_worker_must_log_ready_after_it_starts() -> None:
     assert "for service in worker-io worker-cpu" in wait
     assert "worker.ready" in wait
     assert 'logger.info("worker.ready"' in WORKER_MAIN.read_text(encoding="utf-8")
+
+
+def test_the_gate_checks_the_workers_applied_their_schedules() -> None:
+    """`worker.ready` follows a schedule apply that may have written nothing."""
+    check = _index("Check the workers applied their schedules")
+    assert _index("Wait for the workers to be ready") < check
+    run = cast(str, _steps()[check]["run"])
+    assert "declared_schedule_names(settings)" in run
+    assert "client.list_schedules()" in run
+    assert "get_latest_application_version()" in run
+    assert "dbos_app.APPLICATION_VERSION" in run

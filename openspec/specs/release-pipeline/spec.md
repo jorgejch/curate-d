@@ -85,8 +85,10 @@ MUST start on the same database only after the suite has finished: a worker writ
 persisted schedules on launch, and their ticks would otherwise run in the test process on
 the suite's application version. The job MUST then wait until each is ready: the API until
 its readiness route answers, and each worker until it logs `worker.ready`, the event its
-startup ends on once DBOS has launched and its schedules are applied. The job MUST fail if a
-job-wide lifecycle observation budget is set.
+startup ends on. Since a worker logs it even when it left its schedules to another
+version, the job MUST then check that the image's version is DBOS's latest and that the
+stored schedules are exactly the declared ones. The job MUST fail if a job-wide lifecycle
+observation budget is set.
 
 #### Scenario: Suite runs on a pull request
 - **WHEN** the integration job runs
@@ -106,6 +108,11 @@ job-wide lifecycle observation budget is set.
 - **WHEN** the API or a worker built from this commit exits after the suite, the API's
   health check never passes, or a worker does not log `worker.ready` within the wait
 - **THEN** the job fails, and its logs name the service
+
+#### Scenario: Workers leave their schedules unapplied
+- **WHEN** the workers are ready but the image's version is not DBOS's latest, or a declared
+  schedule is missing or an undeclared one is stored
+- **THEN** the job fails, naming the latest version or the schedules that differ
 
 #### Scenario: Worker hangs in startup
 - **WHEN** a worker's container keeps running but its startup never finishes
