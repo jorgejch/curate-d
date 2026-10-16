@@ -136,6 +136,18 @@ services:
       LOGFIRE_TOKEN:
     ports:
       - "${CURATE_D_API_PORT:-8000}:8000"
+    # The API's own readiness route, so `--wait` means serving and reaching the ledger, not
+    # merely started. Python rather than curl: the image carries no HTTP client, and
+    # urlopen fails on the route's 503.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)"
+      interval: 2s
+      timeout: 3s
+      retries: 30
     depends_on:
       postgres:
         condition: service_healthy

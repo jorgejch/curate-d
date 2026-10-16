@@ -1,4 +1,4 @@
-"""The integration workflow's shape: the required check, its trigger and its suite."""
+"""The integration workflow's shape: its required check, trigger, suite and readiness gate."""
 
 from pathlib import Path
 from typing import cast
@@ -7,6 +7,9 @@ import yaml
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "integration.yml"
+COMPOSE = REPOSITORY_ROOT / "compose.yaml"
+API_APP = REPOSITORY_ROOT / "src" / "curate_d" / "api" / "app.py"
+WORKER_MAIN = REPOSITORY_ROOT / "src" / "curate_d" / "worker" / "main.py"
 
 type Document = dict[str, object]
 
@@ -102,3 +105,21 @@ def test_the_stack_is_removed_on_every_outcome() -> None:
     teardown = _steps()[_index("Remove the stack")]
     assert teardown["if"] == "always()"
     assert "down --volumes" in cast(str, teardown["run"])
+
+
+def test_the_api_health_check_probes_its_readiness_route() -> None:
+    """`--wait` holds the API until /health/ready answers, not merely until it starts."""
+    compose = cast(Document, yaml.safe_load(COMPOSE.read_text(encoding="utf-8")))
+    api = cast(Document, cast(Document, compose["services"])["api"])
+    probe = " ".join(cast(list[str], cast(Document, api["healthcheck"])["test"]))
+    assert "http://127.0.0.1:8000/health/ready" in probe
+    assert '"/health/ready"' in API_APP.read_text(encoding="utf-8")
+
+
+def test_each_worker_must_log_ready_after_it_starts() -> None:
+    """A worker has no health check, so the gate waits for the event its startup ends on."""
+    assert _index("Start the application services") < _index("Wait for the workers to be ready")
+    wait = cast(str, _steps()[_index("Wait for the workers to be ready")]["run"])
+    assert "for service in worker-io worker-cpu" in wait
+    assert "worker.ready" in wait
+    assert 'logger.info("worker.ready"' in WORKER_MAIN.read_text(encoding="utf-8")
