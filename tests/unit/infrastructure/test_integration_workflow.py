@@ -83,7 +83,18 @@ def test_a_ci_sized_lifecycle_budget_fails_before_the_suite() -> None:
 
 def test_migrations_run_before_the_application_services_start() -> None:
     """DBOS must not launch against a schema Alembic is still changing."""
-    assert _index("Apply migrations") < _index("Start the rest of the stack")
+    assert _index("Apply migrations") < _index("Start the application services")
+
+
+def test_no_application_service_runs_beside_the_suite() -> None:
+    """A worker's persisted schedules would tick in the test process, on the suite's version."""
+    suite = _index("Integration suite")
+    assert _index("Start the application services") > suite
+    for step in _steps()[:suite]:
+        run = cast(str, step.get("run", ""))
+        if "docker compose up" in run:
+            assert "postgres rustfs rclone" in run, step["name"]
+            assert all(name not in run for name in ("api", "worker")), step["name"]
 
 
 def test_the_stack_is_removed_on_every_outcome() -> None:

@@ -56,7 +56,7 @@ cleanup of unrelated code.
 - **Run `make check` before pushing.** It runs the same lint, type check and unit commands
   as CI, so green locally means green there. Every push to a branch runs them and uploads
   the unit coverage to SonarQube Cloud. A pull request into `dev` or `main` must pass them
-  and the full integration suite against the whole stack, and be up to date with its base,
+  and the full integration suite against the local stack, and be up to date with its base,
   before it merges; a merge runs no tests again, only the image build on `dev` and the
   SonarQube coverage refresh.
 

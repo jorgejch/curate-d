@@ -78,19 +78,31 @@ integration run MUST NOT write a coverage report that an upload could pick up.
 
 ### Requirement: Integration suite runs whole, against the full stack
 The integration job MUST run every test under `tests/integration` against a stack
-holding PostgreSQL with the applied migrations, RustFS with the staging provisioning,
-the rclone daemon, the API and both worker profiles built from this commit, with
-Tesseract available to the test process, and with RustFS as the only selected staging
-backend. The job MUST fail if a job-wide lifecycle observation budget is set.
+holding PostgreSQL with the applied migrations, RustFS with the staging provisioning and
+the rclone daemon, with Tesseract available to the test process, and with RustFS as the
+only selected staging backend. The API and both worker profiles, built from this commit,
+MUST start on the same database only after the suite has finished: a worker writes the
+persisted schedules on launch, and their ticks would otherwise run in the test process on
+the suite's application version. The job MUST fail if a job-wide lifecycle observation
+budget is set.
 
 #### Scenario: Suite runs on a pull request
 - **WHEN** the integration job runs
 - **THEN** no test file under `tests/integration` is deselected, and the lifecycle rows 30
   and 31 skip citing their recorded RustFS observation
 
+#### Scenario: No scheduled tick during the suite
+- **WHEN** the suite runs
+- **THEN** no API or worker container is running, so none of the application's declared
+  schedules is persisted to tick on the suite's version
+
 #### Scenario: Stack fails to come up
-- **WHEN** a service does not reach healthy within the wait
+- **WHEN** PostgreSQL, RustFS or rclone does not reach healthy within the wait
 - **THEN** the job fails before any test runs, and its logs name the service
+
+#### Scenario: Application image fails to boot
+- **WHEN** the API or a worker built from this commit does not reach running after the suite
+- **THEN** the job fails, and its logs name the service
 
 #### Scenario: Observation budget set in CI
 - **WHEN** `CURATE_D_TEST_STAGING_LIFECYCLE_TIMEOUT_SECONDS` is set in the job environment

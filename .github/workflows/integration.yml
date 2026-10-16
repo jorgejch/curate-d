@@ -11,8 +11,11 @@ name: Integration
 # application image is built from this commit, which also checks the Dockerfile before
 # docker-publish.yml builds from it.
 #
-# Each test session runs under its own DBOS application version (tests/integration/
-# conftest.py), so the stack's workers never pick up the suite's workflows.
+# The API and the workers start only after the suite. The suite calls neither, and a worker
+# writes the persisted schedules on launch: every launched DBOS process, the suite's
+# included, then fires them onto the latest application version, which the suite's schedule
+# fixtures make its own. A recovery or refresh tick would then run in the test process,
+# against the test rows, whenever the wall clock says so.
 on:
   pull_request:
     branches:
@@ -92,18 +95,17 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Start PostgreSQL and RustFS
+      # Only what the suite talks to: the API and the workers wait until it is done (see the
+      # header).
+      - name: Start PostgreSQL, RustFS and rclone
         run: |
-          docker compose up -d --wait --no-build postgres rustfs
+          docker compose up -d --wait --no-build postgres rustfs rclone
           docker compose run --rm rustfs-init
 
       # Before the API and workers start, so DBOS never launches against a schema Alembic
       # is still changing. The DSN `Settings` defaults to is the published 5433.
       - name: Apply migrations
         run: uv run --locked --no-build alembic upgrade head
-
-      - name: Start the rest of the stack
-        run: docker compose up -d --wait --no-build
 
       # Serial: the suite shares one database and tests advisory locks across independent
       # connections. RustFS is the only staging backend here; OVH verification stays
@@ -113,6 +115,11 @@ jobs:
           uv run --locked --no-build pytest tests/integration
           --no-cov -m integration --staging-backend=rustfs
           --junitxml=integration.xml -o junit_family=legacy
+
+      # The image built from this commit must still boot as the API and both workers, on
+      # the migrated database. After the suite, so their schedules never tick beside it.
+      - name: Start the application services
+        run: docker compose up -d --wait --no-build api worker-io worker-cpu
 
       - name: Record staging evidence
         if: always()
