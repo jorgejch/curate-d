@@ -76,15 +76,12 @@ cleanup of unrelated code.
   developing, run the ones your change touches (`uv run pytest
   tests/integration/test_<area>.py --no-cov -m integration --staging-backend=rustfs`; without
   the flag, staging tests also need the OVH fixture's credentials); every pull request runs
-  the full suite. The suite runs under its own DBOS version and hands the latest version
-  back to the one it found when it ends.
+  the full suite.
 - **Don't run them against `make stack-up`.** Its workers apply the persisted schedules, and
   the suite's own DBOS process then fires them: a recovery or refresh tick runs against the
   test rows. `make test-stack` runs `make stack-reset` first, which destroys the
   local stack's containers and data (including schedules an earlier `stack-up` wrote), so
-  the suite starts from a clean database as in CI. A stack whose latest is still a `+test.`
-  version from an older run stopped applying its schedules: promote its own version
-  (`python -m curate_d.runtime.promote <version>`).
+  the suite starts from a clean database as in CI.
 
 ## Code conventions
 

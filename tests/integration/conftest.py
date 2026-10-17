@@ -9,12 +9,10 @@ from collections.abc import AsyncIterator, Iterator
 from uuid import uuid4
 
 import pytest
-from dbos import error as dbos_error
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from curate_d.config import Settings
-from curate_d.runtime import dbos_app, promote
+from curate_d.runtime import dbos_app
 
 # A default run means the local engine CI uses, plus OVH.
 _STAGING_BACKENDS = ("rustfs", "ovh")
@@ -22,64 +20,8 @@ _DEFAULT_STAGING_BACKENDS = "rustfs,ovh"
 _LOCAL_ENGINE_NAMES = {"rustfs": "RustFS"}
 
 
-def _ranked_versions(settings: Settings) -> list[str] | None:
-    """Return this application's versions, latest first, or None if they can't be read.
-
-    An empty list is a registry no version has joined yet. None is an unreachable or
-    unmigrated database: a test that needs neither still runs.
-    """
-    client = dbos_app.client(settings, retry_connection_errors=False)
-    try:
-        return [info["version_name"] for info in client.list_application_versions()]
-    except (dbos_error.DBOSException, SQLAlchemyError):
-        return None
-    finally:
-        client.destroy()
-
-
-def _restore_latest_version(settings: Settings, previous: str, suite_version: str) -> None:
-    """Promote `previous` again if only the suite's version has superseded it.
-
-    DBOS ranks versions by when each was last registered or promoted, so the suite's
-    version must rank first and `previous` straight after it. Any other version between
-    them was registered or promoted during the run, and is left latest.
-
-    Raises:
-        RuntimeError: Reading or promoting the latest version failed; the message names
-            the command that restores it by hand.
-    """
-    client = dbos_app.client(settings, retry_connection_errors=False)
-    try:
-        ranked = [info["version_name"] for info in client.list_application_versions()]
-        if ranked[:2] == [suite_version, previous]:
-            promote.promote(client, settings, previous)
-    except Exception as exc:
-        raise RuntimeError(
-            f"could not hand DBOS's latest version back to {previous!r} from the suite's "
-            f"{suite_version!r}; run `python -m curate_d.runtime.promote {previous}`"
-        ) from exc
-    finally:
-        client.destroy()
-
-
-def _check_unread_latest(settings: Settings, suite_version: str) -> None:
-    """Fail if the suite's version holds latest on a database whose versions went unread.
-
-    Raises:
-        RuntimeError: The versions could not be read before the first test, and the
-            suite's version is now latest, so the version to hand back is unknown.
-    """
-    ranked = _ranked_versions(settings)
-    if ranked and ranked[0] == suite_version:
-        raise RuntimeError(
-            f"the suite's version {suite_version!r} is DBOS's latest, and the versions "
-            f"could not be read before the first test; if a stack ran on this database, "
-            f"run `python -m curate_d.runtime.promote <its version>`"
-        )
-
-
 @pytest.fixture(scope="package", autouse=True)
-def _isolate_application_version(settings: Settings) -> Iterator[None]:
+def _isolate_application_version() -> Iterator[None]:
     """Run the suite under an application version no deployed worker serves.
 
     Package-scoped so the real version is restored when the last integration test
@@ -98,32 +40,13 @@ def _isolate_application_version(settings: Settings) -> Iterator[None]:
     what makes the two structurally unable to touch each other's work. Isolating this
     way rather than by asking developers to stop their stack keeps the suite correct
     regardless of what else happens to be connected.
-
-    The suite's first DBOS launch registers its version, and DBOS makes a newly
-    registered version its latest; nothing a single test restores can undo that. Left
-    so, the stack's workers stop applying their schedules and every tick is enqueued on a
-    version nothing runs once the suite exits. So the latest version found before the
-    first test is promoted again after the last, through the operator's own command, if
-    only the suite's version has superseded it. A database with no version yet has
-    nothing to restore: the stack's first launch on it registers its own version as
-    latest. Nor does one whose latest is another run's `+test.` version, which nothing
-    serves. One whose versions could not be read fails the run if the suite's version
-    ends up latest, since the version to hand back is unknown.
     """
     original = dbos_app.APPLICATION_VERSION
-    suite_version = f"{original}+test.{uuid4().hex[:8]}"
-    before = _ranked_versions(settings)
-    dbos_app.APPLICATION_VERSION = suite_version
+    dbos_app.APPLICATION_VERSION = f"{original}+test.{uuid4().hex[:8]}"
     try:
         yield
     finally:
         dbos_app.APPLICATION_VERSION = original
-        if before is None:
-            _check_unread_latest(settings, suite_version)
-        # Another run's suite version, left latest by a concurrent or older suite, has no
-        # executor once that run exits: promoting it again would strand the stack too.
-        elif before and "+test." not in before[0]:
-            _restore_latest_version(settings, before[0], suite_version)
 
 
 @pytest.fixture(scope="session")
