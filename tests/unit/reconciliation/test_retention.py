@@ -1,4 +1,7 @@
-"""Retention decisions: retain by default, the original as a copy, the verification gate."""
+"""Retention decisions: retain by default, the original as a copy, the verification gate.
+
+Only copies at destinations the policy still defines count.
+"""
 
 from uuid import uuid4
 
@@ -12,6 +15,7 @@ from curate_d.domain import (
 from curate_d.reconciliation.retention import RetentionOutcome, decide_retention
 
 _CONTENT = ContentObjectId(uuid4())
+_ALL = frozenset({"a", "b", "c"})
 
 
 def _copy(
@@ -40,20 +44,22 @@ def _releasing(required: int = 2, *, counts: bool = True) -> RetentionRule:
 
 def test_originals_are_retained_when_no_rule_applies() -> None:
     """However many copies exist."""
-    decision = decide_retention(None, [_copy("a"), _copy("b"), _copy("c")])
+    decision = decide_retention(None, [_copy("a"), _copy("b"), _copy("c")], destinations=_ALL)
     assert decision.outcome is RetentionOutcome.RETAIN
     assert "by default" in decision.reason
 
 
 def test_a_rule_that_does_not_permit_release_retains() -> None:
     """The rule is named in the decision."""
-    decision = decide_retention(RetentionRule(name="keep"), [_copy("a"), _copy("b")])
+    decision = decide_retention(
+        RetentionRule(name="keep"), [_copy("a"), _copy("b")], destinations=_ALL
+    )
     assert (decision.outcome, decision.rule) == (RetentionOutcome.RETAIN, "keep")
 
 
 def test_the_original_is_kept_while_it_is_one_of_the_required_copies() -> None:
     """Two required, one placement: the original is the second copy."""
-    decision = decide_retention(_releasing(2), [_copy("a")])
+    decision = decide_retention(_releasing(2), [_copy("a")], destinations=_ALL)
     assert decision.outcome is RetentionOutcome.RETAIN
     assert decision.reason == (
         "the original is one of the 2 required copies; releasing it would leave 1"
@@ -66,6 +72,7 @@ def test_enough_strong_copies_without_the_original_permit_release() -> None:
     decision = decide_retention(
         _releasing(2),
         [_copy("a"), _copy("b", VerificationLevel.STRONG_IN_TRANSIT)],
+        destinations=_ALL,
     )
     assert decision.outcome is RetentionOutcome.RELEASE_PERMITTED
     assert decision.strong_copies == ("a", "b")
@@ -80,6 +87,7 @@ def test_weakly_verified_copies_do_not_satisfy_the_gate() -> None:
             _copy("b", VerificationLevel.WEAK),
             _copy("c", VerificationLevel.UNVERIFIABLE),
         ],
+        destinations=_ALL,
     )
     assert decision.outcome is RetentionOutcome.RETAIN
     assert decision.reason == (
@@ -97,6 +105,7 @@ def test_copies_that_are_not_present_do_not_count() -> None:
             _copy("b", state=PlacementState.ABSENT),
             _copy("c", state=PlacementState.COPYING),
         ],
+        destinations=_ALL,
     )
     assert decision.outcome is RetentionOutcome.RETAIN
     assert decision.strong_copies == decision.weak_copies == ()
@@ -105,8 +114,10 @@ def test_copies_that_are_not_present_do_not_count() -> None:
 def test_a_downgraded_copy_changes_the_decision() -> None:
     """Re-evaluated against the corrected level, release is withdrawn."""
     rule = _releasing(2)
-    before = decide_retention(rule, [_copy("a"), _copy("b")])
-    after = decide_retention(rule, [_copy("a"), _copy("b", VerificationLevel.WEAK)])
+    before = decide_retention(rule, [_copy("a"), _copy("b")], destinations=_ALL)
+    after = decide_retention(
+        rule, [_copy("a"), _copy("b", VerificationLevel.WEAK)], destinations=_ALL
+    )
     assert before.outcome is RetentionOutcome.RELEASE_PERMITTED
     assert after.outcome is RetentionOutcome.RETAIN
     assert "weaker copies do not count (b)" in after.reason
@@ -115,6 +126,66 @@ def test_a_downgraded_copy_changes_the_decision() -> None:
 def test_the_rules_minimum_level_is_respected() -> None:
     """A rule demanding the common-hash rung does not count in-transit copies."""
     rule = _releasing(1).model_copy(update={"minimum_level": VerificationLevel.STRONG_COMMON_HASH})
-    decision = decide_retention(rule, [_copy("a", VerificationLevel.STRONG_IN_TRANSIT)])
+    decision = decide_retention(
+        rule, [_copy("a", VerificationLevel.STRONG_IN_TRANSIT)], destinations=_ALL
+    )
     assert decision.outcome is RetentionOutcome.RETAIN
     assert decision.audit_details()["minimum_level"] == "strong_common_hash"
+
+
+def test_a_copy_at_a_destination_no_longer_in_the_policy_does_not_count() -> None:
+    """Two strong copies, one of them where nothing checks any more: retained, and named."""
+    decision = decide_retention(
+        _releasing(2, counts=False), [_copy("a"), _copy("b")], destinations={"a"}
+    )
+    assert decision.outcome is RetentionOutcome.RETAIN
+    assert (decision.strong_copies, decision.unchecked_copies) == (("a",), ("b",))
+    assert decision.reason == (
+        "1 of 2 required copies are strongly verified; "
+        "1 copies at destinations no longer in the policy do not count (b)"
+    )
+
+
+def test_a_dropped_destination_is_named_even_when_release_stays_permitted() -> None:
+    """The reason changes, so the decision is recorded again."""
+    decision = decide_retention(_releasing(1), [_copy("a"), _copy("b")], destinations={"a"})
+    assert decision.outcome is RetentionOutcome.RELEASE_PERMITTED
+    assert decision.unchecked_copies == ("b",)
+    assert decision.reason.endswith("no longer in the policy do not count (b)")
+
+
+def test_a_weak_copy_at_a_dropped_destination_is_listed_as_unchecked_only() -> None:
+    """It is not listed among the weaker copies as well."""
+    decision = decide_retention(
+        _releasing(2, counts=False),
+        [_copy("a"), _copy("b", VerificationLevel.WEAK)],
+        destinations={"a"},
+    )
+    assert (decision.weak_copies, decision.unchecked_copies) == ((), ("b",))
+
+
+def test_absent_copies_at_dropped_destinations_are_not_listed() -> None:
+    """Only present copies are named: a copy known to be gone is no copy anywhere."""
+    decision = decide_retention(
+        _releasing(1),
+        [_copy("a"), _copy("b", state=PlacementState.ABSENT)],
+        destinations={"a"},
+    )
+    assert decision.outcome is RetentionOutcome.RELEASE_PERMITTED
+    assert decision.unchecked_copies == ()
+    assert "no longer in the policy" not in decision.reason
+
+
+def test_a_rule_that_does_not_permit_release_lists_no_copies() -> None:
+    """Whatever the policy defines, retention needs no count."""
+    decision = decide_retention(RetentionRule(name="keep"), [_copy("b")], destinations=())
+    assert decision.unchecked_copies == decision.strong_copies == ()
+
+
+def test_audit_details_carry_the_unchecked_copies() -> None:
+    """Joined like the other copy lists, and None when there are none."""
+    rule = _releasing(1)
+    dropped = decide_retention(rule, [_copy("a"), _copy("b"), _copy("c")], destinations={"a"})
+    kept = decide_retention(rule, [_copy("a")], destinations=_ALL)
+    assert dropped.audit_details()["unchecked_copies"] == "b, c"
+    assert kept.audit_details()["unchecked_copies"] is None

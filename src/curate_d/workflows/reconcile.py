@@ -384,7 +384,11 @@ async def check_destination(destination: DestinationConfig, cycle: str) -> int:
 
 @DBOS.workflow()
 async def check_destinations(scheduled_time: datetime, context: object) -> None:
-    """Check every configured destination."""
+    """Check every destination the active policy defines.
+
+    Placements at a destination dropped from the policy are no longer checked, so retention
+    does not count them.
+    """
     policy = (await current().datasource.run_tx_step_async({"name": "open_check"}, _open_tx)).policy
     cycle = scheduled_time.strftime("%Y%m%dT%H%M%S")
     for destination in policy.destinations:

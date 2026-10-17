@@ -69,6 +69,12 @@ def test_the_seed_policy_places_nothing() -> None:
     assert SEED_POLICY.desired_destinations(Facts(media_kind=MediaKind.PHOTO)) == ()
 
 
+def test_destination_names_cover_every_defined_destination() -> None:
+    """Including one no rule targets for the content at hand."""
+    assert _policy().destination_names() == {"archive", "backup"}
+    assert SEED_POLICY.destination_names() == frozenset()
+
+
 def test_retention_defaults_to_retain() -> None:
     """Content no retention rule matches has no rule, which means keep the original."""
     policy = _policy()

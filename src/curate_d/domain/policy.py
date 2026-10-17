@@ -3,8 +3,8 @@
 Destinations are named targets. Placement rules map facts to the destinations content
 should have copies at; every matching rule contributes, so policies compose. Retention is
 separate: an original is kept unless a retention rule explicitly permits release, and even
-then only once enough strongly verified copies exist — counting the original itself when
-the policy says it is one of the copies.
+then only once enough strongly verified copies exist at destinations the policy defines —
+counting the original itself when the policy says it is one of the copies.
 """
 
 from collections.abc import Mapping
@@ -122,6 +122,14 @@ class PlacementPolicy(DomainModel):
     def destination(self, name: str) -> DestinationConfig | None:
         """A destination by name."""
         return next((d for d in self.destinations if d.name == name), None)
+
+    def destination_names(self) -> frozenset[str]:
+        """Return the names of the destinations this policy defines.
+
+        These are the destinations the destination checks verify, so only copies at them
+        count toward source release.
+        """
+        return frozenset(d.name for d in self.destinations)
 
     def desired_destinations(self, facts: Facts) -> tuple[str, ...]:
         """Every destination a matching rule asks for, in a stable order."""
