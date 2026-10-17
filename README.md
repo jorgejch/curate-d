@@ -110,7 +110,8 @@ make lint              # ruff check + format check + workflow database-access au
 make typecheck         # mypy, strict
 make test              # isolated unit tests + 80% coverage gate
 make coverage          # unit coverage data in curate-d.coverage, importable by PyCharm
-make test-integration  # integration tests (needs the local stack)
+make test-stack        # only PostgreSQL, RustFS and rclone, migrated, for integration tests
+make test-integration  # integration tests (needs make test-stack, not stack-up)
 make check             # lint + typecheck + test; PRs also run the full integration suite
 make image             # build the container image
 ```
