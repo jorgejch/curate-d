@@ -10,6 +10,7 @@ WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "integration.yml"
 COMPOSE = REPOSITORY_ROOT / "compose.yaml"
 API_APP = REPOSITORY_ROOT / "src" / "curate_d" / "api" / "app.py"
 WORKER_MAIN = REPOSITORY_ROOT / "src" / "curate_d" / "worker" / "main.py"
+MAKEFILE = REPOSITORY_ROOT / "Makefile"
 
 type Document = dict[str, object]
 
@@ -40,6 +41,23 @@ def _index(name: str) -> int:
 def _suite_command() -> str:
     """Return the integration suite's pytest command."""
     return cast(str, _steps()[_index("Integration suite")]["run"])
+
+
+def _test_stack_recipe() -> str:
+    """Return the `test-stack` target's recipe lines from the Makefile."""
+    lines = MAKEFILE.read_text(encoding="utf-8").splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("test-stack:"))
+    recipe = []
+    for line in lines[start + 1 :]:
+        if not line.startswith("\t"):
+            break
+        recipe.append(line.strip())
+    return "\n".join(recipe)
+
+
+def _expanded(run: str) -> str:
+    """Return a step's script, with `make test-stack` replaced by its Makefile recipe."""
+    return run.replace("make test-stack", _test_stack_recipe())
 
 
 def test_the_job_keeps_the_required_check_name() -> None:
@@ -93,11 +111,23 @@ def test_no_application_service_runs_beside_the_suite() -> None:
     """A worker's persisted schedules would tick in the test process, on the suite's version."""
     suite = _index("Integration suite")
     assert _index("Start the application services") > suite
+    started = False
     for step in _steps()[:suite]:
-        run = cast(str, step.get("run", ""))
-        if "docker compose up" in run:
-            assert "postgres rustfs rclone" in run, step["name"]
-            assert all(name not in run for name in ("api", "worker")), step["name"]
+        for line in _expanded(cast(str, step.get("run", ""))).splitlines():
+            if "compose" in line and " up " in line:
+                started = True
+                assert "postgres rustfs rclone" in line, step["name"]
+                assert " api" not in line and "worker" not in line, step["name"]
+    assert started
+
+
+def test_test_stack_stops_the_application_services_before_it_starts_the_rest() -> None:
+    """A stack-up's API and workers would tick their schedules beside a local suite."""
+    recipe = _test_stack_recipe().splitlines()
+    assert "stop api worker-io worker-cpu" in recipe[0]
+    assert "up -d --wait" in recipe[1]
+    assert "rustfs-init" in recipe[2]
+    assert "alembic upgrade head" in recipe[3]
 
 
 def test_the_stack_is_removed_on_every_outcome() -> None:

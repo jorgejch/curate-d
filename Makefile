@@ -42,11 +42,16 @@ coverage: ## Unit coverage data in curate-d.coverage, importable by PyCharm
 # in when none is exported; none of these services reads it.
 TEST_STACK_COMPOSE = CURATE_D_CREDENTIAL_ENCRYPTION_KEY="$${CURATE_D_CREDENTIAL_ENCRYPTION_KEY:-MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=}" docker compose
 
+# integration.yml sets both: `--no-build` is a no-op for these image-only services, and uv's
+# would block a developer whose platform has no wheel for a dependency.
+TEST_STACK_UP_FLAGS ?=
+TEST_STACK_UV_FLAGS ?= --locked
+
 test-stack: ## Start only the integration suite's services (PostgreSQL, RustFS, rclone) and migrate
 	$(TEST_STACK_COMPOSE) stop api worker-io worker-cpu
-	$(TEST_STACK_COMPOSE) up -d --wait postgres rustfs rclone
+	$(TEST_STACK_COMPOSE) up -d --wait $(TEST_STACK_UP_FLAGS) postgres rustfs rclone
 	$(TEST_STACK_COMPOSE) run --rm rustfs-init
-	uv run alembic upgrade head
+	uv run $(TEST_STACK_UV_FLAGS) alembic upgrade head
 
 # Integration coverage deliberately does not count toward the floor: these tests are
 # slower and flakier, and letting them cover the gap would hide untested edge cases.
