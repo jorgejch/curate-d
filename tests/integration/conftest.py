@@ -38,11 +38,21 @@ def _latest_version(settings: Settings) -> str | None:
 
 
 def _restore_latest_version(settings: Settings, previous: str, suite_version: str) -> None:
-    """Promote `previous` again if the suite's version is still DBOS's latest."""
+    """Promote `previous` again if the suite's version is still DBOS's latest.
+
+    Raises:
+        RuntimeError: Reading or promoting the latest version failed; the message names
+            the command that restores it by hand.
+    """
     client = dbos_app.client(settings, retry_connection_errors=False)
     try:
         if client.get_latest_application_version()["version_name"] == suite_version:
             promote.promote(client, settings, previous)
+    except Exception as exc:
+        raise RuntimeError(
+            f"could not hand DBOS's latest version back to {previous!r} from the suite's "
+            f"{suite_version!r}; run `python -m curate_d.runtime.promote {previous}`"
+        ) from exc
     finally:
         client.destroy()
 
@@ -74,7 +84,8 @@ def _isolate_application_version(settings: Settings) -> Iterator[None]:
     version nothing runs once the suite exits. So the latest version found before the
     first test is promoted again after the last, through the operator's own command, if
     the suite's version still holds it. A database with no version yet has nothing to
-    restore: the stack's first launch on it registers its own version as latest.
+    restore: the stack's first launch on it registers its own version as latest. Nor
+    does one whose latest is another run's `+test.` version, which nothing serves.
     """
     original = dbos_app.APPLICATION_VERSION
     suite_version = f"{original}+test.{uuid4().hex[:8]}"
@@ -84,7 +95,9 @@ def _isolate_application_version(settings: Settings) -> Iterator[None]:
         yield
     finally:
         dbos_app.APPLICATION_VERSION = original
-        if previous is not None:
+        # Another run's suite version, left latest by a concurrent or older suite, has no
+        # executor once that run exits: promoting it again would strand the stack too.
+        if previous is not None and "+test." not in previous:
             _restore_latest_version(settings, previous, suite_version)
 
 
