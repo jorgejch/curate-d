@@ -40,17 +40,13 @@ make test          # unit suite, coverage floor
 
 `make format` fixes formatting and autofixable lint. Run it, then re-run `make lint`.
 
-For integration tests, run the files the fix touches when Docker is available. Start only
-what the suite talks to, as `integration.yml` does, not `make stack-up`: launched workers
-apply the persisted schedules and run them against the test database.
+For integration tests, run the files the fix touches when Docker is available. `make
+test-stack` starts only what the suite talks to, migrated, as `integration.yml` does; never
+`make stack-up`, whose workers apply the persisted schedules and run them against the test
+database.
 
 ```bash
-# Compose requires it for every service and the suite encrypts with it: integration.yml's
-# public dummy key, unless the session already has one set.
-export CURATE_D_CREDENTIAL_ENCRYPTION_KEY="${CURATE_D_CREDENTIAL_ENCRYPTION_KEY:-MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=}"
-docker compose up -d --wait postgres rustfs rclone
-docker compose run --rm rustfs-init
-uv run alembic upgrade head
+make test-stack
 uv run pytest tests/integration/test_<area>.py --no-cov -m integration --staging-backend=rustfs
 ```
 

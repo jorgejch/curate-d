@@ -1,1 +1,1 @@
-"""Integration tests requiring the local stack (`make stack-up`)."""
+"""Integration tests requiring the local stack (`make test-stack`)."""

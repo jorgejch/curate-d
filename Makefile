@@ -3,8 +3,8 @@
 # flags. Pull requests also run `test-integration`'s suite, with RustFS as the only staging
 # backend.
 
-.PHONY: help install lint format typecheck test coverage test-integration check staging-init \
-	lifecycle-check stack-up stack-down stack-reset migrate image
+.PHONY: help install lint format typecheck test coverage test-stack test-integration check \
+	staging-init lifecycle-check stack-up stack-down stack-reset migrate image
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -33,9 +33,29 @@ test: ## Isolated unit suite with the coverage gate, in parallel
 coverage: ## Unit coverage data in curate-d.coverage, importable by PyCharm
 	COVERAGE_FILE=curate-d.coverage uv run pytest -n auto tests/unit
 
+# Only what the suite talks to, migrated, as integration.yml starts it: never the API and
+# workers. A launched worker applies the persisted schedules, and every DBOS process, the
+# suite's included, then fires them onto the version the suite's fixtures make latest: a
+# recovery or refresh tick would run against the test rows. So it starts from stack-reset,
+# which destroys any earlier stack-up's containers, schedules and data. Compose
+# interpolates the encryption key for every service, so integration.yml's public dummy stands
+# in when none is exported; none of these services reads it.
+TEST_STACK_COMPOSE = CURATE_D_CREDENTIAL_ENCRYPTION_KEY="$${CURATE_D_CREDENTIAL_ENCRYPTION_KEY:-MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=}" docker compose
+
+# integration.yml sets both: `--no-build` is a no-op for these image-only services, and uv's
+# would block a developer whose platform has no wheel for a dependency.
+TEST_STACK_UP_FLAGS ?=
+TEST_STACK_UV_FLAGS ?= --locked
+
+test-stack: ## Reset the local stack, then start only the integration suite's services and migrate
+	$(MAKE) stack-reset
+	$(TEST_STACK_COMPOSE) up -d --wait $(TEST_STACK_UP_FLAGS) postgres rustfs rclone
+	$(TEST_STACK_COMPOSE) run --rm rustfs-init
+	uv run $(TEST_STACK_UV_FLAGS) alembic upgrade head
+
 # Integration coverage deliberately does not count toward the floor: these tests are
 # slower and flakier, and letting them cover the gap would hide untested edge cases.
-test-integration: ## Integration suite (needs the local stack); no coverage gate
+test-integration: ## Integration suite (needs `make test-stack`); no coverage gate
 	uv run pytest tests/integration --no-cov -m integration
 
 check: lint typecheck test ## Lint, type check and unit suite; PRs add the integration suite
@@ -75,4 +95,4 @@ stack-down: ## Stop the local stack, keeping its data
 	docker compose down
 
 stack-reset: ## Destroy the local stack and its data
-	docker compose down -v
+	$(TEST_STACK_COMPOSE) down -v
