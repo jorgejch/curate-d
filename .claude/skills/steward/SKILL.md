@@ -45,6 +45,9 @@ what the suite talks to, as `integration.yml` does, not `make stack-up`: launche
 apply the persisted schedules and run them against the test database.
 
 ```bash
+# Compose requires it for every service and the suite encrypts with it: integration.yml's
+# public dummy key, unless the session already has one set.
+export CURATE_D_CREDENTIAL_ENCRYPTION_KEY="${CURATE_D_CREDENTIAL_ENCRYPTION_KEY:-MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=}"
 docker compose up -d --wait postgres rustfs rclone
 docker compose run --rm rustfs-init
 uv run alembic upgrade head
