@@ -87,11 +87,11 @@ jobs:
       # Also runs when the unit step failed on the floor, so the analysis shows the
       # coverage that failed it; the job stays red either way. A fork's pull request has
       # no SONAR_TOKEN, a secret its author cannot supply. Every other run is scanned, so
-      # a missing token fails the job instead of skipping the analysis.
+      # a missing token fails the job instead of skipping the analysis. A Dependabot run
+      # gets no Actions secrets and reads the Dependabot secret of the same name.
       - name: SonarQube scan
         if: >-
           ${{ !cancelled() && hashFiles('coverage.xml') != '' &&
-          github.actor != 'dependabot[bot]' &&
           (github.event_name != 'pull_request' ||
           github.event.pull_request.head.repo.full_name == github.repository) }}
         uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0

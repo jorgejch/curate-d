@@ -94,3 +94,18 @@ def test_the_scan_skips_only_fork_pull_requests() -> None:
     """A fork's PR has no SONAR_TOKEN; any other run without one must fail, not skip."""
     condition = cast(str, _step("checks", "SonarQube scan")["if"])
     assert "github.event.pull_request.head.repo.full_name == github.repository" in condition
+    assert "hashFiles('coverage.xml') != ''" in condition
+    # Dependabot has its own SONAR_TOKEN secret; skipping by actor would leave its PRs
+    # without the analysis the ruleset requires.
+    assert "github.actor" not in condition
+    assert "github.triggering_actor" not in condition
+
+
+def test_no_checkout_leaves_the_token_on_disk() -> None:
+    """Code under test must not read the workflow token from the working copy's Git config."""
+    for job_id in ("checks", "coverage-report"):
+        steps = _steps(job_id)
+        checkouts = [s for s in steps if str(s.get("uses", "")).startswith("actions/checkout@")]
+        assert checkouts, job_id
+        for step in checkouts:
+            assert cast(Document, step["with"]).get("persist-credentials") is False, job_id
