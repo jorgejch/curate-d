@@ -104,7 +104,8 @@ def test_a_ci_sized_lifecycle_budget_fails_before_the_suite() -> None:
 
 def test_migrations_run_before_the_application_services_start() -> None:
     """DBOS must not launch against a schema Alembic is still changing."""
-    assert _index("Apply migrations") < _index("Start the application services")
+    migrations = "Start PostgreSQL, RustFS and rclone, and apply migrations"
+    assert _index(migrations) < _index("Start the application services")
 
 
 def test_no_application_service_runs_beside_the_suite() -> None:
@@ -114,11 +115,25 @@ def test_no_application_service_runs_beside_the_suite() -> None:
     started = False
     for step in _steps()[:suite]:
         for line in _expanded(cast(str, step.get("run", ""))).splitlines():
-            if "compose" in line and " up " in line:
+            if "compose" in line.lower() and " up " in line:
                 started = True
                 assert "postgres rustfs rclone" in line, step["name"]
                 assert " api" not in line and "worker" not in line, step["name"]
     assert started
+
+
+def test_ci_starts_the_suites_services_with_the_developers_target() -> None:
+    """CI and a local run start the same services, so neither can drift from the other."""
+    suite = _index("Integration suite")
+    assert any("make test-stack" in cast(str, s.get("run", "")) for s in _steps()[:suite])
+
+
+def test_ci_keeps_its_image_and_lockfile_guarantees_through_the_target() -> None:
+    """CI must build nothing and install only the locked dependencies."""
+    step = _steps()[_index("Start PostgreSQL, RustFS and rclone, and apply migrations")]
+    env = cast(Document, step["env"])
+    assert env["TEST_STACK_UP_FLAGS"] == "--no-build"
+    assert env["TEST_STACK_UV_FLAGS"] == "--locked --no-build"
 
 
 def test_test_stack_stops_the_application_services_before_it_starts_the_rest() -> None:
