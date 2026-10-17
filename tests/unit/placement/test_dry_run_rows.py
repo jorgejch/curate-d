@@ -1,20 +1,34 @@
-"""Dry-run items survive their row, and rclone clients are kept per event loop."""
+"""Dry-run headers and items survive their rows, and rclone clients are kept per event loop."""
 
 import asyncio
 from datetime import UTC, datetime
 from uuid import uuid4
 
+import pytest
+from pydantic import ValidationError
+
 from curate_d.domain import (
     ContentObjectId,
+    DestinationConfig,
     DryRunOutcome,
     Facts,
     MediaKind,
+    PlacementPolicy,
+    PolicySource,
     Provider,
     RejectedValue,
     TaxonomyField,
     VerificationLevel,
 )
-from curate_d.placement.dry_run import DryRunItem, _item_values, _to_item
+from curate_d.placement.dry_run import (
+    DryRun,
+    DryRunItem,
+    DryRunRequest,
+    _item_values,
+    _run_values,
+    _to_item,
+    _to_run,
+)
 from curate_d.placement.remotes import RcloneAccess, remote_name
 
 
@@ -47,6 +61,62 @@ def test_an_unresolved_item_keeps_its_reason_and_rejected_values() -> None:
         rejected_values=(RejectedValue(field=TaxonomyField.CATEGORY, value="Pets"),),
     )
     assert _to_item(_item_values(item)) == item
+
+
+def test_an_item_keeps_the_rules_that_selected_it() -> None:
+    """Rule names come back in the order they were recorded."""
+    item = DryRunItem(
+        run_id=uuid4(),
+        content_object_id=ContentObjectId(uuid4()),
+        destination_name="lib",
+        outcome=DryRunOutcome.PROPOSED,
+        rules=("everything", "photos"),
+    )
+    assert _item_values(item)["rules"] == ["everything", "photos"]
+    assert _to_item(_item_values(item)) == item
+
+
+def test_a_header_round_trips_through_its_row() -> None:
+    """The policy source, version, rules and draft documents come back as they went in."""
+    header = DryRun(
+        id=uuid4(),
+        started_at=datetime(2026, 10, 11, 8, tzinfo=UTC),
+        template_version="draft-2",
+        taxonomy_version=3,
+        policy_source=PolicySource.DRAFT,
+        policy_rules=("photos",),
+        templates_draft=True,
+        policy_document={"destinations": [], "rules": [], "retention": []},
+        templates_document={"version": "draft-2", "templates": []},
+    )
+    row = _run_values(header)
+    assert row["policy_source"] == "draft"
+    assert _to_run(row) == header
+
+
+def test_a_header_recorded_before_policy_sources_reads_back_without_one() -> None:
+    """Older rows have no source, no rules and no drafts."""
+    header = DryRun(
+        id=uuid4(),
+        started_at=datetime(2026, 9, 30, 8, tzinfo=UTC),
+        template_version="seed-1",
+        taxonomy_version=1,
+    )
+    row = _run_values(header) | {"policy_source": None, "policy_rules": None}
+    assert _to_run(row) == header
+
+
+def test_a_request_refuses_a_draft_policy_with_named_destinations() -> None:
+    """Named destinations ignore the rules a draft would be tried for."""
+    destination = DestinationConfig(
+        name="lib", provider=Provider.PCLOUD, account="1", root_path="/Org"
+    )
+    with pytest.raises(ValidationError, match="cannot be combined"):
+        DryRunRequest(
+            run_id=uuid4(),
+            destinations=(destination,),
+            policy=PlacementPolicy(destinations=(destination,)),
+        )
 
 
 async def test_each_event_loop_gets_its_own_rclone_client() -> None:

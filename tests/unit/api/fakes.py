@@ -15,7 +15,7 @@ from curate_d.api.app import create_app
 from curate_d.api.audit import History
 from curate_d.api.backends import Backends
 from curate_d.api.connections import StartedAuthorization
-from curate_d.api.dry_runs import DryRunStatus
+from curate_d.api.dry_runs import DryRunDrafts, DryRunStatus
 from curate_d.api.errors import NotFoundError, RejectedError
 from curate_d.api.jobs import FailedUnit, Jobs, Progress, Spend
 from curate_d.api.review import Entry, Promoted
@@ -227,13 +227,17 @@ class FakeAudit:
 
 @dataclass
 class FakeDryRuns:
-    """Runs by id; records what was started."""
+    """Runs by id; records what was started, or refuses every start with `refusal`."""
 
     runs: dict[UUID, tuple[DryRunStatus, list[DryRunItem]]] = field(default_factory=dict)
+    drafted: dict[UUID, DryRunDrafts] = field(default_factory=dict)
     started: list[DryRunRequest] = field(default_factory=list)
+    refusal: RejectedError | None = None
 
     async def start(self, request: DryRunRequest) -> str:
-        """Record the request."""
+        """Record the request, or raise `refusal`."""
+        if self.refusal is not None:
+            raise self.refusal
         self.started.append(request)
         return f"dry-run:{request.run_id}"
 
@@ -246,6 +250,10 @@ class FakeDryRuns:
     async def items(self, run_id: UUID) -> Sequence[DryRunItem]:
         """The run's items."""
         return self.runs[run_id][1] if run_id in self.runs else []
+
+    async def drafts(self, run_id: UUID) -> DryRunDrafts:
+        """Return the run's drafts, or none."""
+        return self.drafted.get(run_id, DryRunDrafts())
 
 
 @dataclass

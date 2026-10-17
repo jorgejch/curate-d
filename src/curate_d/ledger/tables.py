@@ -44,6 +44,7 @@ from curate_d.domain import (
     HashAlgorithm,
     MediaKind,
     PlacementState,
+    PolicySource,
     Provider,
     ReviewReason,
     ReviewStatus,
@@ -615,6 +616,49 @@ dry_runs = Table(
     Column("finished_at", DateTime(timezone=True), nullable=True),
     Column("template_version", Text, nullable=False),
     Column("taxonomy_version", Integer, nullable=False),
+    Column(
+        "policy_source",
+        Text,
+        nullable=True,
+        comment="Where the placement rules came from; null for runs recorded before it was.",
+    ),
+    Column(
+        "policy_version",
+        Integer,
+        nullable=True,
+        comment="The policy version in force that the run evaluated with; null for a draft "
+        "or named destinations.",
+    ),
+    Column(
+        "policy_rules",
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+        comment="The names of the placement rules evaluated, in policy order.",
+    ),
+    Column(
+        "templates_draft",
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+        comment="Whether the run rendered with a draft template set.",
+    ),
+    Column(
+        "policy_document",
+        JSONB,
+        nullable=True,
+        comment="The draft policy evaluated, so the run stays reviewable; null otherwise.",
+    ),
+    Column(
+        "templates_document",
+        JSONB,
+        nullable=True,
+        comment="The draft template set rendered with; null otherwise.",
+    ),
+    CheckConstraint(
+        enum_check("policy_source", *(member.value for member in PolicySource)),
+        name="policy_source_known",
+    ),
     comment="One evaluation of what placement would do, persisted for export.",
 )
 
@@ -648,6 +692,14 @@ dry_run_items = Table(
         nullable=False,
         server_default=text("'[]'::jsonb"),
         comment="Taxonomy values refused for this content, to inform refinement.",
+    ),
+    Column(
+        "rules",
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+        comment="The placement rules that selected this destination; empty when the run "
+        "named its destinations.",
     ),
     PrimaryKeyConstraint("run_id", "content_object_id", "destination_name"),
     CheckConstraint(

@@ -2,8 +2,11 @@
 
 from dataclasses import replace
 
-from curate_d.api.configuration import OPERATOR_HEADER
-from curate_d.domain import ConfigurationKind
+import pytest
+
+from curate_d.api.configuration import OPERATOR_HEADER, check_submission
+from curate_d.api.errors import RejectedError
+from curate_d.domain import ConfigurationKind, PlacementPolicy, PlacementRule
 from curate_d.rendering.templates import SEED_TEMPLATES
 from tests.unit.api.fakes import FakeConfiguration, backends, client
 
@@ -87,3 +90,15 @@ def test_history_of_an_unknown_kind_is_refused() -> None:
     """Only the three kinds exist."""
     with client() as http:
         assert http.get("/configuration/layouts/history").status_code == 422
+
+
+def test_a_submission_is_checked_as_its_stored_form() -> None:
+    """A valid document comes back parsed; one built past its validators is refused."""
+    assert check_submission(ConfigurationKind.TEMPLATES, SEED_TEMPLATES) == SEED_TEMPLATES
+    unchecked = PlacementPolicy.model_construct(
+        destinations=(),
+        rules=(PlacementRule(name="x", destinations=("nowhere",)),),
+        retention=(),
+    )
+    with pytest.raises(RejectedError, match="invalid policy configuration"):
+        check_submission(ConfigurationKind.POLICY, unchecked)

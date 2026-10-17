@@ -96,6 +96,30 @@ The control plane SHALL expose the results of a dry run in a form suitable for r
 - **WHEN** a user requests results for a dry run identifier that does not exist
 - **THEN** the control plane reports that no such run exists
 
+### Requirement: Dry run against a draft policy
+
+The control plane SHALL accept, when starting a dry run, a whole draft placement policy and optionally a draft template set, and SHALL evaluate the run with them instead of the versions in force. A draft SHALL be validated as a configuration change of its kind is validated, and SHALL NOT be stored as a configuration version. A run's status SHALL record what it evaluated with: the policy version in force, a draft, or the destinations the run named; and whether the template set was a draft. The export SHALL name, for each proposed destination, the policy rules that selected it, and SHALL count every rule of the evaluated policy, including one that selected nothing.
+
+#### Scenario: Draft policy evaluated
+- **WHEN** a user starts a dry run with a draft policy
+- **THEN** the run reports the locators the draft's rules produce
+- **AND** its status records that it evaluated a draft
+- **AND** the policy version in force and the policy's version history are unchanged
+
+#### Scenario: Invalid draft refused
+- **WHEN** a user starts a dry run with a draft that a configuration change of its kind would refuse
+- **THEN** the control plane refuses the request with each problem located
+- **AND** no run starts
+
+#### Scenario: Draft policy combined with named destinations
+- **WHEN** a user starts a dry run with both a draft policy and named destinations
+- **THEN** the control plane refuses the request, because named destinations ignore the policy's rules
+
+#### Scenario: Export names the selecting rule
+- **WHEN** a user exports a dry run evaluated with a policy's rules
+- **THEN** each item names the rules that selected its destination
+- **AND** every rule of the evaluated policy is counted, a rule that selected nothing as zero
+
 ### Requirement: Runtime throughput adjustment
 
 The control plane SHALL allow a user to view and adjust the concurrency and rate limits governing each stage of work while the system is running, without redeployment. Adjusted values SHALL persist across worker restarts and SHALL NOT be overwritten by worker startup.
