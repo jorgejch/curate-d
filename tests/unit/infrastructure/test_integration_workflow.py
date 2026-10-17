@@ -136,10 +136,10 @@ def test_ci_keeps_its_image_and_lockfile_guarantees_through_the_target() -> None
     assert env["TEST_STACK_UV_FLAGS"] == "--locked --no-build"
 
 
-def test_test_stack_stops_the_application_services_before_it_starts_the_rest() -> None:
-    """A stack-up's API and workers would tick their schedules beside a local suite."""
+def test_test_stack_resets_the_stack_before_it_starts_the_rest() -> None:
+    """A stack-up's API, workers and persisted schedules would tick beside a local suite."""
     recipe = _test_stack_recipe().splitlines()
-    assert "stop api worker-io worker-cpu" in recipe[0]
+    assert "stack-reset" in recipe[0]
     assert "up -d --wait" in recipe[1]
     assert "rustfs-init" in recipe[2]
     assert "alembic upgrade head" in recipe[3]

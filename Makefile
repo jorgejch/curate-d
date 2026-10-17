@@ -34,10 +34,10 @@ coverage: ## Unit coverage data in curate-d.coverage, importable by PyCharm
 	COVERAGE_FILE=curate-d.coverage uv run pytest -n auto tests/unit
 
 # Only what the suite talks to, migrated, as integration.yml starts it: never the API and
-# workers, so stack-up's are stopped. A launched worker applies the persisted schedules, and
-# every DBOS process, the suite's included, then fires them onto the version the suite's
-# fixtures make latest: a recovery or refresh tick would run against the test rows. Schedules
-# an earlier stack-up wrote stay in the database; stack-reset clears them. Compose
+# workers. A launched worker applies the persisted schedules, and every DBOS process, the
+# suite's included, then fires them onto the version the suite's fixtures make latest: a
+# recovery or refresh tick would run against the test rows. So it starts from stack-reset,
+# which destroys any earlier stack-up's containers, schedules and data. Compose
 # interpolates the encryption key for every service, so integration.yml's public dummy stands
 # in when none is exported; none of these services reads it.
 TEST_STACK_COMPOSE = CURATE_D_CREDENTIAL_ENCRYPTION_KEY="$${CURATE_D_CREDENTIAL_ENCRYPTION_KEY:-MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=}" docker compose
@@ -47,8 +47,8 @@ TEST_STACK_COMPOSE = CURATE_D_CREDENTIAL_ENCRYPTION_KEY="$${CURATE_D_CREDENTIAL_
 TEST_STACK_UP_FLAGS ?=
 TEST_STACK_UV_FLAGS ?= --locked
 
-test-stack: ## Start only the integration suite's services (PostgreSQL, RustFS, rclone) and migrate
-	$(TEST_STACK_COMPOSE) stop api worker-io worker-cpu
+test-stack: ## Reset the local stack, then start only the integration suite's services and migrate
+	$(MAKE) stack-reset
 	$(TEST_STACK_COMPOSE) up -d --wait $(TEST_STACK_UP_FLAGS) postgres rustfs rclone
 	$(TEST_STACK_COMPOSE) run --rm rustfs-init
 	uv run $(TEST_STACK_UV_FLAGS) alembic upgrade head
@@ -95,4 +95,4 @@ stack-down: ## Stop the local stack, keeping its data
 	docker compose down
 
 stack-reset: ## Destroy the local stack and its data
-	docker compose down -v
+	$(TEST_STACK_COMPOSE) down -v

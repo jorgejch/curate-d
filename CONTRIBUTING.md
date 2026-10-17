@@ -79,9 +79,9 @@ cleanup of unrelated code.
   the full suite.
 - **Don't run them against `make stack-up`.** Its workers apply the persisted schedules, and
   the suite's own DBOS process then fires them: a recovery or refresh tick runs against the
-  test rows. `make test-stack` stops the API and workers. Schedules an earlier `stack-up`
-  wrote stay in the database, so run `make stack-reset` (it destroys the local data) before
-  a run that must match CI's.
+  test rows. `make test-stack` runs `make stack-reset` first, which destroys the
+  local stack's containers and data (including schedules an earlier `stack-up` wrote), so
+  the suite starts from a clean database as in CI.
 
 ## Code conventions
 
