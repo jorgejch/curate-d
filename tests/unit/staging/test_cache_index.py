@@ -236,6 +236,13 @@ def test_entry_lock_ids_separate_distinct_keys() -> None:
     assert len(ids) == 64
 
 
+def test_two_distinct_keys_can_share_an_entry_lock() -> None:
+    """The lock space is four bytes, so a reader can wait behind a key it never asked for."""
+    first, second = key_for(0xEAE7), key_for(0x12388)
+    assert first != second
+    assert entry_lock_id(first) == entry_lock_id(second)
+
+
 @pytest.mark.parametrize("seed", [0, 1, 2**127, 2**64 - 1])
 def test_entry_lock_ids_fit_a_postgres_integer(seed: int) -> None:
     """Advisory lock arguments are int4; an out-of-range value would fail at the server."""

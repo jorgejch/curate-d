@@ -23,7 +23,10 @@ the lock to admission plus registration, with a reservation row carrying the int
 between them — is a different design whose crash semantics need their own evidence.
 Revisit when measured upload concurrency, rather than speculation, shows it binding. The
 `staging.writer_lock_held` and `staging.reader_lock_wait` log events are that measurement
-(see `docs/staging.md`).
+(see `docs/staging.md`). The entry locks alone can be narrowed without the reservation
+row: reclaiming in a writer-lock holding that commits before the admitting one starts
+ends them at that commit, while the writer lock still covers admission, upload and
+registration. That too waits for the measurement (#1, #4).
 
 What this bounds is active staged content. It is not a provider billing cap: incomplete
 multipart uploads bill separately and are reclaimed by explicit abort and the backend's
