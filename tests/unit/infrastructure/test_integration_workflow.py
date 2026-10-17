@@ -10,6 +10,7 @@ WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "integration.yml"
 COMPOSE = REPOSITORY_ROOT / "compose.yaml"
 API_APP = REPOSITORY_ROOT / "src" / "curate_d" / "api" / "app.py"
 WORKER_MAIN = REPOSITORY_ROOT / "src" / "curate_d" / "worker" / "main.py"
+MAKEFILE = REPOSITORY_ROOT / "Makefile"
 
 type Document = dict[str, object]
 
@@ -40,6 +41,23 @@ def _index(name: str) -> int:
 def _suite_command() -> str:
     """Return the integration suite's pytest command."""
     return cast(str, _steps()[_index("Integration suite")]["run"])
+
+
+def _test_stack_recipe() -> str:
+    """Return the `test-stack` target's recipe lines from the Makefile."""
+    lines = MAKEFILE.read_text(encoding="utf-8").splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("test-stack:"))
+    recipe = []
+    for line in lines[start + 1 :]:
+        if not line.startswith("\t"):
+            break
+        recipe.append(line.strip())
+    return "\n".join(recipe)
+
+
+def _expanded(run: str) -> str:
+    """Return a step's script, with `make test-stack` replaced by its Makefile recipe."""
+    return run.replace("make test-stack", _test_stack_recipe())
 
 
 def test_the_job_keeps_the_required_check_name() -> None:
@@ -86,18 +104,45 @@ def test_a_ci_sized_lifecycle_budget_fails_before_the_suite() -> None:
 
 def test_migrations_run_before_the_application_services_start() -> None:
     """DBOS must not launch against a schema Alembic is still changing."""
-    assert _index("Apply migrations") < _index("Start the application services")
+    migrations = "Start PostgreSQL, RustFS and rclone, and apply migrations"
+    assert _index(migrations) < _index("Start the application services")
 
 
 def test_no_application_service_runs_beside_the_suite() -> None:
     """A worker's persisted schedules would tick in the test process, on the suite's version."""
     suite = _index("Integration suite")
     assert _index("Start the application services") > suite
+    started = False
     for step in _steps()[:suite]:
-        run = cast(str, step.get("run", ""))
-        if "docker compose up" in run:
-            assert "postgres rustfs rclone" in run, step["name"]
-            assert all(name not in run for name in ("api", "worker")), step["name"]
+        for line in _expanded(cast(str, step.get("run", ""))).splitlines():
+            if "compose" in line.lower() and " up " in line:
+                started = True
+                assert "postgres rustfs rclone" in line, step["name"]
+                assert " api" not in line and "worker" not in line, step["name"]
+    assert started
+
+
+def test_ci_starts_the_suites_services_with_the_developers_target() -> None:
+    """CI and a local run start the same services, so neither can drift from the other."""
+    suite = _index("Integration suite")
+    assert any("make test-stack" in cast(str, s.get("run", "")) for s in _steps()[:suite])
+
+
+def test_ci_keeps_its_image_and_lockfile_guarantees_through_the_target() -> None:
+    """CI must build nothing and install only the locked dependencies."""
+    step = _steps()[_index("Start PostgreSQL, RustFS and rclone, and apply migrations")]
+    env = cast(Document, step["env"])
+    assert env["TEST_STACK_UP_FLAGS"] == "--no-build"
+    assert env["TEST_STACK_UV_FLAGS"] == "--locked --no-build"
+
+
+def test_test_stack_resets_the_stack_before_it_starts_the_rest() -> None:
+    """A stack-up's API, workers and persisted schedules would tick beside a local suite."""
+    recipe = _test_stack_recipe().splitlines()
+    assert "stack-reset" in recipe[0]
+    assert "up -d --wait" in recipe[1]
+    assert "rustfs-init" in recipe[2]
+    assert "alembic upgrade head" in recipe[3]
 
 
 def test_the_stack_is_removed_on_every_outcome() -> None:

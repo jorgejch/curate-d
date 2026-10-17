@@ -19,7 +19,7 @@ async def test_required_extensions_are_installed(ledger_engine: AsyncEngine) -> 
         installed = {row[0] for row in result}
 
     assert installed >= REQUIRED_EXTENSIONS, (
-        f"missing extensions: {sorted(REQUIRED_EXTENSIONS - installed)}. Run `make stack-up`."
+        f"missing extensions: {sorted(REQUIRED_EXTENSIONS - installed)}. Run `make test-stack`."
     )
 
 

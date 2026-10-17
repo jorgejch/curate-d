@@ -95,17 +95,16 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # Only what the suite talks to: the API and the workers wait until it is done (see the
-      # header).
-      - name: Start PostgreSQL, RustFS and rclone
-        run: |
-          docker compose up -d --wait --no-build postgres rustfs rclone
-          docker compose run --rm rustfs-init
-
-      # Before the API and workers start, so DBOS never launches against a schema Alembic
-      # is still changing. The DSN `Settings` defaults to is the published 5433.
-      - name: Apply migrations
-        run: uv run --locked --no-build alembic upgrade head
+      # `make test-stack`, the same target developers run: only what the suite talks to,
+      # then the migrations, so the API and workers wait until the suite is done (see the
+      # header) and DBOS never launches against a schema Alembic is still changing. The DSN
+      # `Settings` defaults to is the published 5433. The flags keep CI's image and lockfile
+      # guarantees: nothing is built, and the lock must match.
+      - name: Start PostgreSQL, RustFS and rclone, and apply migrations
+        env:
+          TEST_STACK_UP_FLAGS: --no-build
+          TEST_STACK_UV_FLAGS: --locked --no-build
+        run: make test-stack
 
       # Serial: the suite shares one database and tests advisory locks across independent
       # connections. RustFS is the only staging backend here; OVH verification stays

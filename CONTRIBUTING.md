@@ -19,9 +19,9 @@ Install the [system dependencies](README.md#system-dependencies) (uv, Python 3.1
 tesseract, rclone), then:
 
 ```bash
-make install    # project + dev group
-make stack-up   # PostgreSQL, RustFS, rclone, API and workers, for integration tests
-make help       # every target
+make install      # project + dev group
+make test-stack   # for integration tests; destroys the local stack's data first
+make help         # every target
 ```
 
 ## How a change is made
@@ -72,9 +72,16 @@ cleanup of unrelated code.
 - **A test isn't written until it has run green**, along with the whole unit suite. Lint and
   type checks passing proves nothing about behaviour. Fix whichever of the code or the test
   is wrong; never delete, loosen or skip an assertion to get a pass.
-- **Integration tests** (`make test-integration`) need the local stack. While developing, run
-  the ones your change touches (`uv run pytest tests/integration/test_<area>.py --no-cov -m
-  integration`); every pull request runs the full suite.
+- **Integration tests** (`make test-integration`) need `make test-stack` first. While
+  developing, run the ones your change touches (`uv run pytest
+  tests/integration/test_<area>.py --no-cov -m integration --staging-backend=rustfs`; without
+  the flag, staging tests also need the OVH fixture's credentials); every pull request runs
+  the full suite.
+- **Don't run them against `make stack-up`.** Its workers apply the persisted schedules, and
+  the suite's own DBOS process then fires them: a recovery or refresh tick runs against the
+  test rows. `make test-stack` runs `make stack-reset` first, which destroys the
+  local stack's containers and data (including schedules an earlier `stack-up` wrote), so
+  the suite starts from a clean database as in CI.
 
 ## Code conventions
 
