@@ -40,12 +40,21 @@ make test          # unit suite, coverage floor
 
 `make format` fixes formatting and autofixable lint. Run it, then re-run `make lint`.
 
-For integration tests, run the files the fix touches when Docker and the stack are available
-(`make stack-up`, then `uv run pytest tests/integration/test_<area>.py --no-cov -m
-integration --staging-backend=rustfs`, as CI does: without the flag, staging tests also
-select OVH, which needs credentials a session usually lacks). When the stack can't come up
-in the session, say so in the reply or PR comment instead of claiming integration coverage,
-and let the PR's `Integration tests` run be the proof.
+For integration tests, run the files the fix touches when Docker is available. Start only
+what the suite talks to, as `integration.yml` does, not `make stack-up`: launched workers
+apply the persisted schedules and run them against the test database.
+
+```bash
+docker compose up -d --wait postgres rustfs rclone
+docker compose run --rm rustfs-init
+uv run alembic upgrade head
+uv run pytest tests/integration/test_<area>.py --no-cov -m integration --staging-backend=rustfs
+```
+
+Without `--staging-backend=rustfs`, staging tests also select OVH, which needs credentials
+a session usually lacks. When the stack can't come up in the session, say so in the reply
+or PR comment instead of claiming integration coverage, and let the PR's `Integration
+tests` run be the proof.
 
 For a CI failure, reproduce it locally first with the failing job's exact command, then show
 it passing.
@@ -85,8 +94,13 @@ it passing.
 - **Stay within the files the PR's change names.** No drive-by reformatting, import
   reordering or cleanup of unrelated code, even when a reviewer points at it: reply that it
   belongs in its own change.
-- **Leave these threads open for the repo owner** and put the question to them: security
-  findings, data-safety questions (can this release an original, skip verification or alter
+- **Security findings** stay out of public discussion (`SECURITY.md`): don't add details,
+  reproductions or a proposed exploit path to the thread. Reply in one line that it goes to
+  the owner privately, raise it with them outside the PR (in your session, or through
+  [private vulnerability reporting](https://github.com/jorgejch/curate-d/security/advisories/new)),
+  and leave the thread open for them.
+- **Leave these threads open for the repo owner** and put the question to them:
+  data-safety questions (can this release an original, skip verification or alter
   a placement?), anything that departs from the `dbos-python` skill, and any request to use
   a library's private internals.
 - **Comments that mention `@claude`** start the Claude Code GitHub Action (`claude.yml`),
