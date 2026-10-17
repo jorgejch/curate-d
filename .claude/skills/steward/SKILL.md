@@ -18,7 +18,8 @@ A PR into `dev` (or `main`, for a release) merges when all of these hold:
 - **`Integration tests`** is green: the full integration suite against the whole local
   stack (`integration.yml`).
 - The branch is **up to date with its base**. The ruleset requires it, so a PR that is only
-  behind `dev`, with no conflict, is still blocked: merge `origin/dev` into the head and push.
+  behind `dev`, with no conflict, is still blocked: bring `origin/dev` in (see Commits for
+  rebase or merge) and push.
 
 Both check names are required by the ruleset and pinned by tests; never rename them. The
 SonarQube scan runs inside `Checks`. Treat its quality-gate findings as review-bot
@@ -53,8 +54,11 @@ it passing.
 - Each commit is one logical change. The commit's type comes from what it changes, not from
   the fact that a review asked for it: a renamed variable is `refactor:`, an added test is
   `test:`.
-- Never rewrite history on a branch someone else pushed to. Merge `origin/dev` in instead of
-  rebasing. Regenerate `uv.lock` with `uv lock`, never by hand.
+- To bring a branch up to date with `dev`, prefer a rebase: `git fetch origin dev`, `git
+  rebase origin/dev`, re-run the pre-push checks on the rebased head, then `git push
+  --force-with-lease`. Rebase only a branch you created and no one else has pushed to. On a
+  branch someone else pushed to, merge `origin/dev` in instead: never rewrite their history.
+- Resolve a conflict in `uv.lock` by regenerating it with `uv lock`, never by hand.
 
 ## Review comments
 
