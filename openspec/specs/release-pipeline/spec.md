@@ -87,7 +87,7 @@ the suite's application version. The job MUST then wait until each is ready: the
 its readiness route answers, and each worker until it logs `worker.ready`, the event its
 startup ends on. Since a worker logs it even when it left its schedules to another
 version, the job MUST then check that the image's version is DBOS's latest and that the
-stored schedules are exactly the declared ones. The job MUST fail if a job-wide lifecycle
+stored schedules are exactly the declared ones, each under its declared cron. The job MUST fail if a job-wide lifecycle
 observation budget is set.
 
 #### Scenario: Suite runs on a pull request
@@ -110,8 +110,9 @@ observation budget is set.
 - **THEN** the job fails, and its logs name the service
 
 #### Scenario: Workers leave their schedules unapplied
-- **WHEN** the workers are ready but the image's version is not DBOS's latest, or a declared
-  schedule is missing or an undeclared one is stored
+- **WHEN** the workers are ready but the image's version is not DBOS's latest, a declared
+  schedule is missing, an undeclared one is stored, or a stored one's cron is not its
+  declared one
 - **THEN** the job fails, naming the latest version or the schedules that differ
 
 #### Scenario: Worker hangs in startup
