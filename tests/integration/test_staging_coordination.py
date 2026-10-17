@@ -387,7 +387,7 @@ async def test_a_reader_behind_a_reclaiming_writer_reports_its_wait(
             return held
 
     with capture_logs() as events:
-        async with other_index.writer_lock("test"):
+        async with other_index.writer_lock("occupancy.reserve"):
             assert await other_index.reconcile(store) == 1
             reader = asyncio.create_task(read())
             with pytest.raises(TimeoutError):
@@ -399,6 +399,10 @@ async def test_a_reader_behind_a_reclaiming_writer_reports_its_wait(
     assert waits[0]["staging_key"] == str(key)
     assert waits[0]["registered"] is True
     assert waits[0]["wait_seconds"] > _BLOCKED_FOR / 2
+    # The holding that blocked the reader reports the one entry lock it held.
+    held = [e for e in events if e["event"] == "staging.writer_lock_held"]
+    assert [(e["caller"], e["entry_claims"]) for e in held] == [("occupancy.reserve", 1)]
+    assert held[0]["held_seconds"] >= _BLOCKED_FOR
 
 
 async def test_an_unblocked_reader_of_a_missing_key_reports_a_miss(
@@ -434,3 +438,38 @@ async def test_writer_lock_events_report_one_pods_hold_as_the_others_wait(
     assert set(held) == {"occupancy.sweep", "index.register"}
     assert held["occupancy.sweep"]["held_seconds"] >= _BLOCKED_FOR
     assert held["index.register"]["wait_seconds"] > _BLOCKED_FOR / 2
+
+
+async def test_a_holding_reports_every_entry_it_evicted(
+    index: PostgresStagingCacheIndex, other_index: PostgresStagingCacheIndex, new_key: KeyIssuer
+) -> None:
+    """Each evicted key's entry lock is held until the holding commits."""
+    evicted = [staged(new_key()), staged(new_key())]
+    for obj in evicted:
+        await index.register(obj)
+
+    with capture_logs() as events:
+        async with other_index.writer_lock("occupancy.reserve"):
+            for obj in evicted:
+                assert await other_index.evict(obj.key) == obj
+
+    held = [e for e in events if e["event"] == "staging.writer_lock_held"]
+    assert [(e["caller"], e["entry_claims"]) for e in held] == [("occupancy.reserve", 2)]
+
+
+async def test_a_claim_a_reader_refused_is_not_counted(
+    index: PostgresStagingCacheIndex, other_index: PostgresStagingCacheIndex, new_key: KeyIssuer
+) -> None:
+    """The reader's shared lock wins the try-lock, so the writer holds nothing it could block."""
+    obj = staged(new_key())
+    await index.register(obj)
+
+    with capture_logs() as events:
+        async with (
+            index.hold_for_download(obj.key),
+            other_index.writer_lock("occupancy.sweep"),
+        ):
+            assert await other_index.evict(obj.key) is None
+
+    held = [e for e in events if e["event"] == "staging.writer_lock_held"]
+    assert [(e["caller"], e["entry_claims"]) for e in held] == [("occupancy.sweep", 0)]

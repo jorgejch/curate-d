@@ -12,18 +12,30 @@ staged bytes to the file the scan listed, whichever region the account is in.
 A registration is immutable, so staging a new version of a file first releases the old
 one. Otherwise the new upload would lose the registration race to its own predecessor and
 readers would go on receiving the old bytes under a key that now means the new ones.
+
+Each reservation logs one `staging.reservation_phases` event splitting its writer-lock
+hold into admission, upload, registration and commit, the measurement #1's deferred
+narrowing of that lock waits on (see `docs/staging.md`).
 """
 
+import asyncio
 import hashlib
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import BinaryIO
+from typing import BinaryIO, Literal
 from uuid import uuid4
 
-from curate_d.staging.errors import StagingIntegrityError
+from curate_d.observability import get_logger
+from curate_d.staging.errors import StagingCapacityExhaustedError, StagingIntegrityError
 from curate_d.staging.factories import StagingWriterBackend
 from curate_d.staging.keys import StagingKey
 from curate_d.staging.objects import StagedObject
+from curate_d.staging.occupancy import AdmissionReport
+
+type ReservationOutcome = Literal["registered", "refused", "cancelled", "failed"]
+
+logger = get_logger(__name__)
 
 
 class Sha1Reader:
@@ -45,6 +57,64 @@ class Sha1Reader:
     def hexdigest(self) -> str:
         """SHA-1 of everything read so far."""
         return self._digest.hexdigest()
+
+
+@dataclass
+class _ReservationPhases:
+    """Monotonic marks across one reservation, reported as `staging.reservation_phases`.
+
+    A mark is None until its phase ends. A phase that a failure or a cancellation cut
+    short runs to the moment the reservation ended, rollback included, so the phases of
+    any reservation that was admitted add up to its hold.
+    """
+
+    key: StagingKey
+    declared_bytes: int
+    admission: AdmissionReport | None = None
+    entered: float | None = None
+    uploaded: float | None = None
+    registered: float | None = None
+    committed: float | None = None
+
+    def admit(self, admission: AdmissionReport) -> None:
+        """Record the admission the reservation yielded and start the upload phase."""
+        self.admission = admission
+        self.entered = time.monotonic()
+
+    def report(self, outcome: ReservationOutcome, error: BaseException | None = None) -> None:
+        """Log the reservation's phases and how it ended."""
+        ended = time.monotonic()
+
+        def span(start: float | None, end: float | None) -> float | None:
+            """Return a phase's duration, None when it never started."""
+            return None if start is None else (ended if end is None else end) - start
+
+        reclaimed = None if self.admission is None else self.admission.reclaimed
+        logger.info(
+            "staging.reservation_phases",
+            staging_key=str(self.key),
+            declared_bytes=self.declared_bytes,
+            outcome=outcome,
+            error=None if error is None else type(error).__name__,
+            admission_seconds=(
+                None if self.admission is None else self.admission.admission_seconds
+            ),
+            upload_seconds=span(self.entered, self.uploaded),
+            registration_seconds=span(self.uploaded, self.registered),
+            commit_seconds=span(self.registered, self.committed),
+            evicted=None if reclaimed is None else len(reclaimed.evicted),
+            protected=None if reclaimed is None else len(reclaimed.protected),
+            orphans_deleted=None if reclaimed is None else reclaimed.orphans_deleted,
+        )
+
+
+def _outcome_of(error: BaseException, *, admitted: bool) -> ReservationOutcome:
+    """Classify how a reservation that raised `error` ended."""
+    if isinstance(error, asyncio.CancelledError):
+        return "cancelled"
+    if isinstance(error, StagingCapacityExhaustedError) and not admitted:
+        return "refused"
+    return "failed"
 
 
 @dataclass(frozen=True)
@@ -75,13 +145,23 @@ async def publish(
         sha256="",
         created_at=datetime.now(UTC),
     )
-    async with backend.occupancy.reserve(size_bytes):
-        staged = await backend.store.upload(
-            target,
-            reader,  # type: ignore[arg-type]  # only read() is used, which Sha1Reader has
-            declared_max_bytes=size_bytes,
-        )
-        await backend.index.register(staged)
+    phases = _ReservationPhases(key=key, declared_bytes=size_bytes)
+    try:
+        async with backend.occupancy.reserve(size_bytes) as admission:
+            phases.admit(admission)
+            staged = await backend.store.upload(
+                target,
+                reader,  # type: ignore[arg-type]  # only read() is used, which Sha1Reader has
+                declared_max_bytes=size_bytes,
+            )
+            phases.uploaded = time.monotonic()
+            await backend.index.register(staged)
+            phases.registered = time.monotonic()
+        phases.committed = time.monotonic()
+    except BaseException as error:
+        phases.report(_outcome_of(error, admitted=phases.entered is not None), error)
+        raise
+    phases.report("registered")
     # Looked up after the reservation ends, when the registration has committed; the
     # lookup reads on its own connection and would not see it any earlier.
     winner = await backend.index.lookup(key)
