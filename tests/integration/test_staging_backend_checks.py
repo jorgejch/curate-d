@@ -626,7 +626,7 @@ def test_rustfs_encryption_provisioning_fails_closed() -> None:
 # Where each backend's rows 30/31 observation is recorded. Only a backend listed here may
 # skip without a budget; any other still fails as PENDING.
 _RECORDED_LIFECYCLE_OBSERVATIONS = {
-    "rustfs": "observed time-scaled by `make lifecycle-check` 2026-09-26, re-run in CI",
+    "rustfs": "observed time-scaled by `make lifecycle-check` 2026-09-26",
 }
 
 

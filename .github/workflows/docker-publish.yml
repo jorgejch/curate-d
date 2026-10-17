@@ -24,25 +24,25 @@ name: Build and Publish Container
 # application version, so separate tags could leave the API enqueueing work on a version
 # no worker is running. The manifests choose behaviour with `command:`.
 
-# `check` also gates merges: it runs on pull requests and on pushes to main, where there
-# is nothing to publish, so the staging contract fails a change before it reaches main
-# rather than after. `build-and-push` stays on dev and semver tags — see its `if`.
+# The merge gate is the pull request (checks.yml and integration.yml, both required by the
+# ruleset, which also requires the branch to be up to date). dev and main only change by
+# merging one, so this workflow builds and publishes without testing again.
 on:
-  pull_request:
-    branches:
-      - main
   push:
     branches:
-      - main
       - dev
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
 
 jobs:
-  # Publishing an image that fails its own tests helps nobody, and the checks are fast
-  # enough that gating on them costs less than finding out from the cluster.
-  check:
+  build-and-push:
+    # The triggers above already exclude pull requests; this keeps a future trigger from
+    # publishing one by accident.
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/'))
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -75,195 +75,6 @@ jobs:
             echo "Bump the version in pyproject.toml, merge, then tag."
             exit 1
           fi
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v10.2.0
-        with:
-          enable-cache: true
-
-      - name: Install dependencies
-        run: uv sync --locked
-
-      - name: Lint
-        run: uv run ruff check . && uv run ruff format --check .
-
-      # No raw database access from inside a workflow: such a write is not checkpointed
-      # and re-executes on replay, which is how duplicate placements happen.
-      - name: Audit in-workflow database access
-        run: uv run python -m curate_d.runtime.workflow_audit src/curate_d
-
-      - name: Type check
-        run: uv run mypy
-
-      # Unit suite only. The integration suite needs PostgreSQL, and its coverage
-      # deliberately does not count toward the floor.
-      - name: Unit tests
-        run: uv run pytest -n auto
-
-      # This fixture uses the pinned Compose images and the same adapter suite as OVH.
-      # Selecting RustFS explicitly leaves remote verification visibly PENDING.
-      #
-      # PostgreSQL comes from the same Compose file rather than a `services:` block so
-      # that CI runs the pinned PostGIS image, the initdb extensions and the C collation
-      # developers run against, instead of a second definition free to drift from them.
-      # It publishes 5433, which is the DSN `Settings` already defaults to.
-      # The local S3 engine is named once, here: RustFS, which replaced MinIO in
-      # `replace-local-s3-engine`. The pinned digests stay in compose.yaml so CI and
-      # developers cannot drift onto different server builds.
-      - name: Start the staging fixture
-        env:
-          # Compose interpolates every service even though no application runs here.
-          # This public dummy Fernet key satisfies that interpolation only.
-          CURATE_D_CREDENTIAL_ENCRYPTION_KEY: MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=
-          STAGING_S3_SERVICE: rustfs
-          STAGING_S3_INIT_SERVICE: rustfs-init
-        run: |
-          docker compose --project-name staging-contract-ci up -d --wait postgres "$STAGING_S3_SERVICE"
-          docker compose --project-name staging-contract-ci run --rm "$STAGING_S3_INIT_SERVICE"
-
-      # The integration suite reads the applied schema, not the model metadata: a CHECK
-      # constraint that exists only in Python is not an invariant.
-      - name: Apply migrations to the fixture database
-        run: uv run alembic upgrade head
-
-      # Transaction advisory locks are re-entrant within one session, so the writer lock
-      # serializing admission, publication and eviction is only observable across
-      # independent connections. The unit suite structurally cannot cover it, which is
-      # why these two files run here rather than being folded into `uv run pytest`.
-      # Separate from the contract step so the RustFS evidence below stays a count of
-      # contract tests alone.
-      - name: Staging coordination and cache-index schema
-        run: >-
-          uv run pytest
-          tests/integration/test_staging_coordination.py
-          tests/integration/test_staging_cache_schema.py
-          --no-cov -m integration
-
-      - name: RustFS staging contract (OVH verification remains PENDING)
-        run: >-
-          uv run pytest tests/integration/test_staging_contract.py
-          --no-cov -m integration --staging-backend=rustfs
-          --junitxml=staging-contract-rustfs.xml -o junit_family=legacy
-
-      # Provisioning differences the contract suite does not cover: the access matrix
-      # under real identities, anonymous denial, storage class, encryption and lifecycle
-      # readback, explicit abort, and transport. Same backend selection as above, so OVH
-      # stays PENDING here too.
-      #
-      # Rows 30 and 31 are deselected by name rather than filtered by expression, so the
-      # two that do not run here are named in the diff instead of hiding behind a pattern.
-      # On this fixture's real clock the 7-day rule cannot fall due inside a CI run, and
-      # without a budget `_observation_budget` would only skip them on the recorded
-      # observation. They are observed in the next step instead, on a separate RustFS
-      # whose lifecycle day is scaled to one second.
-      - name: RustFS backend provisioning checks (rows 30/31 in the next step)
-        run: >-
-          uv run pytest tests/integration/test_staging_backend_checks.py
-          --no-cov -m integration --staging-backend=rustfs
-          --deselect tests/integration/test_staging_backend_checks.py::test_expiration_removes_an_aged_object
-          --deselect tests/integration/test_staging_backend_checks.py::test_stale_multipart_is_reclaimed
-          --junitxml=staging-backend-checks-rustfs.xml -o junit_family=legacy
-
-      # Real expiration and real reclamation of an abandoned upload, observed rather than
-      # inferred from a stored rule. compose.lifecycle.yaml scales only the engine's clock,
-      # in its own Compose project; the rules are the ones rustfs-init imports. The make
-      # target sets its own short budget, which is legitimate only because the day is
-      # scaled: the guard below still refuses a job-wide budget.
-      - name: RustFS lifecycle reclamation, time-scaled (rows 30/31)
-        env:
-          CURATE_D_CREDENTIAL_ENCRYPTION_KEY: MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=
-        run: >-
-          make lifecycle-check
-          LIFECYCLE_PYTEST_ARGS="--junitxml=staging-lifecycle-rustfs.xml -o junit_family=legacy"
-
-      # On a real clock a wall-clock budget cannot be satisfied by a CI job, so a job-wide
-      # one would mean someone set it small enough to pass on the unscaled fixture —
-      # turning an unobserved reclamation into green. Fail loudly instead of inheriting it.
-      - name: Refuse a CI-sized observation budget
-        if: env.CURATE_D_TEST_STAGING_LIFECYCLE_TIMEOUT_SECONDS != ''
-        run: |
-          echo "::error::CURATE_D_TEST_STAGING_LIFECYCLE_TIMEOUT_SECONDS is set in CI."
-          echo "Rows 30/31 need a multi-day observation no job outlasts; a budget short"
-          echo "enough to pass here would record unobserved reclamation as verified."
-          exit 1
-
-      - name: Record RustFS contract evidence
-        if: always()
-        run: |
-          python3 - <<'PY'
-          import os
-          from pathlib import Path
-          from xml.etree import ElementTree
-
-          def counts(path: Path, heading: str, missing: str) -> list[str]:
-              lines = ["", f"### {heading}", ""]
-              if not path.exists():
-                  return lines + [missing]
-              for suite in ElementTree.parse(path).findall(".//testsuite"):
-                  lines.append(
-                      f"Tests: {suite.get('tests')}; failures: {suite.get('failures')}; "
-                      f"errors: {suite.get('errors')}; skipped: {suite.get('skipped')}."
-                  )
-              return lines
-
-          report = Path("staging-contract-rustfs.xml")
-          lines = ["### RustFS staging contract", "", "OVH verification remains PENDING.", ""]
-          if report.exists():
-              root = ElementTree.parse(report)
-              for suite in root.findall(".//testsuite"):
-                  lines.append(
-                      f"Tests: {suite.get('tests')}; failures: {suite.get('failures')}; "
-                      f"errors: {suite.get('errors')}."
-                  )
-              for prop in root.findall(".//property[@name='sdk_checksum_headers']"):
-                  lines.extend(["", "Safe SDK checksum headers:", "```json", prop.get("value", ""), "```"])
-          else:
-              lines.append("RustFS contract did not produce a result; verification did not pass.")
-
-          # Reported separately so no count is mistaken for another, and so the rows the
-          # provisioning step deselects are named in the run rather than only here.
-          lines += counts(
-              Path("staging-backend-checks-rustfs.xml"),
-              "RustFS backend provisioning checks (rows 30/31 deselected)",
-              "Backend checks did not produce a result; verification did not pass.",
-          )
-          lines += counts(
-              Path("staging-lifecycle-rustfs.xml"),
-              "RustFS lifecycle reclamation, time-scaled (rows 30/31)",
-              "Lifecycle observation did not produce a result; rows 30/31 are not verified.",
-          )
-          lines.extend(
-              [
-                  "",
-                  "Rows 30 and 31 were observed on a RustFS whose lifecycle day is scaled to "
-                  "one second (compose.lifecycle.yaml); the rules are unchanged. On OVH they "
-                  "were observed separately.",
-              ]
-          )
-          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary:
-              summary.write("\n".join(lines) + "\n")
-          PY
-
-      - name: Remove the staging fixture
-        if: always()
-        env:
-          CURATE_D_CREDENTIAL_ENCRYPTION_KEY: MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=
-        run: docker compose --project-name staging-contract-ci down --volumes
-
-  build-and-push:
-    needs: check
-    # The triggers above also cover pull requests and main so that `check` gates merges.
-    # Neither produces a publishable image: a pull request is unmerged code, and an
-    # untagged main commit matches neither image policy. Without this, every PR would
-    # push an image built from code that may never merge.
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/'))
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v4

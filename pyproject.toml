@@ -178,9 +178,13 @@ warn_required_dynamic_aliases = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-# Default run is unit tests only, so the coverage gate measures isolated tests
-# alone. Integration coverage does not count toward the floor.
-testpaths = ["tests/unit"]
+# The whole tests tree, because SonarQube Cloud's analysis scope derives what is test
+# code from this list and ignores `sonar.tests`: anything outside it is analysed as
+# production code. The unit-only run that the coverage gate measures is therefore named
+# by path wherever it runs (`make test`, `make coverage`, checks.yml), not by this
+# default; a bare `pytest` collects the integration suite too. Integration coverage does
+# not count toward the floor.
+testpaths = ["tests"]
 addopts = """
     -ra --strict-markers --strict-config
     --cov=curate_d --cov-report=term-missing --cov-fail-under=80

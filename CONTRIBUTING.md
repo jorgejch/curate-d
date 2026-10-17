@@ -54,9 +54,11 @@ cleanup of unrelated code.
   `feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `chore:`, `spec:`, with a scope where one
   helps (`fix(recovery): ...`). Summaries are imperative and lower-case.
 - **Run `make check` before pushing.** It runs the same lint, type check and unit commands
-  as CI, so green locally means green there. Every push to a branch runs the unit suite;
-  pushes to `dev` and `main`, and pull requests into `main`, also run the staging
-  integration checks.
+  as CI, so green locally means green there. Every push to a branch runs them and uploads
+  the unit coverage to SonarQube Cloud. A pull request into `dev` or `main` must pass them
+  and the full integration suite against the local stack, and be up to date with its base,
+  before it merges; a merge runs no tests again, only the image build on `dev` and the
+  SonarQube coverage refresh.
 
 ## Tests
 
@@ -72,7 +74,7 @@ cleanup of unrelated code.
   is wrong; never delete, loosen or skip an assertion to get a pass.
 - **Integration tests** (`make test-integration`) need the local stack. While developing, run
   the ones your change touches (`uv run pytest tests/integration/test_<area>.py --no-cov -m
-  integration`); CI runs the full suite.
+  integration`); every pull request runs the full suite.
 
 ## Code conventions
 

@@ -1,6 +1,7 @@
-# Developer entry points. CI runs the same commands as `lint`, `typecheck`, `test` and
-# `lifecycle-check`, so a green `make check` locally means CI's lint, type and unit checks
-# pass with the same flags.
+# Developer entry points. CI runs the same commands as `lint`, `typecheck` and `test`, so a
+# green `make check` locally means CI's lint, type and unit checks pass with the same
+# flags. Pull requests also run `test-integration`'s suite, with RustFS as the only staging
+# backend.
 
 .PHONY: help install lint format typecheck test coverage test-integration check staging-init \
 	lifecycle-check stack-up stack-down stack-reset migrate image
@@ -25,19 +26,19 @@ typecheck: ## Strict type check
 	uv run mypy
 
 test: ## Isolated unit suite with the coverage gate, in parallel
-	uv run pytest -n auto
+	uv run pytest -n auto tests/unit
 
 # PyCharm imports the coverage.py data file itself (Run | Manage Coverage Reports) and
 # writes a same-named .xml beside it on import.
 coverage: ## Unit coverage data in curate-d.coverage, importable by PyCharm
-	COVERAGE_FILE=curate-d.coverage uv run pytest -n auto
+	COVERAGE_FILE=curate-d.coverage uv run pytest -n auto tests/unit
 
 # Integration coverage deliberately does not count toward the floor: these tests are
 # slower and flakier, and letting them cover the gap would hide untested edge cases.
 test-integration: ## Integration suite (needs the local stack); no coverage gate
 	uv run pytest tests/integration --no-cov -m integration
 
-check: lint typecheck test ## Lint, type check and unit suite; CI adds staging integration
+check: lint typecheck test ## Lint, type check and unit suite; PRs add the integration suite
 
 stack-up: ## Start the local stack (PostgreSQL, RustFS, API and workers) and wait for it
 	docker compose up -d --wait

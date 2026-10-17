@@ -927,7 +927,8 @@ async def _register_newer(engine: AsyncEngine, version: str) -> None:
             text(
                 "INSERT INTO dbos.application_versions"
                 " (version_id, version_name, version_timestamp, application_name)"
-                " SELECT :id, :v, max(version_timestamp) + 1, :app FROM dbos.application_versions"
+                " SELECT :id, :v, COALESCE(max(version_timestamp), 0) + 1, :app"
+                " FROM dbos.application_versions"
             ),
             {
                 "id": str(uuid4()),

@@ -1,0 +1,139 @@
+name: Checks
+
+# Lint, type check and the unit suite, with its coverage uploaded to SonarQube Cloud.
+#
+#   push to a feature branch  -> `checks`, and a SonarQube analysis of that branch
+#   pull request to dev/main  -> `checks` (a required check), and a SonarQube PR analysis
+#   push to dev or main       -> `coverage-report`: the unit suite and a branch analysis
+#
+# The merge gate is the pull request: dev and main only change by merging one, and the
+# ruleset requires it to be up to date, so a push to them re-runs nothing that gates.
+# `coverage-report` exists because SonarQube Cloud keeps PR analyses apart from branch
+# analyses; without it the long-lived branches' coverage would never move. It gates
+# nothing, and docker-publish.yml does not wait for it.
+#
+# The integration suite runs in integration.yml, on pull requests only. A `branches`
+# filter alone leaves tags out.
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+    branches:
+      - dev
+      - main
+
+# A newer push to the same branch, or to the same PR, supersedes the run in progress.
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    # The ruleset requires this check by name: renaming it leaves every pull request
+    # waiting on a check that never reports. Pinned by test_checks_workflow.py.
+    name: Checks
+    if: >-
+      ${{ !(github.event_name == 'push' &&
+      (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main')) }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          # Full history: SonarQube tells new code from old by SCM blame.
+          fetch-depth: 0
+          # No later step authenticates to the remote, so the token is not left on disk.
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+
+      # `--no-build`: dependencies install from the lockfile's wheels, never by running a
+      # source distribution's build scripts.
+      - name: Install dependencies
+        run: uv sync --locked --no-build
+
+      - name: Lint
+        run: uv run --locked --no-build ruff check . && uv run --locked --no-build ruff format --check .
+
+      # No raw database access from inside a workflow: such a write is not checkpointed
+      # and re-executes on replay, which is how duplicate placements happen.
+      - name: Audit in-workflow database access
+        run: uv run --locked --no-build python -m curate_d.runtime.workflow_audit src/curate_d
+
+      - name: Type check
+        run: uv run --locked --no-build mypy
+
+      # The same run as `make test`: unit tests only, named by path because pytest's
+      # testpaths covers the whole tests tree, with the 80% floor from pyproject.toml.
+      # The XML report is for SonarQube alone.
+      - name: Unit tests
+        run: uv run --locked --no-build pytest -n auto --cov-report=xml tests/unit
+
+      - name: Cache SonarQube packages
+        if: ${{ !cancelled() && hashFiles('coverage.xml') != '' }}
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-sonar
+          restore-keys: ${{ runner.os }}-sonar
+
+      # Also runs when the unit step failed on the floor, so the analysis shows the
+      # coverage that failed it; the job stays red either way. A fork's pull request has
+      # no SONAR_TOKEN, a secret its author cannot supply. Every other run is scanned, so
+      # a missing token fails the job instead of skipping the analysis.
+      - name: SonarQube scan
+        if: >-
+          ${{ !cancelled() && hashFiles('coverage.xml') != '' &&
+          github.actor != 'dependabot[bot]' &&
+          (github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  coverage-report:
+    # A merge into dev or main: the pull request already ran lint, type check and both
+    # suites, so this only refreshes the branch's coverage in SonarQube Cloud.
+    name: Coverage report
+    if: >-
+      ${{ github.event_name == 'push' &&
+      (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked --no-build
+
+      - name: Unit tests
+        run: uv run --locked --no-build pytest -n auto --cov-report=xml tests/unit
+
+      - name: Cache SonarQube packages
+        if: ${{ !cancelled() && hashFiles('coverage.xml') != '' }}
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-sonar
+          restore-keys: ${{ runner.os }}-sonar
+
+      - name: SonarQube scan
+        if: ${{ !cancelled() && hashFiles('coverage.xml') != '' }}
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
