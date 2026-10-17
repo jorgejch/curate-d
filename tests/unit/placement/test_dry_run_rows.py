@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from curate_d.domain import (
     ContentObjectId,
+    DestinationIdentity,
     DryRunOutcome,
     Facts,
     MediaKind,
@@ -24,6 +25,9 @@ def test_a_proposed_item_round_trips_through_its_row() -> None:
         run_id=uuid4(),
         content_object_id=ContentObjectId(uuid4()),
         destination_name="lib",
+        destination_id=DestinationIdentity(
+            provider=Provider.PCLOUD, account="acct-1", root_path="/lib"
+        ).id,
         outcome=DryRunOutcome.PROPOSED,
         paths=("/a/x.jpg", "/b/x.jpg"),
         facts=Facts(

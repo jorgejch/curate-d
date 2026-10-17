@@ -5,7 +5,7 @@ was later revised appears with the revision after it. The placements as they sta
 are reported beside it, with the verification each reached.
 """
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Annotated, Protocol
 
 from fastapi import APIRouter, Depends, Request
@@ -19,10 +19,18 @@ from curate_d.domain import (
     AuditValue,
     ContentObject,
     ContentObjectId,
+    DestinationId,
+    DestinationIdentity,
     Placement,
     PlacementState,
+    Provider,
 )
-from curate_d.ledger import AuditRepository, ContentObjectRepository, PlacementRepository
+from curate_d.ledger import (
+    AuditRepository,
+    ContentObjectRepository,
+    DestinationRepository,
+    PlacementRepository,
+)
 
 
 class Event(BaseModel):
@@ -37,10 +45,18 @@ class Event(BaseModel):
 
 
 class PlacementView(BaseModel):
-    """A placement as it stands, and how strongly its copy was verified."""
+    """A placement as it stands, where its copy is, and how strongly it was verified.
+
+    `destination` is the policy's name for it when it was last placed; the provider,
+    account and root say where the copy actually is.
+    """
 
     id: str
     destination: str
+    destination_id: DestinationId
+    provider: Provider | None = None
+    account: str | None = None
+    root_path: str | None = None
     locator: str
     state: PlacementState
     verification_level: str
@@ -71,11 +87,17 @@ def event_of(entry: AuditEntry) -> Event:
     )
 
 
-def placement_of(placement: Placement) -> PlacementView:
-    """The response for a placement."""
+def placement_of(
+    placement: Placement, identity: DestinationIdentity | None = None
+) -> PlacementView:
+    """The response for a placement, at `identity` when its destination row was read."""
     return PlacementView(
         id=str(placement.id),
         destination=placement.destination_name,
+        destination_id=placement.destination_id,
+        provider=None if identity is None else identity.provider,
+        account=None if identity is None else identity.account,
+        root_path=None if identity is None else identity.root_path,
         locator=placement.locator,
         state=placement.state,
         verification_level=placement.verification_level.name.lower(),
@@ -85,15 +107,20 @@ def placement_of(placement: Placement) -> PlacementView:
 
 
 def history_of(
-    content: ContentObject, placements: Sequence[Placement], entries: Sequence[AuditEntry]
+    content: ContentObject,
+    placements: Sequence[Placement],
+    entries: Sequence[AuditEntry],
+    destinations: Mapping[DestinationId, DestinationIdentity] | None = None,
 ) -> History:
-    """A content object's history, its placements ordered by destination."""
+    """A content object's history, its placements ordered by destination name, then identity."""
+    known = destinations or {}
+    ordered = sorted(placements, key=lambda p: (p.destination_name, str(p.destination_id)))
     return History(
         content_object_id=content.id,
         fingerprint=f"{content.fingerprint.algorithm.value}:{content.fingerprint.digest}",
         size_bytes=content.size_bytes,
         media_type=content.media_type,
-        placements=[placement_of(p) for p in sorted(placements, key=lambda p: p.destination_name)],
+        placements=[placement_of(p, known.get(p.destination_id)) for p in ordered],
         events=[event_of(entry) for entry in entries],
     )
 
@@ -146,4 +173,7 @@ class LedgerAudit:
             entries = await AuditRepository(connection).history_for_content_object(
                 content_object_id
             )
-        return history_of(content, placements, entries)
+            destinations = await DestinationRepository(connection).get_many(
+                [p.destination_id for p in placements]
+            )
+        return history_of(content, placements, entries, destinations)

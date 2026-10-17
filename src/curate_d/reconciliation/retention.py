@@ -10,13 +10,15 @@ whose level is later found weaker changes it.
 Nothing here releases anything: the decision is recorded, with its inputs and rule.
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from enum import StrEnum
 
 from pydantic import Field
 
 from curate_d.domain import (
     AuditValue,
+    DestinationId,
+    DestinationIdentity,
     DomainModel,
     Placement,
     PlacementState,
@@ -42,10 +44,13 @@ class RetentionDecision(DomainModel):
     source_counts_as_copy: bool | None = None
     minimum_level: VerificationLevel | None = None
     strong_copies: tuple[str, ...] = Field(
-        default=(), description="Destinations holding a copy that counts."
+        default=(),
+        description="Destinations holding a copy that counts, each as its name and identity.",
     )
     weak_copies: tuple[str, ...] = Field(
-        default=(), description="Destinations holding a present copy too weakly verified to count."
+        default=(),
+        description="Destinations holding a present copy too weakly verified to count, each "
+        "as its name and identity.",
     )
 
     def audit_details(self) -> dict[str, AuditValue]:
@@ -64,10 +69,30 @@ class RetentionDecision(DomainModel):
         }
 
 
+def copy_label(
+    placement: Placement, destinations: Mapping[DestinationId, DestinationIdentity]
+) -> str:
+    """Return how a decision names a copy: its destination's name, then its identity.
+
+    Two copies recorded under one name at different accounts or roots read apart. A copy
+    whose identity was not given is named by its destination's name alone.
+    """
+    identity = destinations.get(placement.destination_id)
+    if identity is None:
+        return placement.destination_name
+    return f"{placement.destination_name} [{identity.label()}]"
+
+
 def decide_retention(
-    rule: RetentionRule | None, placements: Sequence[Placement]
+    rule: RetentionRule | None,
+    placements: Sequence[Placement],
+    destinations: Mapping[DestinationId, DestinationIdentity] | None = None,
 ) -> RetentionDecision:
-    """Decide retention for one content object from its rule and its placements."""
+    """Decide retention for one content object from its rule and its placements.
+
+    `destinations` gives the identity each placement's copy is at, to name the copies.
+    """
+    known = destinations or {}
     if rule is None:
         return RetentionDecision(
             outcome=RetentionOutcome.RETAIN,
@@ -90,8 +115,8 @@ def decide_retention(
         if p.verification_level.permits_source_release
         and p.verification_level >= rule.minimum_level
     ]
-    strong = tuple(sorted(p.destination_name for p in counts))
-    weak = tuple(sorted(p.destination_name for p in present if p not in counts))
+    strong = tuple(sorted(copy_label(p, known) for p in counts))
+    weak = tuple(sorted(copy_label(p, known) for p in present if p not in counts))
     decided = base.model_copy(update={"strong_copies": strong, "weak_copies": weak})
     if len(strong) >= rule.required_copies:
         return decided.model_copy(

@@ -15,13 +15,20 @@ from curate_d.domain import (
     AuditEntry,
     AuditEntryType,
     ContentObject,
+    DestinationConfig,
     HashAlgorithm,
     Placement,
     PlacementState,
+    Provider,
     StrongFingerprint,
     VerificationLevel,
 )
-from curate_d.ledger import AuditRepository, ContentObjectRepository, PlacementRepository
+from curate_d.ledger import (
+    AuditRepository,
+    ContentObjectRepository,
+    DestinationRepository,
+    PlacementRepository,
+)
 from curate_d.ledger.tables import content_objects, placements
 
 pytestmark = pytest.mark.integration
@@ -51,10 +58,15 @@ async def test_history_is_ordered_and_shows_placements_with_their_verification(
                 media_type="image/jpeg",
             )
         )
+        library = DestinationConfig(
+            name=f"lib-{tag}", provider=Provider.PCLOUD, account=f"acct-{tag}", root_path="/lib"
+        )
+        await DestinationRepository(connection).ensure(library.identity)
         placed = await PlacementRepository(connection).upsert(
             Placement.build(
                 content_object_id=content.id,
-                destination_name=f"lib-{tag}",
+                destination_id=library.id,
+                destination_name=library.name,
                 locator=f"/lib-{tag}/x.jpg",
                 template_version="seed-1",
             ).model_copy(
@@ -104,6 +116,12 @@ async def test_history_is_ordered_and_shows_placements_with_their_verification(
     assert (placement["state"], placement["verification_level"]) == (
         "present",
         "strong_common_hash",
+    )
+    assert placement["destination_id"] == str(library.id)
+    assert (placement["provider"], placement["account"], placement["root_path"]) == (
+        "pcloud",
+        f"acct-{tag}",
+        "/lib",
     )
 
 

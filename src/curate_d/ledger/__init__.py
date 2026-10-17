@@ -9,6 +9,7 @@ from curate_d.ledger.change_detection import (
 from curate_d.ledger.repository import (
     AuditRepository,
     ContentObjectRepository,
+    DestinationRepository,
     PlacementRepository,
     SourceObjectRepository,
 )
@@ -19,6 +20,7 @@ __all__ = [
     "ChangeAssessment",
     "ChangeVerdict",
     "ContentObjectRepository",
+    "DestinationRepository",
     "ListedFile",
     "PlacementRepository",
     "SourceObjectRepository",

@@ -24,8 +24,8 @@ from curate_d.domain import (
     ConnectionHealth,
     ConnectionState,
     ContentObject,
-    Destination,
     DestinationConfig,
+    DestinationIdentity,
     DomainModel,
     Facts,
     GeoPoint,
@@ -91,14 +91,12 @@ _SAMPLES: tuple[DomainModel, ...] = (
         media_type="image/heic",
         perceptual_fingerprint=PerceptualFingerprint(value=7),
     ),
-    Destination(
-        name="pcloud-organized",
-        provider="pcloud",
-        account="acct-1",
-        root_path="/Organized",
-    ),
+    DestinationIdentity(provider=Provider.PCLOUD, account="acct-1", root_path="/Organized"),
     Placement.build(
         content_object_id=_CONTENT_ID,
+        destination_id=DestinationIdentity(
+            provider=Provider.PCLOUD, account="acct-1", root_path="/Organized"
+        ).id,
         destination_name="pcloud-organized",
         locator="/Organized/2026/img.heic",
         template_version="v1",

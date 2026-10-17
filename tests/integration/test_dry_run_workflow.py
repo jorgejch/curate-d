@@ -117,6 +117,7 @@ async def test_a_dry_run_proposes_locators_and_levels_and_places_nothing(
         proposed = ours[f"/Camera/{dated.name}"]
         assert proposed.outcome is DryRunOutcome.PROPOSED
         assert proposed.destination_name == destination.name
+        assert proposed.destination_id == destination.id
         assert proposed.locator == "/Organized/Photos/2024/2024-05/IMG_0001.JPG"
         assert proposed.expected_level is VerificationLevel.STRONG_COMMON_HASH
         assert proposed.facts is not None
@@ -128,7 +129,9 @@ async def test_a_dry_run_proposes_locators_and_levels_and_places_nothing(
         assert "captured_at" in failed.reason
 
         assert await _counts(ledger_engine, content_ids) == before  # type: ignore[arg-type]
-        assert [w for w, _ in await pipeline.workflows("placement:") if destination.name in w] == []
+        assert [
+            w for w, _ in await pipeline.workflows("placement:") if str(destination.id) in w
+        ] == []
 
 
 async def test_a_locator_proposed_for_other_content_is_taken(
@@ -196,6 +199,7 @@ async def test_a_locator_proposed_for_other_content_is_taken(
                             run_id=earlier,
                             content_object_id=ContentObjectId(uuid4()),
                             destination_name=destination.name,
+                            destination_id=destination.id,
                             outcome=DryRunOutcome.PROPOSED,
                             locator=rendered,
                         )
@@ -212,6 +216,68 @@ async def test_a_locator_proposed_for_other_content_is_taken(
             finally:
                 await transaction.rollback()
         assert item.locator == disambiguate(rendered, first_content.fingerprint)
+
+
+async def test_one_template_in_two_accounts_is_proposed_plain_at_both(
+    settings: Settings, ledger_engine: AsyncEngine, tmp_path: Path, run_id: UUID
+) -> None:
+    """Two destinations with one root in different accounts do not take each other's paths.
+
+    Two photos render to one locator: at each destination the earlier id keeps it and the
+    later is suffixed, exactly as if the other destination did not exist.
+    """
+    async with running_pipeline(settings, ledger_engine, tmp_path) as pipeline:
+        camera = ("Canon", f"EOS {pipeline.account}")
+        taken = datetime(2024, 5, 1, 9, 30)  # noqa: DTZ001 - EXIF wall-clock time
+        for folder, seed in (("Camera", 1), ("Phone", 3)):
+            pipeline.pcloud.file(
+                f"/{folder}/IMG_0001.JPG",
+                media.photo(camera=camera, taken=taken, offset="+02:00", seed=seed),
+            )
+        await _scan(pipeline)
+        first, second = sorted(
+            ContentObjectId(s.content_object_id)
+            for s in await pipeline.sources()
+            if s.content_object_id is not None
+        )
+        tag = uuid4().hex[:8]
+        destinations = tuple(
+            DestinationConfig(
+                name=f"dry-{side}-{tag}",
+                provider=Provider.PCLOUD,
+                account=f"{pipeline.account}-{side}",
+                root_path="/Organized",
+            )
+            for side in ("a", "b")
+        )
+        rendered = "/Organized/Photos/2024/2024-05/IMG_0001.JPG"
+
+        await start_dry_run(DryRunRequest(run_id=run_id, destinations=destinations))
+        await pipeline.settle()
+
+        async with ledger_engine.connect() as connection:
+            items = [
+                item
+                for item in await DryRunStore(connection).items(run_id)
+                if item.content_object_id in (first, second)
+            ]
+            second_content = await ContentObjectRepository(connection).get(second)
+        assert second_content is not None
+        suffixed = disambiguate(rendered, second_content.fingerprint)
+        assert sorted(
+            (
+                item.destination_id == destinations[1].id,
+                item.content_object_id == second,
+                item.locator,
+            )
+            for item in items
+        ) == [
+            (False, False, rendered),
+            (False, True, suffixed),
+            (True, False, rendered),
+            (True, True, suffixed),
+        ]
+        assert {i.outcome for i in items} == {DryRunOutcome.PROPOSED}
 
 
 async def test_a_repeated_dry_run_request_runs_once(

@@ -23,6 +23,9 @@ _CONTENT = ContentObjectId(uuid4())
 _LOCATOR = "/lib/Photos/2024/a.jpg"
 
 
+_LIB = DestinationConfig(name="lib", provider=Provider.PCLOUD, account="1", root_path="/lib")
+
+
 def _target(state: PlacementState | None, *, locator: str = _LOCATOR) -> Target:
     """A target at `_LOCATOR`, with a placement in `state` at `locator`, or none."""
     existing = (
@@ -30,6 +33,7 @@ def _target(state: PlacementState | None, *, locator: str = _LOCATOR) -> Target:
         if state is None
         else Placement.build(
             content_object_id=_CONTENT,
+            destination_id=_LIB.id,
             destination_name="lib",
             locator=locator,
             template_version="seed-1",
@@ -39,9 +43,7 @@ def _target(state: PlacementState | None, *, locator: str = _LOCATOR) -> Target:
         content_object_id=_CONTENT,
         fingerprint=StrongFingerprint(algorithm=HashAlgorithm.SHA256, digest="a" * 64),
         size_bytes=10,
-        destination=DestinationConfig(
-            name="lib", provider=Provider.PCLOUD, account="1", root_path="/lib"
-        ),
+        destination=_LIB,
         locator=_LOCATOR,
         template_version="seed-1",
         existing=existing,

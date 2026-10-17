@@ -14,6 +14,7 @@ from curate_d.domain import (
     AuditEntryType,
     ChangeSignal,
     ContentObject,
+    DestinationIdentity,
     HashAlgorithm,
     PerceptualFingerprint,
     Placement,
@@ -29,10 +30,12 @@ from curate_d.ledger.mapping import (
     LedgerRowError,
     audit_entry_values,
     content_object_values,
+    destination_values,
     placement_values,
     source_object_values,
     to_audit_entry,
     to_content_object,
+    to_destination,
     to_placement,
     to_source_object,
 )
@@ -41,6 +44,7 @@ _WHEN = datetime(2026, 8, 9, 10, 11, tzinfo=UTC)
 _SOURCE_ID = uuid4()
 _CONTENT_ID = uuid4()
 _PLACEMENT_ID = uuid4()
+_ARCHIVE = DestinationIdentity(provider=Provider.PCLOUD, account="acct-1", root_path="/Archive")
 
 
 def _source_row(**overrides: object) -> ColumnValues:
@@ -182,6 +186,7 @@ def _placement_row(**overrides: object) -> ColumnValues:
     row: ColumnValues = {
         "id": _PLACEMENT_ID,
         "content_object_id": _CONTENT_ID,
+        "destination_id": _ARCHIVE.id,
         "destination_name": "archive",
         "locator": "/Archive/x.png",
         "template_version": "v1",
@@ -210,6 +215,20 @@ def test_the_verification_level_ordinal_survives_the_round_trip() -> None:
     for level in VerificationLevel:
         original: Placement = to_placement(_placement_row(verification_level=int(level)))
         assert to_placement(placement_values(original)).verification_level is level
+
+
+def test_a_placements_destination_identity_survives_the_round_trip() -> None:
+    """The identity a placement belongs to comes back as it went in."""
+    original = to_placement(_placement_row())
+    assert original.destination_id == _ARCHIVE.id
+    assert to_placement(placement_values(original)) == original
+
+
+def test_a_destination_row_becomes_its_identity() -> None:
+    """Provider, account and root round-trip, and the stored id is the derived one."""
+    values = destination_values(_ARCHIVE)
+    assert values["id"] == _ARCHIVE.id
+    assert to_destination(values) == _ARCHIVE
 
 
 def test_an_out_of_range_verification_level_is_rejected() -> None:
