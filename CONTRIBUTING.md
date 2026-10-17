@@ -20,7 +20,7 @@ tesseract, rclone), then:
 
 ```bash
 make install      # project + dev group
-make test-stack   # PostgreSQL, RustFS and rclone, migrated, for integration tests
+make test-stack   # for integration tests; destroys the local stack's data first
 make help         # every target
 ```
 
