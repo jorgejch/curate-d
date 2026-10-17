@@ -76,15 +76,21 @@ it passing.
   and `git push --force-with-lease`. Rebase only a branch you created and no one else has
   pushed to. On a branch someone else pushed to, merge `origin/<base>` in instead: never
   rewrite their history.
+- The `claude.yml` Action never merges, rebases or force-pushes: its own system prompt
+  forbids it, whatever tools it is granted. As that Action, don't attempt the update: say
+  on the PR that it is behind its base and leave it to a Claude Code session or the owner.
 - Resolve a conflict in `uv.lock` by regenerating it, never by hand: `uv lock` can't parse a
   file with conflict markers, so first `git checkout origin/<base> -- uv.lock`, then run
   `uv lock` and stage the result.
 
 ## Review comments
 
-- **Small, local asks** (a rename, a docstring, an added test, a one-function refactor):
-  implement, validate, push, then reply on the thread naming the commit SHA and resolve it.
-  Resolve a thread only once its fix is pushed.
+- **Small, local asks** (a rename, a docstring, an added test, a one-function refactor)
+  that stay within the PR's change: implement, validate, push, then reply on the thread
+  naming the commit SHA and resolve it. Resolve a thread only once its fix is pushed. The
+  PR's OpenSpec change covers them; on a simple-fix PR, only an ask that keeps it a simple
+  fix (a typo, a one-line bug fix, a doc correction) is small. Anything else goes through
+  OpenSpec: reply proposing a change instead of pushing.
 - **Docstring and comment nits** follow `CLAUDE.md`'s Docstrings section. A nit citing it
   correctly is a plainly correct nit: carry it in the next push that already changes the
   PR's files.
