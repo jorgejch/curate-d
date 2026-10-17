@@ -33,7 +33,8 @@ htmlcov/
 /curate-d.xml
 /coverage.xml
 /.mcp.json
-# Agent tool state stays local; the vendored dbos-python skill (skills-lock.json) is tracked.
+# Agent tool state stays local; the vendored dbos-python skill (skills-lock.json) and the
+# repo's own steward skill are tracked.
 /.agents/*
 !/.agents/skills/
 /.agents/skills/*
@@ -43,6 +44,7 @@ htmlcov/
 !/.claude/skills/
 /.claude/skills/*
 !/.claude/skills/dbos-python
+!/.claude/skills/steward/
 
 # Playwright MCP session artifacts
 .playwright-mcp/
