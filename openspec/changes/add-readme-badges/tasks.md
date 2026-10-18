@@ -5,7 +5,7 @@ run in order on one branch.
 
 ## 1. Badge line (`README.md`, `tests/unit/infrastructure/test_readme_badges.py`)
 
-- [ ] 1.1 Create `tests/unit/infrastructure/test_readme_badges.py`, with one test per
+- [x] 1.1 Create `tests/unit/infrastructure/test_readme_badges.py`, with one test per
   requirement in `specs/status-badges/spec.md`, parsing as design D5 describes. Run it
   against the current README and confirm that it fails, naming the missing badges and the
   missing branch-list link. Then add the line and its caption under `# curate.d` as design
@@ -21,8 +21,8 @@ run in order on one branch.
 
 ## 2. Integration checks
 
-- [ ] 2.1 Run `make lint typecheck test` and verify it passes with the coverage floor met.
-- [ ] 2.2 Run `openspec validate add-readme-badges --strict` and verify it passes.
+- [x] 2.1 Run `make lint typecheck test` and verify it passes with the coverage floor met.
+- [x] 2.2 Run `openspec validate add-readme-badges --strict` and verify it passes.
 
 ## Workflow follow-up
 
