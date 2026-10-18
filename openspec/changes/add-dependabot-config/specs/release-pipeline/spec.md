@@ -31,7 +31,7 @@ Within version updates, the `uv` ecosystem MUST group patch updates into one pul
 and open a separate pull request per minor and per major update; the `github-actions`
 ecosystem MUST group patch and minor updates into one pull request and open one per
 major; the `docker` ecosystem MUST group patch updates into one and open one per minor and
-per major. A digest-only image refresh is not a semantic level and opens individually.
+per major. A digest-only image refresh never joins a group.
 A unit test MUST pin each group's ecosystem and update types.
 
 #### Scenario: Several Python patches
@@ -46,8 +46,9 @@ A unit test MUST pin each group's ecosystem and update types.
 
 #### Scenario: Image digest refreshed under the same tag
 - **WHEN** the registry publishes a new digest for a `FROM` image's current tag
-- **THEN** a pull request updating only that digest opens on its own, outside the patch
-  group
+- **THEN** either a pull request updating only that digest opens on its own, outside the
+  patch group, or, where GitHub suppresses digest-only refreshes for versioned tags, no
+  pull request opens
 
 #### Scenario: Group loosened
 - **WHEN** a group's `update-types` gains `major`, or the `uv` patch group gains `minor`
