@@ -13,7 +13,7 @@ run in order on one branch.
   `uv run pytest tests/unit/infrastructure/test_readme_badges.py --no-cov` passing, then
   break one badge's `branch=` by hand, confirm the failure names the badge, and revert.
   Commit the test and the README together.
-- [ ] 1.2 Check every URL in the line by hand. Each image fetched with
+- [x] 1.2 Check every URL in the line by hand. Each image fetched with
   `curl -sL '<image>' | grep -oE '<title>[^<]*</title>|>[^<>]{3,40}</text>'` must render
   real values for `dev`, and the License and Status badges must show their values. Each
   link must return 200 from `curl -s -o /dev/null -w '%{http_code}' '<link>'`. Paste the
