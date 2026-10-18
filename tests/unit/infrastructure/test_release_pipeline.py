@@ -162,8 +162,7 @@ def test_the_checkout_has_the_history_the_tag_guard_needs() -> None:
 
 
 def test_the_dev_tag_is_not_gated_on_the_default_branch() -> None:
-    """dev is not the default branch, so `is_default_branch` would never fire and the
-    dev environment would never receive an image."""
+    """The dev tag names `dev`, so it survives the default branch moving to main."""
     dev_tag = next(t for t in _emitted_tags() if t.startswith("type=raw"))
     assert "is_default_branch" not in dev_tag
     assert "refs/heads/dev" in dev_tag

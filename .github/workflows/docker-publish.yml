@@ -94,8 +94,8 @@ jobs:
           tags: |
             type=semver,pattern=v{{version}}
             type=semver,pattern=v{{major}}.{{minor}}
-            # Not is_default_branch: dev is not the default branch, so that condition
-            # would never fire and the dev environment would never receive an image.
+            # Not is_default_branch: the default branch moves to main once there is a
+            # prod release, and the dev environment must keep receiving dev's images.
             type=raw,value=dev-{{date 'YYYYMMDDHHmmss'}}-{{sha}},enable=${{ github.ref == 'refs/heads/dev' }}
 
       - name: Build and push image
