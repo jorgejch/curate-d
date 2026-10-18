@@ -246,6 +246,6 @@ migrate; a failing step MUST stop it before the next.
 
 #### Scenario: Application launch after a suite
 - **WHEN** the suite has run, leaving its own application version as DBOS's latest, and an
-  API or worker image then launches on the same database
-- **THEN** the image registers its own version as latest, and the suite promotes no earlier
+  worker image then launches on the same database
+- **THEN** the worker registers its own version as latest, and the suite promotes no earlier
   version back
