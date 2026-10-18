@@ -24,6 +24,19 @@ EXPECTED_DECLARED_PATHS = [
     "tests/__init__.py",
     "conftest.py",
     "tests/conftest.py",
+    "pytest.toml",
+    ".pytest.toml",
+    "pytest.ini",
+    ".pytest.ini",
+    "tox.ini",
+    "setup.cfg",
+    "tests/pytest.toml",
+    "tests/.pytest.toml",
+    "tests/pytest.ini",
+    "tests/.pytest.ini",
+    "tests/tox.ini",
+    "tests/setup.cfg",
+    "tests/pyproject.toml",
     "infrastructure/postgres/**",
     "infrastructure/rustfs/**",
     "infrastructure/staging-compatibility.md",
@@ -41,15 +54,34 @@ EXPECTED_DECLARED_PATHS = [
     "pyproject.toml",
     "uv.lock",
     ".python-version",
+    ".env",
+    ".gitattributes",
     ".github/workflows/integration.yml",
 ]
 
 # Files a tool picks up implicitly once they exist, so they select the suite before they do:
-# the ancestor conftest.py files pytest loads for tests/integration, every override file name
-# `docker compose` merges into compose.yaml, and BuildKit's Dockerfile-specific ignore file.
+# the ancestor conftest.py files pytest loads for tests/integration, the configuration files
+# pytest prefers in tests/ or the root, every override file name `docker compose` merges into
+# compose.yaml, the .env file Compose and `Settings` read, .gitattributes, and BuildKit's
+# Dockerfile-specific ignore file.
 IMPLICIT_FILES = {
     "conftest.py",
     "tests/conftest.py",
+    "pytest.toml",
+    ".pytest.toml",
+    "pytest.ini",
+    ".pytest.ini",
+    "tox.ini",
+    "setup.cfg",
+    "tests/pytest.toml",
+    "tests/.pytest.toml",
+    "tests/pytest.ini",
+    "tests/.pytest.ini",
+    "tests/tox.ini",
+    "tests/setup.cfg",
+    "tests/pyproject.toml",
+    ".env",
+    ".gitattributes",
     "compose.override.yml",
     "compose.override.yaml",
     "docker-compose.override.yml",
@@ -326,6 +358,9 @@ def test_the_gate_detects_changes_inside_the_required_job() -> None:
     env = cast(Document, guard["env"])
     assert env["CHANGED_FILES"] == "${{ github.event.pull_request.changed_files }}"
     assert f"-ge {PULL_REQUEST_FILE_LIMIT}" in run, guard["name"]
+    # The image copies the packaging files, which select nothing: a skip needs them present.
+    for file in sorted(PACKAGING_FILES):
+        assert file in run, guard["name"]
 
     skips = []
     for step in steps[detection + 2 :]:

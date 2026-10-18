@@ -24,7 +24,8 @@ detection must fail the required check, never let the merge through unverified.
   limit.
 - The dependency set is declared once, in the workflow, as directory prefixes and exact
   files: `src/`, `tests/integration/`, `tests/stubs/`, `tests/__init__.py`, the ancestor
-  `conftest.py` and `tests/conftest.py`, the
+  `conftest.py` and `tests/conftest.py`, the pytest configuration files pytest would prefer
+  in `tests/` or the root, `.env`, `.gitattributes`, the
   infrastructure the stack mounts or a test reads (`infrastructure/postgres/`,
   `infrastructure/rustfs/`, `infrastructure/staging-compatibility.md`), `migrations/`,
   `alembic.ini`, `compose.yaml`, the four Compose override names (`compose.override.yml`,

@@ -43,8 +43,8 @@ requirement.
 The integration job MUST itself determine the pull request's changed files, as a step
 before any tool is installed or any service started, and run the suite and the
 application boot only when at least one changed file is under a declared path. When none
-is, the job MUST run no later step but the stack teardown, MUST record in its summary that
-the suite was not run and why, and MUST pass. The job MUST fail when the changed files
+is, the job MUST run no later step but the skip summary and the stack teardown, MUST record
+in that summary that the suite was not run and why, and MUST pass. The job MUST fail when the changed files
 cannot be determined or may be incomplete.
 
 #### Scenario: Application code changes
@@ -91,10 +91,16 @@ cannot be determined or may be incomplete.
 - **THEN** the unit suite fails naming the step
 
 #### Scenario: A file read implicitly is added
-- **WHEN** a pull request adds `conftest.py`, `tests/conftest.py`, a Compose override file
-  (`compose.override.yml`, `compose.override.yaml`, `docker-compose.override.yml` or
-  `docker-compose.override.yaml`) or `docker/Dockerfile.dockerignore`
+- **WHEN** a pull request adds `conftest.py`, `tests/conftest.py`, a pytest configuration
+  file in `tests/` or the root, a Compose override file (`compose.override.yml`,
+  `compose.override.yaml`, `docker-compose.override.yml` or `docker-compose.override.yaml`),
+  `.env`, `.gitattributes` or `docker/Dockerfile.dockerignore`
 - **THEN** the integration job runs the whole suite
+
+#### Scenario: A packaging file is removed
+- **WHEN** the detection finds no declared path and `README.md`, `LICENSE` or `NOTICE` is
+  missing from the checkout
+- **THEN** the integration job fails before any later step, naming the file
 
 ### Requirement: The declared paths cover everything the suite depends on
 The declared paths MUST cover every file the suite imports, builds, mounts, boots or

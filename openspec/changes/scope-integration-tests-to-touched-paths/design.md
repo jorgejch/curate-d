@@ -20,6 +20,9 @@ What the suite depends on, found by reading the repository rather than assumed:
 | Reader | Paths |
 | --- | --- |
 | pytest collection, `tests.stubs` imports | `tests/integration/`, `tests/stubs/`, `tests/__init__.py`; the ancestor `conftest.py` and `tests/conftest.py`, loaded once added |
+| pytest configuration lookup from `tests/integration` upwards | `pytest.toml`, `.pytest.toml`, `pytest.ini`, `.pytest.ini`, `tox.ini`, `setup.cfg` in `tests/` or the root, and `tests/pyproject.toml`, preferred over `pyproject.toml` once added |
+| `docker compose` interpolation, `Settings` | `.env`, read once added (it is ignored today) |
+| checkout | `.gitattributes`, which rewrites declared files as they are checked out |
 | the code under test | `src/` |
 | `docker/Dockerfile` `COPY` | `pyproject.toml`, `uv.lock`, `src/`, `migrations/`, `alembic.ini`; also `README.md`, `LICENSE`, `NOTICE` |
 | `.dockerignore`, `docker/Dockerfile.dockerignore` (preferred by BuildKit once added) | shape the build context |
@@ -146,9 +149,9 @@ when the pull request changes a path the suite depends on.
   failure fails the required check rather than opening it (D1, D2).
 - [A skipped-step job costs a runner start, about a minute, on every docs-only pull
   request] → accepted; it is what keeps the check reporting and the gate fail-closed.
-- [A pull request that changes only `README.md` could break the image build (`COPY` of a
-  missing file after a rename)] → `docker-publish.yml` builds on the `dev` push and would
-  fail there; renaming a packaging file is rare and visible.
+- [A pull request that deletes or renames `README.md`, `LICENSE` or `NOTICE` would break the
+  image build (`COPY` of a missing file) without selecting the suite] → the guard fails a
+  skip when any of the three is missing, so editing them still skips.
 
 ## Migration Plan
 
