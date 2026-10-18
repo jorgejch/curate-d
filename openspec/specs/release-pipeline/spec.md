@@ -136,9 +136,9 @@ observation budget is set.
 The integration job MUST itself determine the pull request's changed files, as a step
 before any tool is installed or any service started, and run the suite and the
 application boot only when at least one changed file is under a declared path. When none
-is, the job MUST run no later step but the skip summary and the stack teardown, MUST record
-in that summary that the suite was not run and why, and MUST pass. The job MUST fail when the changed files
-cannot be determined or may be incomplete.
+is, the job MUST run no later step but the detection guard, the skip summary and the stack
+teardown, MUST record in that summary that the suite was not run and why, and MUST pass. The
+job MUST fail when the changed files cannot be determined or may be incomplete.
 
 #### Scenario: Application code changes
 - **WHEN** a pull request changes a file under `src/`
