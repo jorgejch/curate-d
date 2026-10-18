@@ -148,40 +148,7 @@ jobs:
       # and worker-io must have stored every declared schedule, under its declared cron,
       # and nothing else. A stored schedule's status is not compared: a pause survives.
       - name: Check the workers applied their schedules
-        run: |
-          uv run --locked --no-build python - <<'PY'
-          import sys
-
-          from curate_d.config import Settings
-          from curate_d.runtime import dbos_app
-          from curate_d.runtime.profiles import WorkerProfile
-          from curate_d.workflows.registry import declared_schedule_names, schedules_for
-
-          settings = Settings()
-          client = dbos_app.client(settings, retry_connection_errors=False)
-          try:
-              latest = client.get_latest_application_version()["version_name"]
-              stored = {entry["schedule_name"]: entry["schedule"] for entry in client.list_schedules()}
-          finally:
-              client.destroy()
-          declared = declared_schedule_names(settings)
-          crons = {
-              entry["schedule_name"]: entry["schedule"]
-              for profile in WorkerProfile
-              for entry in schedules_for(profile, settings)
-          }
-          failures = []
-          if latest != dbos_app.APPLICATION_VERSION:
-              failures.append(f"latest version is {latest!r}, not the image's {dbos_app.APPLICATION_VERSION!r}")
-          if stored.keys() != declared:
-              failures.append(f"missing {sorted(declared - stored.keys())}, undeclared {sorted(stored.keys() - declared)}")
-          stale = sorted(name for name in declared & stored.keys() if stored[name] != crons[name])
-          if stale:
-              failures.append(f"stored cron differs from the declared one for {stale}")
-          for failure in failures:
-              print(f"::error::schedules not applied: {failure}")
-          sys.exit(1 if failures else 0)
-          PY
+        run: uv run --locked --no-build python -m curate_d.worker.schedule_check
 
       - name: Record staging evidence
         if: always()
