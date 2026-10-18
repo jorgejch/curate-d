@@ -7,8 +7,7 @@ get a SonarQube analysis (`release-pipeline`, "The SonarQube scan skips only for
 requests"), but nothing proposes routine version updates: `pyproject.toml` ranges and
 `uv.lock` drift until someone bumps them by hand, and the two base images in
 `docker/Dockerfile` are set through `ARG`-interpolated `FROM` lines Dependabot cannot
-read. Without a config, any Dependabot pull request would also open against `main`, which
-is not the active branch.
+read.
 
 ## What Changes
 

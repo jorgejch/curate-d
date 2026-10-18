@@ -36,16 +36,16 @@ citations are in the per-decision notes below.
 
 **Goals:**
 - A `dependabot.yml` whose every observable property in the spec delta is pinned by a
-  unit test, so a later edit that opens pull requests against `main`, groups a major, or
+  unit test, so a later edit that drops the `dev` target, groups a major, or
   lets the python image move minor fails the build.
 - A Dockerfile Dependabot can update, with no behavioural change to the built image beyond
   pinning the exact digests it already resolves.
 
 **Non-Goals:**
 - Shaping security updates. With `target-branch` set, GitHub applies none of the block's
-  options (ignore, groups, labels) to security updates, which always target the default
-  branch (`main`). Accepted: they stay as GitHub raises them; forward-porting to `dev`
-  is a manual step, as today.
+  options (ignore, groups, labels) to security updates, which open against the default
+  branch (`dev`). Accepted, and wanted: a security fix in an `aioboto3` minor or a
+  `python` image minor is not held back by the version-update ignores.
 - Compose images (`compose.yaml:34,80,107,187`): the Postgres image is
   `${CURATE_D_POSTGRES_IMAGE:-...}`, the RustFS digests are evidence recorded in
   `infrastructure/staging-compatibility.md:22-23`, and production versions live in Flux.
@@ -99,10 +99,11 @@ updates:
 
 (Block scalars and comments are the apply's choice; the shape is what the tests pin.)
 
-- `target-branch: dev`: without it every pull request opens against the default branch
-  `main` ("All pull requests for version updates are opened targeting the specified
-  branch", options reference). Side effect, accepted under Non-Goals: the block's options
-  "no longer apply to security updates".
+- `target-branch: dev`: `dev` is already the default branch, so this only makes the
+  target explicit ("All pull requests for version updates are opened targeting the
+  specified branch", options reference): pull requests stay on `dev` if the default branch
+  ever changes. Side effect, accepted under Non-Goals: the block's options "no longer
+  apply to security updates".
 - `uv` with `versioning-strategy: increase` is documented ("Supported by: bundler, cargo,
   composer, helm, mix, npm, pip, pub, and uv"). Open bug dependabot-core #16112 reports
   `increase` widening a range instead of raising it on some manifests; the first uv pull
@@ -220,8 +221,6 @@ because `docker/Dockerfile` is a declared path. No local integration test builds
   each is reviewed against the `uv_build` bound and merged when green.
 - [Dependabot pull requests cost a full integration run each, again on every rebase] →
   Grouping (D2) bounds the count; the 5-per-block limit caps the queue.
-- [Security updates target `main`, not `dev`] → Known and accepted (Non-Goals); a
-  security pull request is cherry-picked or re-raised against `dev` by hand.
 - [Resolved digest goes stale between apply and merge] → Harmless: Dependabot's first run
   proposes the refresh. The apply still resolves fresh digests rather than copying from a
   cached build.
