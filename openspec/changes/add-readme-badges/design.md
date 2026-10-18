@@ -46,7 +46,10 @@ label for it. Health badge URLs (`B` = `dev`, `K` = `jorgejch_curate-d`):
 | Checks | `github.com/jorgejch/curate-d/actions/workflows/checks.yml/badge.svg?branch=B` | `…/actions/workflows/checks.yml?query=branch%3AB` |
 | CodeQL | `…/actions/workflows/github-code-scanning/codeql/badge.svg?branch=B` | `…/actions/workflows/github-code-scanning/codeql?query=branch%3AB` |
 | Quality gate | `sonarcloud.io/api/project_badges/measure?project=K&metric=alert_status&branch=B` | `sonarcloud.io/summary/new_code?id=K&branch=B` |
-| Coverage | same, `metric=coverage` | same |
+| Coverage | same, `metric=coverage` | `sonarcloud.io/summary/overall?id=K&branch=B` |
+
+The gate is evaluated on new code, so its badge opens the new-code summary; `coverage` is
+the overall figure, so its badge opens the overall summary, which shows the same number.
 
 The alt texts are "Quality gate status" and "Unit-test coverage", as asked; "Unit-test"
 is accurate because integration runs upload no coverage. The Sonar URLs name

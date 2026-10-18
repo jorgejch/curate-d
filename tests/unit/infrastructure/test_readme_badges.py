@@ -39,7 +39,7 @@ HEALTH_SOURCES = {
         SONAR_HOST, "/api/project_badges/measure", "/summary/new_code", "alert_status"
     ),
     "Unit-test coverage": _Source(
-        SONAR_HOST, "/api/project_badges/measure", "/summary/new_code", "coverage"
+        SONAR_HOST, "/api/project_badges/measure", "/summary/overall", "coverage"
     ),
 }
 

@@ -28,8 +28,9 @@ order and their branch.
 
 ### Requirement: A health badge links to dev's view
 Each health badge MUST link to the view that owns its signal, filtered to `dev`: for
-Checks and CodeQL, the workflow's runs on `dev`; for the quality gate and coverage,
-SonarCloud's new-code summary of `dev`.
+Checks and CodeQL, the workflow's runs on `dev`; for the quality gate, SonarCloud's
+new-code summary of `dev`; for coverage, its overall-code summary of `dev`, the scope the
+image's `coverage` metric shows.
 
 #### Scenario: Links name dev
 - **WHEN** every health badge's link names `dev`
