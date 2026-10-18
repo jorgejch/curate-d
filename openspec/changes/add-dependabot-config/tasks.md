@@ -60,7 +60,7 @@ and can start at once; group 3 waits on both. Execution agents run on Opus 5.5.
   `make stack-up` and verify `docker compose ps` shows api, worker-io and worker-cpu healthy,
   then `make stack-down`
 - [x] 3.3 Run `openspec validate add-dependabot-config --strict` and verify it passes
-- [ ] 3.4 Open the pull request against `dev` with a body stating the chosen Python patch
+- [x] 3.4 Open the pull request against `dev` with a body stating the chosen Python patch
   and both digests, and verify the integration job runs the whole suite (the Dockerfile is a
   declared path) and the checks job's SonarQube scan reports
 
