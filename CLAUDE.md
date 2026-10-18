@@ -67,9 +67,13 @@ DBOS 3.x, embedded as a library. Settle every DBOS pattern question — where an
 how it is made idempotent, whether it belongs in a workflow — against the `dbos-python` skill
 (see the top of this file). This repo departs from it in these places; record any new departure here:
 
-- Every ledger write inside a workflow goes through the ledger datasource
-  (`runtime/datasource.py`), never a step or a raw session. This is the exactly-once
-  guarantee, and `make lint` enforces it (`python -m curate_d.runtime.workflow_audit`).
+- All ledger mutations executed within DBOS workflows MUST use a DBOS datasource
+  transaction defined through `runtime/datasource.py`. Never perform ledger mutations
+  through `@DBOS.step()`, unmanaged SQLAlchemy sessions, or direct database access
+  within workflow functions. Ledger mutations and their DBOS execution checkpoints must
+  commit atomically. This is the exactly-once guarantee. `make lint`
+  (`python -m curate_d.runtime.workflow_audit`) catches raw engine/connection calls in
+  workflow bodies; writes from steps or unmanaged sessions must be caught in review.
 - Create datasources before `DBOS.launch()`; DBOS 3 rejects one created after.
 - Construct DBOS only through `runtime/dbos_app.py`, from an entry point, never at import
   time. Register queues through `runtime/queues.py`: `never_update` keeps limits changed at
