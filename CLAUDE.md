@@ -71,8 +71,9 @@ how it is made idempotent, whether it belongs in a workflow — against the `dbo
   transaction defined through `runtime/datasource.py`. Never perform ledger mutations
   through `@DBOS.step()`, unmanaged SQLAlchemy sessions, or direct database access
   within workflow functions. Ledger mutations and their DBOS execution checkpoints must
-  commit atomically. This is the exactly-once guarantee, and `make lint` enforces it
-  (`python -m curate_d.runtime.workflow_audit`).
+  commit atomically. This is the exactly-once guarantee. `make lint`
+  (`python -m curate_d.runtime.workflow_audit`) catches raw engine/connection calls in
+  workflow bodies; writes from steps or unmanaged sessions must be caught in review.
 - Create datasources before `DBOS.launch()`; DBOS 3 rejects one created after.
 - Construct DBOS only through `runtime/dbos_app.py`, from an entry point, never at import
   time. Register queues through `runtime/queues.py`: `never_update` keeps limits changed at
