@@ -112,7 +112,7 @@ make test              # isolated unit tests + 80% coverage gate
 make coverage          # unit coverage data in curate-d.coverage, importable by PyCharm
 make test-stack        # reset the stack, then only PostgreSQL, RustFS and rclone, migrated, for integration tests
 make test-integration  # integration tests (needs make test-stack, not stack-up)
-make check             # lint + typecheck + test; PRs also run the full integration suite
+make check             # lint + typecheck + test; PRs touching the suite's inputs also run the full integration suite
 make image             # build the container image
 ```
 

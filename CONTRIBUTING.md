@@ -56,9 +56,9 @@ cleanup of unrelated code.
 - **Run `make check` before pushing.** It runs the same lint, type check and unit commands
   as CI, so green locally means green there. Every push to a branch runs them and uploads
   the unit coverage to SonarQube Cloud. A pull request into `dev` or `main` must pass them
-  and the full integration suite against the local stack, and be up to date with its base,
-  before it merges; a merge runs no tests again, only the image build on `dev` and the
-  SonarQube coverage refresh.
+  and, when it changes a path the suite depends on, the full integration suite against the
+  local stack, and be up to date with its base, before it merges; a merge runs no tests
+  again, only the image build on `dev` and the SonarQube coverage refresh.
 
 ## Tests
 
@@ -75,8 +75,8 @@ cleanup of unrelated code.
 - **Integration tests** (`make test-integration`) need `make test-stack` first. While
   developing, run the ones your change touches (`uv run pytest
   tests/integration/test_<area>.py --no-cov -m integration --staging-backend=rustfs`; without
-  the flag, staging tests also need the OVH fixture's credentials); every pull request runs
-  the full suite.
+  the flag, staging tests also need the OVH fixture's credentials); a pull request that
+  changes a path the suite depends on runs the full suite.
 - **Don't run them against `make stack-up`.** Its workers apply the persisted schedules, and
   the suite's own DBOS process then fires them: a recovery or refresh tick runs against the
   test rows. `make test-stack` runs `make stack-reset` first, which destroys the

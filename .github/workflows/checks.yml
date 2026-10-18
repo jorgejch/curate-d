@@ -12,8 +12,8 @@ name: Checks
 # analyses; without it the long-lived branches' coverage would never move. It gates
 # nothing, and docker-publish.yml does not wait for it.
 #
-# The integration suite runs in integration.yml, on pull requests only. A `branches`
-# filter alone leaves tags out.
+# The integration suite runs in integration.yml, on a pull request that changes a path it
+# depends on. A `branches` filter alone leaves tags out.
 on:
   push:
     branches:
