@@ -22,13 +22,17 @@ EXPECTED_DECLARED_PATHS = [
     "tests/integration/**",
     "tests/stubs/**",
     "tests/__init__.py",
+    "conftest.py",
+    "tests/conftest.py",
     "infrastructure/postgres/**",
     "infrastructure/rustfs/**",
     "infrastructure/staging-compatibility.md",
     "migrations/**",
     "alembic.ini",
     "compose.yaml",
+    "compose.override.yaml",
     "docker/Dockerfile",
+    "docker/Dockerfile.dockerignore",
     ".dockerignore",
     "Makefile",
     "pyproject.toml",
@@ -36,6 +40,19 @@ EXPECTED_DECLARED_PATHS = [
     ".python-version",
     ".github/workflows/integration.yml",
 ]
+
+# Files a tool picks up implicitly once they exist, so they select the suite before they do:
+# the ancestor conftest.py files pytest loads for tests/integration, the override file
+# `docker compose` merges into compose.yaml, and BuildKit's Dockerfile-specific ignore file.
+IMPLICIT_FILES = {
+    "conftest.py",
+    "tests/conftest.py",
+    "compose.override.yaml",
+    "docker/Dockerfile.dockerignore",
+}
+
+# GitHub lists at most this many of a pull request's files.
+PULL_REQUEST_FILE_LIMIT = 3000
 
 # hatchling reads these for package metadata only; nothing the suite asserts depends on them.
 PACKAGING_FILES = {"README.md", "LICENSE", "NOTICE"}
@@ -299,6 +316,10 @@ def test_the_gate_detects_changes_inside_the_required_job() -> None:
     assert "steps.changes.outputs.suite" in run + str(guard.get("env", "")), guard["name"]
     assert "::error::" in run and "exit 1" in run, guard["name"]
     assert "if" not in guard, guard["name"]
+    # A `false` from a truncated file list may have missed a declared path.
+    env = cast(Document, guard["env"])
+    assert env["CHANGED_FILES"] == "${{ github.event.pull_request.changed_files }}"
+    assert f"-ge {PULL_REQUEST_FILE_LIMIT}" in run, guard["name"]
 
     skips = []
     for step in steps[detection + 2 :]:
@@ -318,14 +339,14 @@ def test_the_gate_detects_changes_inside_the_required_job() -> None:
 
 
 def test_declared_paths_are_prefixes_or_exact_files() -> None:
-    """The coverage pin matches by prefix, so a pattern must be `dir/**` or an existing file."""
+    """The coverage pin matches by prefix, so a pattern must be `dir/**` or an exact file."""
     for pattern in _declared_paths():
         path = pattern.removesuffix("/**")
         assert path and not set("*?[]{}!") & set(path), pattern
         assert not path.startswith(("/", "./")) and not path.endswith("/"), pattern
         if pattern.endswith("/**"):
             assert (REPOSITORY_ROOT / path).is_dir(), pattern
-        else:
+        elif (REPOSITORY_ROOT / path).exists() or pattern not in IMPLICIT_FILES:
             assert (REPOSITORY_ROOT / path).is_file(), pattern
 
 

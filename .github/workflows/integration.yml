@@ -76,7 +76,11 @@ jobs:
       # The suite's inputs: what it imports, builds, mounts, boots or reads. Each pattern is
       # `dir/**` or an exact file, and test_integration_workflow.py pins the set against
       # compose.yaml's mounts, the Dockerfile's copies and the tests' own reads. README.md,
-      # LICENSE and NOTICE are copied into the image for packaging metadata only.
+      # LICENSE and NOTICE are copied into the image for packaging metadata only. Four
+      # exact files need not exist yet, as each is picked up implicitly once added: the
+      # ancestor conftest.py files pytest loads when collecting tests/integration, the
+      # override file `docker compose` merges into compose.yaml, and the Dockerfile-specific
+      # ignore file BuildKit prefers over .dockerignore.
       - name: Detect changes the suite depends on
         id: changes
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
@@ -87,13 +91,17 @@ jobs:
               - 'tests/integration/**'
               - 'tests/stubs/**'
               - 'tests/__init__.py'
+              - 'conftest.py'
+              - 'tests/conftest.py'
               - 'infrastructure/postgres/**'
               - 'infrastructure/rustfs/**'
               - 'infrastructure/staging-compatibility.md'
               - 'migrations/**'
               - 'alembic.ini'
               - 'compose.yaml'
+              - 'compose.override.yaml'
               - 'docker/Dockerfile'
+              - 'docker/Dockerfile.dockerignore'
               - '.dockerignore'
               - 'Makefile'
               - 'pyproject.toml'
@@ -102,13 +110,20 @@ jobs:
               - '.github/workflows/integration.yml'
 
       # Every later step runs on `suite == 'true'`, which an empty output would read as a
-      # skip: fail instead, so a broken detection never opens the gate.
+      # skip: fail instead, so a broken detection never opens the gate. GitHub lists at most
+      # 3,000 of a pull request's files, so a `false` for a pull request that reaches the
+      # limit may have missed a declared path: fail that too.
       - name: Refuse an undecided detection
         env:
           SUITE: ${{ steps.changes.outputs.suite }}
+          CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
         run: |
           if [ "$SUITE" != "true" ] && [ "$SUITE" != "false" ]; then
             echo "::error::The change detection (step 'changes') reported suite='$SUITE', neither true nor false."
+            exit 1
+          fi
+          if [ "$SUITE" = "false" ] && [ "${CHANGED_FILES:-3000}" -ge 3000 ]; then
+            echo "::error::This pull request changes $CHANGED_FILES files; GitHub lists at most 3,000, so the detection may have missed a declared path. Split the pull request."
             exit 1
           fi
 
@@ -122,7 +137,9 @@ jobs:
           `src/`, `tests/integration/`, `tests/stubs/`, `tests/__init__.py`,
           `infrastructure/postgres/`, `infrastructure/rustfs/`,
           `infrastructure/staging-compatibility.md`, `migrations/`, `alembic.ini`,
-          `compose.yaml`, `docker/Dockerfile`, `.dockerignore`, `Makefile`,
+          `conftest.py`, `tests/conftest.py`, `compose.yaml`,
+          `compose.override.yaml`, `docker/Dockerfile`,
+          `docker/Dockerfile.dockerignore`, `.dockerignore`, `Makefile`,
           `pyproject.toml`, `uv.lock`, `.python-version`,
           `.github/workflows/integration.yml`.
           MD
