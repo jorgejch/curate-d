@@ -30,7 +30,10 @@ EXPECTED_DECLARED_PATHS = [
     "migrations/**",
     "alembic.ini",
     "compose.yaml",
+    "compose.override.yml",
     "compose.override.yaml",
+    "docker-compose.override.yml",
+    "docker-compose.override.yaml",
     "docker/Dockerfile",
     "docker/Dockerfile.dockerignore",
     ".dockerignore",
@@ -42,12 +45,15 @@ EXPECTED_DECLARED_PATHS = [
 ]
 
 # Files a tool picks up implicitly once they exist, so they select the suite before they do:
-# the ancestor conftest.py files pytest loads for tests/integration, the override file
+# the ancestor conftest.py files pytest loads for tests/integration, every override file name
 # `docker compose` merges into compose.yaml, and BuildKit's Dockerfile-specific ignore file.
 IMPLICIT_FILES = {
     "conftest.py",
     "tests/conftest.py",
+    "compose.override.yml",
     "compose.override.yaml",
+    "docker-compose.override.yml",
+    "docker-compose.override.yaml",
     "docker/Dockerfile.dockerignore",
 }
 
