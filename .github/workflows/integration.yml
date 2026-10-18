@@ -1,9 +1,16 @@
 name: Integration
 
-# The whole integration suite, against the whole local stack, on every pull request to dev
-# or main. The ruleset requires this job, so it is half of the merge gate; checks.yml is the
-# other half. Feature-branch pushes never run it: the suite is the slow part, and its PR
-# run is the one that counts.
+# The whole integration suite, against the whole local stack, on a pull request to dev or
+# main that changes a path the suite depends on (the `changes` step's `suite` filter). The
+# ruleset requires this job, so it is half of the merge gate; checks.yml is the other half.
+# Feature-branch pushes never run it: the suite is the slow part, and its PR run is the one
+# that counts.
+#
+# The detection is a step of the required job, not a `paths` filter or a separate job: a
+# filtered-out workflow leaves the required check pending, and a job skipped because its
+# dependency failed counts as passing. A pull request that changes no declared path still
+# reports the check, green, with every step after the guard skipped; a detection that fails
+# or answers neither true nor false fails it.
 #
 # The stack is the one `make stack-up` brings up: PostgreSQL with PostGIS, RustFS with the
 # staging provisioning, the rclone daemon, the API and both worker profiles, all from
@@ -29,6 +36,8 @@ concurrency:
 
 permissions:
   contents: read
+  # dorny/paths-filter lists a pull request's changed files through the API.
+  pull-requests: read
 
 env:
   # Compose interpolates it for every application service, and the suite encrypts and
@@ -64,27 +73,86 @@ jobs:
           echo "enough to pass here would record unobserved reclamation as verified."
           exit 1
 
+      # The suite's inputs: what it imports, builds, mounts, boots or reads. Each pattern is
+      # `dir/**` or an exact file, and test_integration_workflow.py pins the set against
+      # compose.yaml's mounts, the Dockerfile's copies and the tests' own reads. README.md,
+      # LICENSE and NOTICE are copied into the image for packaging metadata only.
+      - name: Detect changes the suite depends on
+        id: changes
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: |
+            suite:
+              - 'src/**'
+              - 'tests/integration/**'
+              - 'tests/stubs/**'
+              - 'tests/__init__.py'
+              - 'infrastructure/postgres/**'
+              - 'infrastructure/rustfs/**'
+              - 'infrastructure/staging-compatibility.md'
+              - 'migrations/**'
+              - 'alembic.ini'
+              - 'compose.yaml'
+              - 'docker/Dockerfile'
+              - '.dockerignore'
+              - 'Makefile'
+              - 'pyproject.toml'
+              - 'uv.lock'
+              - '.python-version'
+              - '.github/workflows/integration.yml'
+
+      # Every later step runs on `suite == 'true'`, which an empty output would read as a
+      # skip: fail instead, so a broken detection never opens the gate.
+      - name: Refuse an undecided detection
+        env:
+          SUITE: ${{ steps.changes.outputs.suite }}
+        run: |
+          if [ "$SUITE" != "true" ] && [ "$SUITE" != "false" ]; then
+            echo "::error::The change detection (step 'changes') reported suite='$SUITE', neither true nor false."
+            exit 1
+          fi
+
+      - name: Suite not selected
+        if: steps.changes.outputs.suite == 'false'
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'MD'
+          ### Integration suite
+
+          Not run: this pull request changes none of the paths the suite depends on:
+          `src/`, `tests/integration/`, `tests/stubs/`, `tests/__init__.py`,
+          `infrastructure/postgres/`, `infrastructure/rustfs/`,
+          `infrastructure/staging-compatibility.md`, `migrations/`, `alembic.ini`,
+          `compose.yaml`, `docker/Dockerfile`, `.dockerignore`, `Makefile`,
+          `pyproject.toml`, `uv.lock`, `.python-version`,
+          `.github/workflows/integration.yml`.
+          MD
+
       # test_local_ocr.py calls Tesseract from the test process, not from a container.
       - name: Install Tesseract
+        if: steps.changes.outputs.suite == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends --yes tesseract-ocr
           tesseract --version
 
       - name: Install uv
+        if: steps.changes.outputs.suite == 'true'
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
 
       - name: Install dependencies
+        if: steps.changes.outputs.suite == 'true'
         run: uv sync --locked --no-build
 
       - name: Set up Buildx
+        if: steps.changes.outputs.suite == 'true'
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       # Built once and loaded under the tag compose.yaml names, so `compose up --no-build`
       # starts the API and both workers from it. Same cache as docker-publish.yml.
       - name: Build the application image
+        if: steps.changes.outputs.suite == 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -101,6 +169,7 @@ jobs:
       # `Settings` defaults to is the published 5433. The flags keep CI's image and lockfile
       # guarantees: nothing is built, and the lock must match.
       - name: Start PostgreSQL, RustFS and rclone, and apply migrations
+        if: steps.changes.outputs.suite == 'true'
         env:
           TEST_STACK_UP_FLAGS: --no-build
           TEST_STACK_UV_FLAGS: --locked --no-build
@@ -110,6 +179,7 @@ jobs:
       # connections. RustFS is the only staging backend here; OVH verification stays
       # PENDING, and the report header says so.
       - name: Integration suite
+        if: steps.changes.outputs.suite == 'true'
         run: >-
           uv run --locked --no-build pytest tests/integration
           --no-cov -m integration --staging-backend=rustfs
@@ -120,6 +190,7 @@ jobs:
       # `--wait` holds for the API's health check (its /health/ready route); a worker has
       # none, so for a worker it only means the container has not exited.
       - name: Start the application services
+        if: steps.changes.outputs.suite == 'true'
         run: docker compose up -d --wait --no-build api worker-io worker-cpu
 
       # A worker serves no HTTP. It logs `worker.ready` once DBOS has launched, its queues
@@ -127,6 +198,7 @@ jobs:
       # that hangs anywhere in startup never logs it. worker-cpu may restart until
       # worker-io has seeded the staging marker (compose.yaml), hence the wait.
       - name: Wait for the workers to be ready
+        if: steps.changes.outputs.suite == 'true'
         run: |
           for service in worker-io worker-cpu; do
             if ! timeout 120 sh -c "until docker compose logs --no-color $service | grep -q '\"event\": \"worker.ready\"'; do sleep 2; done"; then
@@ -148,10 +220,11 @@ jobs:
       # and worker-io must have stored every declared schedule, under its declared cron,
       # and nothing else. A stored schedule's status is not compared: a pause survives.
       - name: Check the workers applied their schedules
+        if: steps.changes.outputs.suite == 'true'
         run: uv run --locked --no-build python -m curate_d.worker.schedule_check
 
       - name: Record staging evidence
-        if: always()
+        if: always() && steps.changes.outputs.suite == 'true'
         run: |
           python3 - <<'PY'
           import os
@@ -196,7 +269,7 @@ jobs:
           PY
 
       - name: Stack logs
-        if: failure()
+        if: failure() && steps.changes.outputs.suite == 'true'
         run: docker compose logs --no-color --timestamps
 
       - name: Remove the stack

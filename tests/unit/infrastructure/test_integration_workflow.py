@@ -1,5 +1,7 @@
-"""The integration workflow's shape: its required check, trigger, suite and readiness gate."""
+"""The integration workflow's shape: its required check, trigger, path gate, suite and readiness."""
 
+import posixpath
+import re
 from pathlib import Path
 from typing import cast
 
@@ -8,9 +10,41 @@ import yaml
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "integration.yml"
 COMPOSE = REPOSITORY_ROOT / "compose.yaml"
+DOCKERFILE = REPOSITORY_ROOT / "docker" / "Dockerfile"
+INTEGRATION_TESTS = REPOSITORY_ROOT / "tests" / "integration"
 API_APP = REPOSITORY_ROOT / "src" / "curate_d" / "api" / "app.py"
 WORKER_MAIN = REPOSITORY_ROOT / "src" / "curate_d" / "worker" / "main.py"
 MAKEFILE = REPOSITORY_ROOT / "Makefile"
+
+# The paths whose change selects the suite, reviewed against design.md's table.
+EXPECTED_DECLARED_PATHS = [
+    "src/**",
+    "tests/integration/**",
+    "tests/stubs/**",
+    "tests/__init__.py",
+    "infrastructure/postgres/**",
+    "infrastructure/rustfs/**",
+    "infrastructure/staging-compatibility.md",
+    "migrations/**",
+    "alembic.ini",
+    "compose.yaml",
+    "docker/Dockerfile",
+    ".dockerignore",
+    "Makefile",
+    "pyproject.toml",
+    "uv.lock",
+    ".python-version",
+    ".github/workflows/integration.yml",
+]
+
+# hatchling reads these for package metadata only; nothing the suite asserts depends on them.
+PACKAGING_FILES = {"README.md", "LICENSE", "NOTICE"}
+
+SUITE_SELECTED = "steps.changes.outputs.suite == 'true'"
+SUITE_SKIPPED = "steps.changes.outputs.suite == 'false'"
+
+# A repository path joined onto a test module's root: `_ROOT / "a" / "b"` reads `a/b`.
+_ROOT_READ = re.compile(r"""\b(?:_ROOT|REPOSITORY_ROOT)((?:\s*/\s*(?:"[^"]*"|'[^']*'))+)""")
 
 type Document = dict[str, object]
 
@@ -58,6 +92,70 @@ def _test_stack_recipe() -> str:
 def _expanded(run: str) -> str:
     """Return a step's script, with `make test-stack` replaced by its Makefile recipe."""
     return run.replace("make test-stack", _test_stack_recipe())
+
+
+def _detection_index() -> int:
+    """Return the position of the change-detection step, `id: changes`."""
+    return next(i for i, s in enumerate(_steps()) if s.get("id") == "changes")
+
+
+def _declared_paths() -> list[str]:
+    """Return the patterns of the detection step's `suite` filter."""
+    step = _steps()[_detection_index()]
+    filters = cast(str, cast(Document, step["with"])["filters"])
+    return cast(list[str], cast(Document, yaml.safe_load(filters))["suite"])
+
+
+def _covered(path: str, patterns: list[str]) -> bool:
+    """Return whether a `dir/**` prefix or an exact-file pattern covers `path`."""
+    for pattern in patterns:
+        if pattern.endswith("/**"):
+            directory = pattern.removesuffix("/**")
+            if path == directory or path.startswith(f"{directory}/"):
+                return True
+        elif path == pattern:
+            return True
+    return False
+
+
+def _compose_mount_sources() -> set[str]:
+    """Return the repository paths `compose.yaml` bind-mounts into a service."""
+    compose = cast(Document, yaml.safe_load(COMPOSE.read_text(encoding="utf-8")))
+    sources: set[str] = set()
+    for service in cast(Document, compose["services"]).values():
+        for volume in cast(list[object], cast(Document, service).get("volumes", [])):
+            if isinstance(volume, str):
+                source = volume.split(":")[0]
+            else:
+                source = str(cast(Document, volume).get("source", ""))
+            if source.startswith("./"):
+                sources.add(posixpath.normpath(source))
+    return sources
+
+
+def _dockerfile_copy_sources() -> set[str]:
+    """Return the build-context paths `docker/Dockerfile` copies, less the packaging files."""
+    text = DOCKERFILE.read_text(encoding="utf-8").replace("\\\n", " ")
+    sources: set[str] = set()
+    for line in text.splitlines():
+        words = line.split()
+        if not words or words[0].upper() != "COPY":
+            continue
+        if any(word.startswith("--from=") for word in words):
+            continue
+        operands = [word for word in words[1:] if not word.startswith("--")]
+        sources.update(posixpath.normpath(source) for source in operands[:-1])
+    return sources - PACKAGING_FILES
+
+
+def _integration_test_reads() -> set[str]:
+    """Return the repository paths the integration tests join onto their repository root."""
+    reads: set[str] = set()
+    for module in sorted(INTEGRATION_TESTS.rglob("*.py")):
+        for match in _ROOT_READ.finditer(module.read_text(encoding="utf-8")):
+            parts = re.findall(r""""([^"]*)"|'([^']*)'""", match.group(1))
+            reads.add(posixpath.normpath("/".join(a or b for a, b in parts)))
+    return reads
 
 
 def test_the_job_keeps_the_required_check_name() -> None:
@@ -185,4 +283,66 @@ def test_the_gate_checks_the_workers_applied_their_schedules() -> None:
     step = _steps()[check]
     assert step["run"] == "uv run --locked --no-build python -m curate_d.worker.schedule_check"
     assert "continue-on-error" not in step
-    assert "if" not in step
+    assert step["if"] == SUITE_SELECTED
+
+
+def test_the_gate_detects_changes_inside_the_required_job() -> None:
+    """A detection outside the required job, or a step it does not gate, opens the merge."""
+    assert set(cast(Document, _workflow()["jobs"])) == {"integration"}
+    steps = _steps()
+    detection = _detection_index()
+    assert re.fullmatch(r"dorny/paths-filter@[0-9a-f]{40}", str(steps[detection]["uses"]))
+    assert _index("Refuse a CI-sized observation budget") < detection < _index("Install Tesseract")
+
+    guard = steps[detection + 1]
+    run = cast(str, guard["run"])
+    assert "steps.changes.outputs.suite" in run + str(guard.get("env", "")), guard["name"]
+    assert "::error::" in run and "exit 1" in run, guard["name"]
+    assert "if" not in guard, guard["name"]
+
+    skips = []
+    for step in steps[detection + 2 :]:
+        name = step["name"]
+        condition = cast(str, step.get("if", ""))
+        if name == "Remove the stack":
+            assert condition == "always()", name
+            continue
+        # An `||` would let the step run whatever the detection reported.
+        assert "||" not in condition, name
+        if SUITE_SKIPPED in condition:
+            skips.append(step)
+        else:
+            assert SUITE_SELECTED in condition, name
+    assert len(skips) == 1
+    assert "GITHUB_STEP_SUMMARY" in cast(str, skips[0]["run"])
+
+
+def test_declared_paths_are_prefixes_or_exact_files() -> None:
+    """The coverage pin matches by prefix, so a pattern must be `dir/**` or an existing file."""
+    for pattern in _declared_paths():
+        path = pattern.removesuffix("/**")
+        assert path and not set("*?[]{}!") & set(path), pattern
+        assert not path.startswith(("/", "./")) and not path.endswith("/"), pattern
+        if pattern.endswith("/**"):
+            assert (REPOSITORY_ROOT / path).is_dir(), pattern
+        else:
+            assert (REPOSITORY_ROOT / path).is_file(), pattern
+
+
+def test_the_declared_paths_are_the_expected_set() -> None:
+    """A widened or narrowed filter shows as a diff against the reviewed list."""
+    assert sorted(_declared_paths()) == sorted(EXPECTED_DECLARED_PATHS)
+
+
+def test_every_stack_mount_copy_and_test_read_is_declared() -> None:
+    """A path the stack mounts, the image copies or a test reads must select the suite."""
+    declared = _declared_paths()
+    readers = {
+        "compose.yaml bind mount": _compose_mount_sources(),
+        "docker/Dockerfile COPY": _dockerfile_copy_sources(),
+        "integration test read": _integration_test_reads(),
+    }
+    for reader, paths in readers.items():
+        assert paths, f"found no {reader}"
+        for path in sorted(paths):
+            assert _covered(path, declared), f"{reader} {path} is under no declared path"
