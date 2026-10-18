@@ -145,6 +145,14 @@ def test_test_stack_resets_the_stack_before_it_starts_the_rest() -> None:
     assert "alembic upgrade head" in recipe[3]
 
 
+def test_the_checkout_leaves_no_token_on_disk() -> None:
+    """The suite runs PR code, which must not read the workflow token from the Git config."""
+    checkouts = [s for s in _steps() if str(s.get("uses", "")).startswith("actions/checkout@")]
+    assert checkouts
+    for step in checkouts:
+        assert cast(Document, step["with"]).get("persist-credentials") is False
+
+
 def test_the_stack_is_removed_on_every_outcome() -> None:
     """A failed run must not leave containers or volumes behind on the runner."""
     teardown = _steps()[_index("Remove the stack")]
@@ -168,3 +176,13 @@ def test_each_worker_must_log_ready_after_it_starts() -> None:
     assert "for service in worker-io worker-cpu" in wait
     assert "worker.ready" in wait
     assert 'logger.info("worker.ready"' in WORKER_MAIN.read_text(encoding="utf-8")
+
+
+def test_the_gate_checks_the_workers_applied_their_schedules() -> None:
+    """`worker.ready` follows a schedule apply that may have written nothing."""
+    check = _index("Check the workers applied their schedules")
+    assert _index("Wait for the workers to be ready") < check
+    step = _steps()[check]
+    assert step["run"] == "uv run --locked --no-build python -m curate_d.worker.schedule_check"
+    assert "continue-on-error" not in step
+    assert "if" not in step

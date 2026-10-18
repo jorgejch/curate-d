@@ -142,6 +142,14 @@ jobs:
             }
           done
 
+      # `worker.ready` follows the schedule apply whether or not it wrote anything: a worker
+      # not on DBOS's latest version leaves the schedules to that version. The image's own
+      # version must hold latest here (its first launch on this database registered it),
+      # and worker-io must have stored every declared schedule, under its declared cron,
+      # and nothing else. A stored schedule's status is not compared: a pause survives.
+      - name: Check the workers applied their schedules
+        run: uv run --locked --no-build python -m curate_d.worker.schedule_check
+
       - name: Record staging evidence
         if: always()
         run: |
