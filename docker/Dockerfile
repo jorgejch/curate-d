@@ -13,17 +13,15 @@
 # cannot reach the process holding provider tokens. Baking rclone in would put the binary
 # next to the decoders.
 
-ARG PYTHON_VERSION=3.12
-ARG UV_VERSION=0.12.19
 ARG TESSERACT_VERSION=5.5.*
 
-FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+FROM ghcr.io/astral-sh/uv:0.12.19@sha256:04d046b13e60d6bcec73cbc5e1cad25d680dea90c8573340950a0ac2d1aef424 AS uv
 
 # ---------------------------------------------------------------------------
 # Dependencies. Split from the application layer so a source change does not
 # reinstall the world.
 # ---------------------------------------------------------------------------
-FROM python:${PYTHON_VERSION}-slim-trixie AS builder
+FROM python:3.12.15-slim-trixie@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS builder
 
 COPY --from=uv /uv /usr/local/bin/uv
 
@@ -50,7 +48,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # ---------------------------------------------------------------------------
 # Runtime.
 # ---------------------------------------------------------------------------
-FROM python:${PYTHON_VERSION}-slim-trixie AS runtime
+FROM python:3.12.15-slim-trixie@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS runtime
 ARG TESSERACT_VERSION
 
 # tesseract backs the local OCR tier. libpq is needed even with psycopg[binary],
