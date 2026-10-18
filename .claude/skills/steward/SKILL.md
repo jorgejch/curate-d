@@ -91,11 +91,11 @@ it passing.
   correctly is a plainly correct nit: carry it in the next push that already changes the
   PR's files.
 - **An ask that changes specified behaviour** must also update the affected requirement in
-  `openspec/specs/`, in the same push. `openspec/changes/` is a local workspace that
-  `.gitignore` keeps out of the repository, so a delta spec there never reaches the PR:
-  update it and sync it into `openspec/specs/`. If the PR has no OpenSpec change (a simple
-  fix) and the ask grows it past one, reply proposing an OpenSpec change instead of
-  pushing.
+  the PR's delta spec (`openspec/changes/<name>/specs/`), in the same push, and pass
+  `openspec validate <name> --strict`. The change directory is committed with the PR; the
+  sync into `openspec/specs/` and the archive follow the merge. If the PR has no OpenSpec
+  change (a simple fix) and the ask grows it past one, reply proposing an OpenSpec change
+  instead of pushing.
 - **Stay within the files the PR's change names.** No drive-by reformatting, import
   reordering or cleanup of unrelated code, even when a reviewer points at it: reply that it
   belongs in its own change.
