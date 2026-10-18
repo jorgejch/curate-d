@@ -105,7 +105,7 @@ The full list is in [`openspec/config.yaml`](openspec/config.yaml) and
 
 | Rule | Enforced by |
 | --- | --- |
-| Every ledger write inside a workflow goes through the ledger datasource (`runtime/datasource.py`), never a step or a raw session. | `python -m curate_d.runtime.workflow_audit`, in `make lint` |
+| All ledger mutations executed within DBOS workflows MUST use a DBOS datasource transaction defined through `runtime/datasource.py`. Never perform ledger mutations through `@DBOS.step()`, unmanaged SQLAlchemy sessions, or direct database access within workflow functions. Ledger mutations and their DBOS execution checkpoints must commit atomically. | `python -m curate_d.runtime.workflow_audit`, in `make lint` |
 | No private library internals (an underscore module or attribute, or a copy of private logic or SQL) without the maintainer's approval. | `tests/unit/test_no_library_internals.py`, ruff `TID251` |
 | No source file, test, migration or Make target reads another repository on the machine. | `tests/unit/test_isolation.py` |
 
