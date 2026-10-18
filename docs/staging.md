@@ -442,3 +442,5 @@ The 2026-09-15 probe recorded one unreproducible `AccessDenied` on a `PutObject`
 after a policy update, most likely propagation (OVH takes about 3 minutes). Permission
 errors fail closed, so a denial surfaces as a staging failure, not a retry. If it recurs,
 decide whether a denial is ever retryable; that decision has not been made.
+
+<!-- skip-check scratch -->
