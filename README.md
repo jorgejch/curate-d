@@ -1,5 +1,14 @@
 # curate.d
 
+[![Checks](https://github.com/jorgejch/curate-d/actions/workflows/checks.yml/badge.svg?branch=dev)](https://github.com/jorgejch/curate-d/actions/workflows/checks.yml?query=branch%3Adev)
+[![CodeQL](https://github.com/jorgejch/curate-d/actions/workflows/github-code-scanning/codeql/badge.svg?branch=dev)](https://github.com/jorgejch/curate-d/actions/workflows/github-code-scanning/codeql?query=branch%3Adev)
+[![Quality gate status](https://sonarcloud.io/api/project_badges/measure?project=jorgejch_curate-d&metric=alert_status&branch=dev)](https://sonarcloud.io/summary/new_code?id=jorgejch_curate-d&branch=dev)
+[![Unit-test coverage](https://sonarcloud.io/api/project_badges/measure?project=jorgejch_curate-d&metric=coverage&branch=dev)](https://sonarcloud.io/summary/new_code?id=jorgejch_curate-d&branch=dev)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![Status](https://img.shields.io/badge/status-pre--release-orange)](docs/staging.md)
+
+Badges show `dev`; [other branches on SonarCloud](https://sonarcloud.io/project/branches_list?id=jorgejch_curate-d).
+
 Autonomous multi-cloud file and media organizer.
 
 Curate.d ingests files and media from multiple cloud storage and photo providers,
