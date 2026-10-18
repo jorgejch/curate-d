@@ -19,16 +19,22 @@ What the suite depends on, found by reading the repository rather than assumed:
 
 | Reader | Paths |
 | --- | --- |
-| pytest collection, `tests.stubs` imports | `tests/integration/`, `tests/stubs/`, `tests/__init__.py` |
+| pytest collection, `tests.stubs` imports | `tests/integration/`, `tests/stubs/`, `tests/__init__.py`; the ancestor `conftest.py` and `tests/conftest.py`, loaded once added |
 | the code under test | `src/` |
 | `docker/Dockerfile` `COPY` | `pyproject.toml`, `uv.lock`, `src/`, `migrations/`, `alembic.ini`; also `README.md`, `LICENSE`, `NOTICE` |
-| `.dockerignore` | shapes the build context |
+| `.dockerignore`, `docker/Dockerfile.dockerignore` (preferred by BuildKit once added) | shape the build context |
 | `compose.yaml` bind mounts | `infrastructure/postgres/initdb/`, `infrastructure/rustfs/initialize.sh`, `infrastructure/rustfs/policies/` |
 | `compose.yaml` itself, `Makefile` (`test-stack`) | the stack and how CI starts it |
+| `docker compose` without `-f` | merges `compose.override.yml`, `compose.override.yaml`, `docker-compose.override.yml` or `docker-compose.override.yaml` once added |
 | `test_staging_backend_checks.py` | `infrastructure/rustfs/initialize.sh`, `compose.yaml`, `infrastructure/staging-compatibility.md` |
 | `test_migrations.py` | runs Alembic from the repository root (`migrations/`, `alembic.ini`) |
 | `uv sync` | `pyproject.toml`, `uv.lock`, `.python-version` |
 | the job | `.github/workflows/integration.yml` |
+
+The files read only once added need not exist: the pin test accepts their absence.
+
+GitHub lists at most 3,000 of a pull request's files, so a detection that answers `false`
+for a pull request at that size may have missed a declared path; the guard fails it.
 
 Not depended on: `infrastructure/reset/`, `infrastructure/README.md`,
 `compose.lifecycle.yaml` (hand-run `make lifecycle-check` only), `tests/unit/`,

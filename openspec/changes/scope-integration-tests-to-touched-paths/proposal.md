@@ -20,12 +20,16 @@ detection must fail the required check, never let the merge through unverified.
   and a docs-only pull request merges without a suite run.
 - Detection is part of the required job, so a failing detection step fails `Integration
   tests` and blocks the merge. A guard step fails the job if the detection produced
-  neither `true` nor `false`.
+  neither `true` nor `false`, or `false` for a pull request at GitHub's 3,000-file listing
+  limit.
 - The dependency set is declared once, in the workflow, as directory prefixes and exact
-  files: `src/`, `tests/integration/`, `tests/stubs/`, `tests/__init__.py`, the
+  files: `src/`, `tests/integration/`, `tests/stubs/`, `tests/__init__.py`, the ancestor
+  `conftest.py` and `tests/conftest.py`, the
   infrastructure the stack mounts or a test reads (`infrastructure/postgres/`,
   `infrastructure/rustfs/`, `infrastructure/staging-compatibility.md`), `migrations/`,
-  `alembic.ini`, `compose.yaml`, `docker/Dockerfile`, `.dockerignore`, `Makefile`,
+  `alembic.ini`, `compose.yaml`, the four Compose override names (`compose.override.yml`,
+  `compose.override.yaml`, `docker-compose.override.yml`, `docker-compose.override.yaml`),
+  `docker/Dockerfile`, `docker/Dockerfile.dockerignore`, `.dockerignore`, `Makefile`,
   `pyproject.toml`, `uv.lock`, `.python-version` and the workflow itself. `README.md`,
   `LICENSE` and `NOTICE` are copied into the image for packaging metadata only and are
   left out, as are `infrastructure/reset/`, `infrastructure/README.md`,

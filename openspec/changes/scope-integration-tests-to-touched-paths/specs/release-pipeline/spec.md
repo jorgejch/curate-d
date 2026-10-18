@@ -45,7 +45,7 @@ before any tool is installed or any service started, and run the suite and the
 application boot only when at least one changed file is under a declared path. When none
 is, the job MUST run no later step but the stack teardown, MUST record in its summary that
 the suite was not run and why, and MUST pass. The job MUST fail when the changed files
-cannot be determined.
+cannot be determined or may be incomplete.
 
 #### Scenario: Application code changes
 - **WHEN** a pull request changes a file under `src/`
@@ -66,7 +66,8 @@ cannot be determined.
 - **THEN** the integration job runs no test and passes
 
 #### Scenario: Image definition or stack definition changes
-- **WHEN** a pull request changes `docker/Dockerfile`, `.dockerignore`, `compose.yaml`,
+- **WHEN** a pull request changes `docker/Dockerfile`, `docker/Dockerfile.dockerignore`,
+  `.dockerignore`, `compose.yaml`, a Compose override file,
   `Makefile`, `pyproject.toml`, `uv.lock`, `.python-version`, `alembic.ini`, a file under
   `migrations/`, or `.github/workflows/integration.yml`
 - **THEN** the integration job runs the whole suite
@@ -77,18 +78,28 @@ cannot be determined.
 - **THEN** the integration job fails before any later step, naming the detection, and
   the pull request cannot merge
 
+#### Scenario: Changed-file list may be truncated
+- **WHEN** the detection finds no declared path and the pull request changes 3,000 files
+  or more
+- **THEN** the integration job fails before any later step, and the pull request cannot
+  merge
+
 #### Scenario: Gate shape changes
 - **WHEN** the detection step is moved out of the integration job, a step after it loses
   its condition on the detection's result, or the stack teardown stops running on every
   outcome
 - **THEN** the unit suite fails naming the step
 
+#### Scenario: A file read implicitly is added
+- **WHEN** a pull request adds `conftest.py`, `tests/conftest.py`, a Compose override file
+  (`compose.override.yml`, `compose.override.yaml`, `docker-compose.override.yml` or
+  `docker-compose.override.yaml`) or `docker/Dockerfile.dockerignore`
+- **THEN** the integration job runs the whole suite
+
 ### Requirement: The declared paths cover everything the suite depends on
-The declared paths MUST cover the application code, the integration tests and the test
-code they import, the migrations and their configuration, the Compose file, the image
-definition, the Makefile, the dependency lock and interpreter pin, the infrastructure the
-stack mounts or a test reads, and the workflow itself. A unit test MUST pin the set
-against the stack definition and the tests' own reads.
+The declared paths MUST cover every file the suite imports, builds, mounts, boots or
+reads, including files a tool loads implicitly once they are added. A unit test MUST pin
+the set against the stack definition and the tests' own reads.
 
 #### Scenario: Declared set matches the stack
 - **WHEN** every path `compose.yaml` bind-mounts, every path `docker/Dockerfile` copies
