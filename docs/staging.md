@@ -250,12 +250,13 @@ you like, for example a gitignored `.env`; never write the credentials to a file
 repo. `REGION`, `ADDRESSING_STYLE`, and `PREFIX` are deliberately left unset so the fixture
 defaults above remain the single source of those values.
 
-The integration workflow runs on every pull request to `dev` or `main` and runs the whole
-integration suite, the shared contract suite and the backend checks included, against the
-pinned RustFS images with `--staging-backend=rustfs`. It records only safe checksum headers
-and result counts in its job summary, and removes its stack on every outcome. Rows 30/31
-skip there, citing the recorded observation; `make lifecycle-check` re-observes them on a
-RustFS pin bump. This supplies RustFS evidence, not OVH release approval.
+On a pull request to `dev` or `main` that changes a path the suite depends on, the
+integration workflow runs the whole integration suite, the shared contract suite and the
+backend checks included, against the pinned RustFS images with `--staging-backend=rustfs`.
+It records only safe checksum headers and result counts in its job summary, and removes its
+stack on every outcome. Rows 30/31 skip there, citing the recorded observation;
+`make lifecycle-check` re-observes them on a RustFS pin bump. This supplies RustFS
+evidence, not OVH release approval.
 
 Backend checks verify SSE-S3, identity denial, STANDARD requests, lifecycle configuration
 and transport. OVH configuration and actual stored class use an additional read-only
