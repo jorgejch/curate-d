@@ -28,6 +28,7 @@ on:
     branches:
       - dev
       - main
+      - scratch/integration-skip-base
 
 # A newer push to the same pull request supersedes the run in progress.
 concurrency:
