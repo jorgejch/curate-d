@@ -15,6 +15,7 @@ PYPROJECT = REPOSITORY_ROOT / "pyproject.toml"
 
 BRANCH = "dev"
 SONAR_HOST = "sonarcloud.io"
+SONAR_BRANCH_LIST = "/project/branches_list"
 _ACTIONS = "/jorgejch/curate-d/actions/workflows"
 
 
@@ -43,6 +44,15 @@ HEALTH_SOURCES = {
     ),
 }
 
+_HEALTH_IMAGES = {(s.host, s.image_path, s.metric) for s in HEALTH_SOURCES.values()}
+# The SonarCloud paths the badges and the branch-list link use; other Sonar links aren't pinned.
+SONAR_BADGE_PATHS = {
+    path
+    for source in HEALTH_SOURCES.values()
+    if source.host == SONAR_HOST
+    for path in (source.image_path, source.link_path)
+} | {SONAR_BRANCH_LIST}
+
 _BADGE = re.compile(r"\[!\[(?P<alt>[^\]]*)\]\((?P<image>[^)\s]+)\)\]\((?P<link>[^)\s]+)\)")
 _URL = re.compile(r"\]\((?P<url>[^)\s]+)\)")
 _STATUS_NOTE = re.compile(r"\*\*Status: (?P<status>[^*]+?)\.\*\*")
@@ -68,9 +78,19 @@ def _badges() -> list[_Badge]:
     return [_Badge(m["alt"], m["image"], m["link"]) for m in _BADGE.finditer(_readme())]
 
 
+def _image_source(image: str) -> tuple[str, str, str | None]:
+    """Return the host, path and Sonar metric an image URL draws on."""
+    url = urlsplit(image)
+    return url.netloc, url.path, parse_qs(url.query).get("metric", [None])[0]
+
+
 def _health_badges() -> list[_Badge]:
-    """Return the badges whose alt text names a health signal, in README order."""
-    return [badge for badge in _badges() if badge.alt in HEALTH_SOURCES]
+    """Return the badges whose image draws on a health signal, in README order.
+
+    Matching on the image rather than the alt text keeps a relabelled badge, say one for
+    another branch, from slipping past the checks.
+    """
+    return [badge for badge in _badges() if _image_source(badge.image) in _HEALTH_IMAGES]
 
 
 def _badge(alt: str) -> _Badge:
@@ -132,10 +152,12 @@ def test_each_health_badge_image_comes_from_its_source() -> None:
     """Checks and CodeQL draw on their workflows, the Sonar badges on their metrics."""
     offenders: list[str] = []
     for badge in _health_badges():
-        source = HEALTH_SOURCES[badge.alt]
-        image = urlsplit(badge.image)
-        metric = parse_qs(image.query).get("metric", [None])[0]
-        if (image.netloc, image.path, metric) != (source.host, source.image_path, source.metric):
+        source = HEALTH_SOURCES.get(badge.alt)
+        if source is None or _image_source(badge.image) != (
+            source.host,
+            source.image_path,
+            source.metric,
+        ):
             offenders.append(f"{badge.alt}: {badge.image}")
     assert not offenders, offenders
 
@@ -144,9 +166,9 @@ def test_each_health_badge_links_to_devs_view() -> None:
     """Every health badge links to its signal's view, filtered to `dev`."""
     offenders: list[str] = []
     for badge in _health_badges():
-        source = HEALTH_SOURCES[badge.alt]
+        source = HEALTH_SOURCES.get(badge.alt)
         link = urlsplit(badge.link)
-        if (link.netloc, link.path) != (source.host, source.link_path):
+        if source is None or (link.netloc, link.path) != (source.host, source.link_path):
             offenders.append(f"{badge.alt}: links to {badge.link}")
         elif _branch(badge.link) != BRANCH:
             offenders.append(f"{badge.alt}: branch {_branch(badge.link)!r} in {badge.link}")
@@ -154,12 +176,12 @@ def test_each_health_badge_links_to_devs_view() -> None:
 
 
 def test_sonarcloud_urls_name_the_analysed_project() -> None:
-    """Every SonarCloud URL names the project sonar-project.properties analyses."""
+    """Every SonarCloud badge URL and the branch-list link name the analysed project."""
     expected = _sonar_project_key()
     offenders: list[str] = []
     for match in _URL.finditer(_readme()):
         url = urlsplit(match["url"])
-        if url.netloc != SONAR_HOST:
+        if url.netloc != SONAR_HOST or url.path not in SONAR_BADGE_PATHS:
             continue
         query = parse_qs(url.query)
         # Badge images name the project in `project=`, dashboard links in `id=`.
@@ -175,7 +197,7 @@ def test_the_readme_links_sonarclouds_branch_list() -> None:
         match["url"]
         for match in _URL.finditer(_readme())
         if urlsplit(match["url"]).netloc == SONAR_HOST
-        and urlsplit(match["url"]).path == "/project/branches_list"
+        and urlsplit(match["url"]).path == SONAR_BRANCH_LIST
     ]
     assert links, "README.md does not link SonarCloud's branch list"
 

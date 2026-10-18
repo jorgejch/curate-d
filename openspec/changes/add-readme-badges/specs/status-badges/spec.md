@@ -26,6 +26,11 @@ order and their branch.
 - **WHEN** one of the four health badges is absent or out of order
 - **THEN** the unit suite fails, naming the badges it found in place of the expected ones
 
+#### Scenario: A health badge is relabelled
+- **WHEN** a badge draws on one of the four health sources under other alt text, such as a
+  second Checks badge for another branch
+- **THEN** the unit suite still counts it as a health badge and fails
+
 ### Requirement: A health badge links to dev's view
 Each health badge MUST link to the view that owns its signal, filtered to `dev`: for
 Checks and CodeQL, the workflow's runs on `dev`; for the quality gate, SonarCloud's
@@ -46,11 +51,12 @@ Every SonarCloud badge image and link, and the branch-list link, MUST name the p
 that `sonar-project.properties` declares as `sonar.projectKey`.
 
 #### Scenario: Project key matches
-- **WHEN** every SonarCloud URL in the README names the `sonar.projectKey` value
+- **WHEN** every SonarCloud badge URL and the branch-list link name the
+  `sonar.projectKey` value
 - **THEN** the unit suite passes
 
 #### Scenario: Project key drifts
-- **WHEN** a SonarCloud URL names any other project, or `sonar.projectKey` is changed
+- **WHEN** one of those URLs names any other project, or `sonar.projectKey` is changed
   without the README
 - **THEN** the unit suite fails, naming the URL and the expected key
 
