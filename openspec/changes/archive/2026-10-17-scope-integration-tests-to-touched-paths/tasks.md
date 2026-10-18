@@ -57,7 +57,7 @@ may be written first but closes green only after A lands.
 
 ## 3. Integration check
 
-- [ ] 3.1 Open the pull request against `dev`; confirm `Integration tests` runs the suite
+- [x] 3.1 Open the pull request against `dev`; confirm `Integration tests` runs the suite
   and passes (the workflow file is a declared path), and record the run URL in the PR
   description. The skip path can't be shown before merge: the workflow triggers only on
   pull requests to `dev` or `main`, so a draft into the PR branch never starts it (see
