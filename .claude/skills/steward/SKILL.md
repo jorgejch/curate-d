@@ -93,7 +93,7 @@ it passing.
 - **An ask that changes specified behaviour** must also update the affected requirement in
   the PR's delta spec (`openspec/changes/<name>/specs/`), in the same push, and pass
   `openspec validate <name> --strict`. The change directory is committed with the PR; the
-  sync into `openspec/specs/` and the archive follow the merge. If the PR has no OpenSpec
+  sync into `openspec/specs/` and archive the change in this PR or in a named follow-up PR. If the PR has no OpenSpec
   change (a simple fix) and the ask grows it past one, reply proposing an OpenSpec change
   instead of pushing.
 - **Stay within the files the PR's change names.** No drive-by reformatting, import
