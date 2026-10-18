@@ -393,7 +393,11 @@ def test_declared_paths_are_prefixes_or_exact_files() -> None:
         assert not path.startswith(("/", "./")) and not path.endswith("/"), pattern
         if pattern.endswith("/**"):
             assert (REPOSITORY_ROOT / path).is_dir(), pattern
-        elif (REPOSITORY_ROOT / path).exists() or pattern not in IMPLICIT_FILES:
+        elif pattern in IMPLICIT_FILES:
+            # Untracked and local, so it may be absent, or not a regular file: a 1Password
+            # mount makes .env a named pipe. Only a directory would break prefix matching.
+            assert not (REPOSITORY_ROOT / path).is_dir(), pattern
+        else:
             assert (REPOSITORY_ROOT / path).is_file(), pattern
 
 
