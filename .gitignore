@@ -58,9 +58,6 @@ docs/diagrams/**/*.finalize.json
 docs/diagrams/**/*.finalize-summary.json
 docs/diagrams/**/*.browser-check.json
 
-# Local spec-change workspace (proposals, designs, archive); kept out of the public repo.
-openspec/changes/
-
 # Misc.
 /.logfire/
 /.hypothesis/
