@@ -45,13 +45,16 @@ HEALTH_SOURCES = {
 }
 
 _HEALTH_IMAGES = {(s.host, s.image_path, s.metric) for s in HEALTH_SOURCES.values()}
-# The SonarCloud paths the badges and the branch-list link use; other Sonar links aren't pinned.
-SONAR_BADGE_PATHS = {
-    path
-    for source in HEALTH_SOURCES.values()
-    if source.host == SONAR_HOST
-    for path in (source.image_path, source.link_path)
-} | {SONAR_BRANCH_LIST}
+# The SonarCloud paths the badges and the branch-list link use, each with the query parameter
+# it reads the project from: the badge API reads `project=`, the pages `id=`. Other Sonar
+# links aren't pinned.
+_SONAR_SOURCES = [s for s in HEALTH_SOURCES.values() if s.host == SONAR_HOST]
+SONAR_PROJECT_PARAMS = (
+    {s.image_path: "project" for s in _SONAR_SOURCES}
+    | {s.link_path: "id" for s in _SONAR_SOURCES}
+    | {SONAR_BRANCH_LIST: "id"}
+)
+SHIELDS_HOST = "img.shields.io"
 
 _BADGE = re.compile(r"\[!\[(?P<alt>[^\]]*)\]\((?P<image>[^)\s]+)\)\]\((?P<link>[^)\s]+)\)")
 _URL = re.compile(r"\]\((?P<url>[^)\s]+)\)")
@@ -115,9 +118,10 @@ def _branch(url: str) -> str | None:
 
 def _shields_message(image: str) -> str:
     """Return the message of a shields.io static badge, decoding its escapes."""
-    path = unquote(urlsplit(image).path).removeprefix("/badge/")
-    parts = _SHIELDS_SEPARATOR.split(path)
-    if len(parts) != 3:
+    url = urlsplit(image)
+    path = unquote(url.path)
+    parts = _SHIELDS_SEPARATOR.split(path.removeprefix("/badge/"))
+    if url.netloc != SHIELDS_HOST or not path.startswith("/badge/") or len(parts) != 3:
         pytest.fail(f"{image} is not a shields.io static badge (label-message-color)")
     message = parts[1]
     return message.replace("__", "\0").replace("_", " ").replace("\0", "_").replace("--", "-")
@@ -181,13 +185,12 @@ def test_sonarcloud_urls_name_the_analysed_project() -> None:
     offenders: list[str] = []
     for match in _URL.finditer(_readme()):
         url = urlsplit(match["url"])
-        if url.netloc != SONAR_HOST or url.path not in SONAR_BADGE_PATHS:
+        if url.netloc != SONAR_HOST or url.path not in SONAR_PROJECT_PARAMS:
             continue
-        query = parse_qs(url.query)
-        # Badge images name the project in `project=`, dashboard links in `id=`.
-        project = next(iter(query.get("project", []) + query.get("id", [])), None)
+        param = SONAR_PROJECT_PARAMS[url.path]
+        project = parse_qs(url.query).get(param, [None])[0]
         if project != expected:
-            offenders.append(f"{match['url']}: project {project!r}, expected {expected!r}")
+            offenders.append(f"{match['url']}: {param}={project!r}, expected {expected!r}")
     assert not offenders, offenders
 
 

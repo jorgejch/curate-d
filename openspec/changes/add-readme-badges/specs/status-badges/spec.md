@@ -48,7 +48,8 @@ image's `coverage` metric shows.
 
 ### Requirement: SonarCloud badges name the analysed project
 Every SonarCloud badge image and link, and the branch-list link, MUST name the project key
-that `sonar-project.properties` declares as `sonar.projectKey`.
+that `sonar-project.properties` declares as `sonar.projectKey`, in the parameter its
+endpoint reads: `project=` for a badge image, `id=` for a page.
 
 #### Scenario: Project key matches
 - **WHEN** every SonarCloud badge URL and the branch-list link name the
@@ -74,8 +75,9 @@ branch.
 - **THEN** the unit suite fails, naming the missing link
 
 ### Requirement: The License badge matches the declared licence
-The README MUST show one License badge whose value is the SPDX identifier `pyproject.toml`
-declares as `project.license`, and which links to `LICENSE`.
+The README MUST show one License badge, a shields.io static badge (`img.shields.io/badge/`)
+whose value is the SPDX identifier `pyproject.toml` declares as `project.license`, and which
+links to `LICENSE`.
 
 #### Scenario: Licence matches
 - **WHEN** the License badge reads the `project.license` value
@@ -86,8 +88,8 @@ declares as `project.license`, and which links to `LICENSE`.
 - **THEN** the unit suite fails, naming the badge's value and the declared licence
 
 ### Requirement: The Status badge matches the README's status note
-The README MUST show one Status badge whose value equals the status the README's
-"Status:" note states.
+The README MUST show one Status badge, a shields.io static badge (`img.shields.io/badge/`)
+whose value equals the status the README's "Status:" note states.
 
 #### Scenario: Status agrees
 - **WHEN** the note reads "Status: pre-release." and the badge reads "pre-release"
