@@ -1,0 +1,61 @@
+# Version updates only. Security updates ignore this file: with target-branch set, GitHub
+# applies none of an entry's options to them and opens them against the default branch.
+# Patches are grouped and minors and majors are not: every pull request touching a
+# declared path runs the whole integration suite, again after every rebase onto dev.
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: weekly
+      day: friday
+      time: "16:00"
+      timezone: America/Los_Angeles
+    versioning-strategy: increase
+    groups:
+      python-patches:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: [patch]
+    ignore:
+      # A new minor must be re-verified against RustFS and OVH before it is adopted
+      # (pyproject.toml's pin comment). Patches still flow into python-patches.
+      - dependency-name: aioboto3
+        update-types: ["version-update:semver-minor"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: weekly
+      day: friday
+      time: "16:00"
+      timezone: America/Los_Angeles
+    groups:
+      actions-patches-and-minors:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: [patch, minor]
+
+  - package-ecosystem: docker
+    directory: /docker
+    target-branch: dev
+    schedule:
+      interval: weekly
+      day: friday
+      time: "16:00"
+      timezone: America/Los_Angeles
+    groups:
+      # A digest-only refresh under the same tag is no semver level, so it falls outside
+      # this group and opens on its own. Dropping update-types to catch it would also
+      # group the uv image's minors and majors.
+      image-patches:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: [patch]
+    ignore:
+      # The repository targets Python 3.12 (.python-version, requires-python); a
+      # Dockerfile-only bump would move the image off the version everything else declares.
+      - dependency-name: python
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
