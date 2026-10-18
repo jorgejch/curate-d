@@ -56,14 +56,17 @@ EXPECTED_DECLARED_PATHS = [
     ".python-version",
     ".env",
     ".gitattributes",
+    "tests/.gitattributes",
+    "infrastructure/.gitattributes",
+    "docker/.gitattributes",
     ".github/workflows/integration.yml",
 ]
 
 # Files a tool picks up implicitly once they exist, so they select the suite before they do:
 # the ancestor conftest.py files pytest loads for tests/integration, the configuration files
 # pytest prefers in tests/ or the root, every override file name `docker compose` merges into
-# compose.yaml, the .env file Compose and `Settings` read, .gitattributes, and BuildKit's
-# Dockerfile-specific ignore file.
+# compose.yaml, the .env file Compose and `Settings` read, the .gitattributes files that reach
+# a declared input, and BuildKit's Dockerfile-specific ignore file.
 IMPLICIT_FILES = {
     "conftest.py",
     "tests/conftest.py",
@@ -82,6 +85,9 @@ IMPLICIT_FILES = {
     "tests/pyproject.toml",
     ".env",
     ".gitattributes",
+    "tests/.gitattributes",
+    "infrastructure/.gitattributes",
+    "docker/.gitattributes",
     "compose.override.yml",
     "compose.override.yaml",
     "docker-compose.override.yml",

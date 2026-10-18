@@ -94,7 +94,8 @@ cannot be determined or may be incomplete.
 - **WHEN** a pull request adds `conftest.py`, `tests/conftest.py`, a pytest configuration
   file in `tests/` or the root, a Compose override file (`compose.override.yml`,
   `compose.override.yaml`, `docker-compose.override.yml` or `docker-compose.override.yaml`),
-  `.env`, `.gitattributes` or `docker/Dockerfile.dockerignore`
+  `.env`, a `.gitattributes` at the root or in `tests/`, `infrastructure/` or `docker/`, or
+  `docker/Dockerfile.dockerignore`
 - **THEN** the integration job runs the whole suite
 
 #### Scenario: A packaging file is removed

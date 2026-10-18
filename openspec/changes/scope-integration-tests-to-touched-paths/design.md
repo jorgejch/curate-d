@@ -22,7 +22,7 @@ What the suite depends on, found by reading the repository rather than assumed:
 | pytest collection, `tests.stubs` imports | `tests/integration/`, `tests/stubs/`, `tests/__init__.py`; the ancestor `conftest.py` and `tests/conftest.py`, loaded once added |
 | pytest configuration lookup from `tests/integration` upwards | `pytest.toml`, `.pytest.toml`, `pytest.ini`, `.pytest.ini`, `tox.ini`, `setup.cfg` in `tests/` or the root, and `tests/pyproject.toml`, preferred over `pyproject.toml` once added |
 | `docker compose` interpolation, `Settings` | `.env`, read once added (it is ignored today) |
-| checkout | `.gitattributes`, which rewrites declared files as they are checked out |
+| checkout | `.gitattributes`, `tests/.gitattributes`, `infrastructure/.gitattributes`, `docker/.gitattributes`, which rewrite declared files as they are checked out (one deeper sits under a `dir/**` pattern) |
 | the code under test | `src/` |
 | `docker/Dockerfile` `COPY` | `pyproject.toml`, `uv.lock`, `src/`, `migrations/`, `alembic.ini`; also `README.md`, `LICENSE`, `NOTICE` |
 | `.dockerignore`, `docker/Dockerfile.dockerignore` (preferred by BuildKit once added) | shape the build context |

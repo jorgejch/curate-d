@@ -81,7 +81,8 @@ jobs:
       # ancestor conftest.py files pytest loads when collecting tests/integration, the
       # configuration files pytest prefers in tests/ or the root, every override file name
       # `docker compose` merges into compose.yaml, the .env file Compose and `Settings`
-      # read, .gitattributes (which rewrites inputs on checkout), and the
+      # read, the .gitattributes files that rewrite inputs on checkout (the root's, and those
+      # in directories the patterns only partly cover), and the
       # Dockerfile-specific ignore file BuildKit prefers over .dockerignore.
       - name: Detect changes the suite depends on
         id: changes
@@ -127,6 +128,9 @@ jobs:
               - '.python-version'
               - '.env'
               - '.gitattributes'
+              - 'tests/.gitattributes'
+              - 'infrastructure/.gitattributes'
+              - 'docker/.gitattributes'
               - '.github/workflows/integration.yml'
 
       # Every later step runs on `suite == 'true'`, which an empty output would read as a
@@ -173,7 +177,8 @@ jobs:
           `docker/Dockerfile`,
           `docker/Dockerfile.dockerignore`, `.dockerignore`, `Makefile`,
           `pyproject.toml`, `uv.lock`, `.python-version`, `.env`, `.gitattributes`,
-          `.github/workflows/integration.yml`.
+          `tests/.gitattributes`, `infrastructure/.gitattributes`,
+          `docker/.gitattributes`, `.github/workflows/integration.yml`.
           MD
 
       # test_local_ocr.py calls Tesseract from the test process, not from a container.
