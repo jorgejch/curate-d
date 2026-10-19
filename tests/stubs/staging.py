@@ -6,6 +6,7 @@ production while the bytes live in a dict. The store verifies size exactly and c
 SHA-256 while reading, as the S3 store does.
 """
 
+import asyncio
 import hashlib
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
@@ -25,17 +26,26 @@ _BLOCK = 64 * 1024
 
 
 class MemoryStore:
-    """Staged bytes by object key."""
+    """Staged bytes by object key.
+
+    An `upload_gate` makes every upload wait for the event before it reads, with
+    `uploading` set once it does, so a test can cancel an upload in flight.
+    """
 
     def __init__(self) -> None:
         """Start empty."""
         self.objects: dict[str, tuple[StagedObject, bytes]] = {}
         self.uploads = 0
+        self.upload_gate: asyncio.Event | None = None
+        self.uploading = asyncio.Event()
 
     async def upload(
         self, target: StagedObject, source: BinaryIO, *, declared_max_bytes: int
     ) -> StagedObject:
         """Read the source to its end, enforcing the declared size, and keep the bytes."""
+        self.uploading.set()
+        if self.upload_gate is not None:
+            await self.upload_gate.wait()
         digest = hashlib.sha256()
         chunks: list[bytes] = []
         while block := source.read(_BLOCK):
