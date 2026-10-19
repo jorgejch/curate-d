@@ -56,8 +56,8 @@ None.
 ## Impact
 
 - Code: `src/curate_d/staging/cache_index.py`, `occupancy.py`, `publish.py`;
-  `tests/stubs/staging.py` (`MemoryStore` gains `upload_delay`, `upload_gate`,
-  `uploading` for timing and cancellation tests).
+  `tests/stubs/staging.py` (`MemoryStore` gains `upload_gate` and `uploading`
+  for the cancellation test).
 - Tests: `tests/unit/staging/test_cache_index.py`, `test_occupancy.py`, `test_publish.py`;
   `tests/integration/test_staging_coordination.py`, `test_staging_occupancy.py`. The
   integration gate's `suite` filter includes `src/**`, so the pull request runs the whole

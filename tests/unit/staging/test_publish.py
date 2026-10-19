@@ -6,11 +6,14 @@ import io
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
+from typing import BinaryIO
 from uuid import uuid4
 
 import pytest
 from structlog.testing import capture_logs
 
+from curate_d.staging import publish as publish_module
 from curate_d.staging.errors import (
     StagingCapacityExhaustedError,
     StagingIntegrityError,
@@ -135,16 +138,30 @@ async def test_a_publication_reports_its_reservation_phases_once(staging: Memory
     assert (event["evicted"], event["protected"], event["orphans_deleted"]) == (0, 0, 0)
 
 
-async def test_a_slow_upload_shows_in_its_phase(staging: MemoryStaging) -> None:
+async def test_a_slow_upload_shows_in_its_phase(
+    staging: MemoryStaging, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The upload is the phase a transfer timeout bounds, so it is timed on its own."""
-    staging.store.upload_delay = 0.05
+    now = [100.0]
+    monkeypatch.setattr(publish_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    upload = staging.store.upload
+
+    async def slow_upload(
+        target: StagedObject, source: BinaryIO, *, declared_max_bytes: int
+    ) -> StagedObject:
+        """Upload, with the phase clock advancing five seconds while it runs."""
+        now[0] += 5.0
+        return await upload(target, source, declared_max_bytes=declared_max_bytes)
+
+    monkeypatch.setattr(staging.store, "upload", slow_upload)
 
     with capture_logs() as events:
         await publish(staging.writer, _KEY, io.BytesIO(b"abc"), size_bytes=3)
 
     [event] = phase_events(events)
-    assert event["upload_seconds"] >= 0.05
-    assert event["registration_seconds"] < 0.05
+    assert event["upload_seconds"] == 5.0
+    assert event["registration_seconds"] == 0.0
+    assert event["commit_seconds"] == 0.0
 
 
 async def test_a_failed_upload_reports_the_phase_it_failed_in(staging: MemoryStaging) -> None:

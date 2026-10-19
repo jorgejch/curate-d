@@ -113,9 +113,11 @@ measured ...") stays, and reclaim-before-admit stays deferred to #4's reading.
 - [The 182-commit gap hides a semantic conflict `merge-tree` cannot see, e.g. a renamed
   fixture or a moved import] → Run `make test` and the two staging integration files after
   each stream, not only at the end; the integration gate reruns everything in CI.
-- [`test_a_slow_upload_shows_in_its_phase` and the cancellation test depend on wall-clock
-  sleeps via `MemoryStore.upload_delay`] → They are #18's tests and pass on its CI; keep
-  the delays as #18 set them and treat a flake as a finding to report, not to loosen.
+- [`test_a_slow_upload_shows_in_its_phase` bounded registration by wall-clock time behind a
+  `MemoryStore.upload_delay` sleep, and could fail on a paused runner] → Review on the pull
+  request found it; the test now advances a fake `time.monotonic` only inside the upload
+  and asserts exact phases, and `upload_delay` is gone. A flake is a finding to fix
+  deterministically, never to loosen.
 - [One more info line per publication] → I/O-side only, bounded by ingest rate; the docs'
   queries filter by event, so existing queries are unaffected.
 - [Two threshold proposals had different authors' intent; merging them may misstate one]
