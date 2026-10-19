@@ -283,6 +283,9 @@ narrowing is due, when any of these holds:
 - `staging.reader_lock_wait` events with `registered: true` and `wait_seconds` of one
   second or more are at least 1% of all reader events. Readers of live content then wait
   on reclamation's entry claims often enough to matter.
+- Any `staging.reader_lock_wait` event with `registered: true` has `wait_seconds` above
+  60 seconds. That is #1's absolute cap: one stall that long is a defect signal whatever
+  its rate. The reader query's `wait_max` for registered reads shows it.
 
 The first reading from dev, and the threshold's link, go in a comment on #1.
 
