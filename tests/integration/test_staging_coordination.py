@@ -9,7 +9,7 @@ The object store is a fake, so the subject is the coordination and not the backe
 """
 
 import asyncio
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import BinaryIO
@@ -113,14 +113,31 @@ def new_key() -> KeyIssuer:
     return KeyIssuer()
 
 
+async def _delete_registrations(engine: AsyncEngine, keys: Iterable[StagingKey]) -> None:
+    """Delete the registrations of `keys`."""
+    async with engine.begin() as connection:
+        await connection.execute(
+            delete(staged_objects).where(staged_objects.c.staging_key.in_(keys))
+        )
+
+
 @pytest.fixture
 async def _cleanup(ledger_engine: AsyncEngine, new_key: KeyIssuer) -> AsyncIterator[None]:
     """Delete every row the test's keys named, however the test ended."""
     yield
-    async with ledger_engine.begin() as connection:
-        await connection.execute(
-            delete(staged_objects).where(staged_objects.c.staging_key.in_(new_key.issued))
-        )
+    await _delete_registrations(ledger_engine, new_key.issued)
+
+
+@pytest.fixture
+async def colliding_keys(
+    ledger_engine: AsyncEngine, new_key: KeyIssuer
+) -> tuple[StagingKey, StagingKey]:
+    """Return the colliding pair, first deleting any row an interrupted run left for it.
+
+    The pair is fixed, so a leftover winner would make `register` keep the stale row.
+    """
+    await _delete_registrations(ledger_engine, _COLLIDING_KEYS)
+    return new_key.colliding_pair()
 
 
 @pytest.fixture
@@ -417,10 +434,12 @@ async def test_a_reader_behind_a_reclaiming_writer_reports_its_wait(
 
 
 async def test_a_reader_waits_behind_a_writer_that_claimed_only_a_colliding_key(
-    index: PostgresStagingCacheIndex, other_index: PostgresStagingCacheIndex, new_key: KeyIssuer
+    index: PostgresStagingCacheIndex,
+    other_index: PostgresStagingCacheIndex,
+    colliding_keys: tuple[StagingKey, StagingKey],
 ) -> None:
     """On the blocking reader side a lock collision is a stall, not a skip."""
-    reclaimed, read_key = new_key.colliding_pair()
+    reclaimed, read_key = colliding_keys
     winner = staged(read_key)
     orphan = staged(reclaimed)
     await index.register(winner)
@@ -445,10 +464,12 @@ async def test_a_reader_waits_behind_a_writer_that_claimed_only_a_colliding_key(
 
 
 async def test_a_reader_of_a_colliding_key_makes_reconciliation_skip_an_orphan(
-    index: PostgresStagingCacheIndex, other_index: PostgresStagingCacheIndex, new_key: KeyIssuer
+    index: PostgresStagingCacheIndex,
+    other_index: PostgresStagingCacheIndex,
+    colliding_keys: tuple[StagingKey, StagingKey],
 ) -> None:
     """On the writer's try-lock side a collision is an unnecessary skip, retried next pass."""
-    reclaimed, read_key = new_key.colliding_pair()
+    reclaimed, read_key = colliding_keys
     winner = staged(read_key)
     orphan = staged(reclaimed)
     await index.register(winner)
