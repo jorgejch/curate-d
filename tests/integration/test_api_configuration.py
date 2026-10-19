@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from curate_d.api.app import create_app
 from curate_d.config import Settings
-from curate_d.configuration.documents import parse_policy, parse_taxonomy
+from curate_d.configuration.documents import parse_policy, parse_stored_policy, parse_taxonomy
 from curate_d.configuration.store import ConfigurationRepository
 from curate_d.domain import (
     ConfigurationKind,
@@ -28,7 +28,7 @@ pytestmark = pytest.mark.integration
 _PARSERS = {
     ConfigurationKind.TAXONOMY: parse_taxonomy,
     ConfigurationKind.TEMPLATES: parse_templates,
-    ConfigurationKind.POLICY: parse_policy,
+    ConfigurationKind.POLICY: parse_stored_policy,
 }
 
 
