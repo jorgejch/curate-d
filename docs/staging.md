@@ -242,17 +242,28 @@ kubectl logs -n <namespace> <io-pod> --since=24h \
 # was held, overall and for the busiest hour. With a selector, `kubectl logs` keeps only
 # the last 10 lines per pod unless given `--tail=-1`. `--prefix` names each line's pod,
 # and the `sub` strips that name off again. Set WINDOW to the `--since` window in
-# seconds. A holding counts toward the hour in which it ended.
+# seconds. The event is logged as the holding ends, so its `timestamp` (UTC, ISO-8601,
+# microseconds when nonzero) is the end and `held_seconds` before it the start. A
+# holding's time is split across every clock hour it overlaps, and it counts once in
+# each hour's `holdings`, so the hourly counts can sum to more than the total.
 WINDOW=86400
 kubectl logs -n <namespace> -l <io-selector> --since=24h --tail=-1 --prefix \
     --max-log-requests=<io-pod-count> \
   | jq -cR 'sub("^\\[[^]]*\\] "; "") | fromjson? | select(.event == "staging.writer_lock_held")' \
-  | jq -s --argjson window "$WINDOW" '{holdings: length,
-      duty_cycle: ((map(.held_seconds) | add // 0) / $window),
-      busiest_hour: (group_by(.timestamp[0:13])
-        | map({hour: .[0].timestamp[0:13], holdings: length,
-               duty_cycle: ((map(.held_seconds) | add) / 3600)})
-        | max_by(.duty_cycle))}'
+  | jq -s --argjson window "$WINDOW" '
+      map((.timestamp | (.[0:19] + "Z" | fromdateiso8601)
+            + (.[19:] | rtrimstr("Z") | tonumber? // 0)) as $end
+        | {held: .held_seconds, start: ($end - .held_seconds), end: $end})
+      | {holdings: length,
+         duty_cycle: ((map(.held) | add // 0) / $window),
+         busiest_hour: ([.[] | . as $h | ($h.start / 3600 | floor) as $first
+             | range($first; [($h.end / 3600 | ceil), $first + 1] | max)
+             | {hour: ., seconds: (([$h.end, (. + 1) * 3600] | min)
+                                   - ([$h.start, . * 3600] | max))}]
+           | group_by(.hour)
+           | map({hour: (.[0].hour * 3600 | todate[0:13]), holdings: length,
+                  duty_cycle: ((map(.seconds) | add) / 3600)})
+           | max_by(.duty_cycle))}'
 
 # Reader shared-lock wait, split into registered reads and misses (CPU pod).
 # `blocked_1s` counts the reads that waited a second or more.
