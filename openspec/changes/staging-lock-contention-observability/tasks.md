@@ -63,11 +63,11 @@ tests need `make test-stack` once before the first run. Work on one branch cut f
   listing each at least once
 - [x] 3.2 Run `openspec validate staging-lock-contention-observability --strict` and the
   full unit suite one final time; verify both pass
-- [ ] 3.3 Open the pull request against `dev` titled
+- [x] 3.3 Open the pull request against `dev` titled
   `feat(staging): entry claims, reservation phases and collision docs for lock contention`,
   body naming #4, #1, #18 and #15 and the threshold set; verify `Integration tests` runs
   the suite (the diff touches `src/**`) and every required check is green
-- [ ] 3.4 Close PRs #18 and #15 as superseded, each with a comment linking the new PR; never
+- [x] 3.4 Close PRs #18 and #15 as superseded, each with a comment linking the new PR; never
   delete the branches until the new PR merges; verify with `gh pr view 18 --json state` and
   `gh pr view 15 --json state` both `CLOSED`
 
