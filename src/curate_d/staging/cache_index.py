@@ -18,8 +18,12 @@ transaction-scoped, and the writer transaction outlives everything a caller does
 reclamation merely touched therefore waits on `hold_for_download`'s shared lock until
 that transaction ends, and the four-byte entry lock space means a key that only collides
 with a reclaimed one waits with it. The wait is bounded by the holder's transfer timeout
-rather than by a `lock_timeout`, because narrowing it means narrowing the writer lock
-itself, which is the decision recorded in `occupancy`'s module docstring.
+rather than by a `lock_timeout`, which would turn a bounded stall into a failed download.
+Narrowing it does not need a narrower writer lock: reclamation can commit in a writer-lock
+holding of its own before the admitting one starts, so its entry locks end at that commit
+rather than after the upload. That change is deferred with the rest of the decision
+recorded in `occupancy`'s module docstring, until the measurement there shows the lock
+binding (#1, #4).
 """
 
 import asyncio
@@ -88,8 +92,10 @@ def entry_lock_id(key: StagingKey) -> int:
 
     Hashed rather than sliced out of the key so that any key shape maps into the lock
     space, and hashed with a fixed function rather than `hash()`, whose per-process salt
-    would put two pods on different locks for the same entry. A collision costs an
-    unnecessary eviction skip, never a lost protection.
+    would put two pods on different locks for the same entry. A collision never loses a
+    protection, but it costs on both sides of the lock: a writer's try-lock skips an
+    eviction or an orphan delete it did not need to, and a reader's blocking shared lock
+    waits for as long as the transaction of a writer that claimed the colliding key lasts.
     """
     digest = hashlib.blake2b(key.encode(), digest_size=4).digest()
     return int.from_bytes(digest, "big", signed=True)
@@ -204,6 +210,8 @@ class PostgresStagingCacheIndex:
         self._engine = engine
         self._writer_gate = asyncio.Lock()
         self._writer: AsyncConnection | None = None
+        # The entry lock ids the current holding has taken, for its timing event.
+        self._claimed: set[int] = set()
 
     @asynccontextmanager
     async def writer_lock(self, caller: str) -> AsyncGenerator[AsyncConnection, None]:
@@ -217,8 +225,10 @@ class PostgresStagingCacheIndex:
         part way registers nothing.
 
         A fresh acquisition logs `staging.writer_lock_held` once the transaction that owns
-        the lock has ended, with the wait to acquire it and the time it was held. A
-        re-entrant one logs nothing: its time is already inside the outer holding.
+        the lock has ended, with the wait to acquire it, the time it was held and
+        `entry_claims`: the number of distinct entry locks the holding took, every one of
+        them held until the holding ended. A re-entrant acquisition logs nothing: its time
+        and its claims are already inside the outer holding.
 
         Args:
             caller: Label for the operation taking the lock, carried on the event so
@@ -234,6 +244,7 @@ class PostgresStagingCacheIndex:
             return
         requested = time.monotonic()
         acquired: float | None = None
+        claimed: set[int] = set()
         try:
             async with self._writer_gate:
                 with _failures_translated("take the staging writer lock"):
@@ -241,12 +252,14 @@ class PostgresStagingCacheIndex:
                         await connection.execute(_ACQUIRE_WRITER, _WRITER_LOCK_PARAMS)
                         acquired = time.monotonic()
                         self._writer = connection
+                        self._claimed = claimed
                         token = _WRITER_HOLDERS.set(holders | {self})
                         try:
                             yield connection
                         finally:
                             _WRITER_HOLDERS.reset(token)
                             self._writer = None
+                            self._claimed = set()
         finally:
             # After the transaction ends, because that is when PostgreSQL lets go.
             if acquired is not None:
@@ -255,7 +268,21 @@ class PostgresStagingCacheIndex:
                     caller=caller,
                     wait_seconds=acquired - requested,
                     held_seconds=time.monotonic() - acquired,
+                    entry_claims=len(claimed),
                 )
+
+    async def _claim(self, connection: AsyncConnection, key: StagingKey) -> bool:
+        """Try `key`'s exclusive entry lock, counting it against the current holding.
+
+        Counted by lock id rather than by key, because the id is what blocks a reader: a
+        key claimed twice, or two keys colliding on one id, hold one lock. A claim on a
+        key that turns out to be unregistered counts too, since the lock stays held all
+        the same — reclaiming an orphan blocks readers of its key's registered winner.
+        """
+        if not await _claim_entry(connection, key):
+            return False
+        self._claimed.add(entry_lock_id(key))
+        return True
 
     @asynccontextmanager
     async def _current_connection(self) -> AsyncGenerator[AsyncConnection, None]:
@@ -281,9 +308,11 @@ class PostgresStagingCacheIndex:
 
         The block holds a pooled connection and an open transaction for as long as the
         caller keeps it, and can wait on the shared lock for as long as a reclaiming
-        writer's transaction lasts. Callers keep the block to the remote read: work on
-        bytes that already landed locally needs no protection from eviction and must not
-        be done inside it.
+        writer's transaction lasts: the writer need only have claimed `key`, to evict it
+        or to delete an orphan attempt under it, or a key whose entry lock collides with
+        it. A key it evicted yields None once the wait ends. Callers keep the block to
+        the remote read: work on bytes that already landed locally needs no protection
+        from eviction and must not be done inside it.
 
         Raises:
             StagingObjectStoreError: The lock or the read did not complete.
@@ -384,7 +413,7 @@ class PostgresStagingCacheIndex:
         """
         async with self.writer_lock("index.evict") as connection:
             with _failures_translated(f"evict staging key {key}"):
-                if not await _claim_entry(connection, key):
+                if not await self._claim(connection, key):
                     return None
                 registration = await registration_of(connection, key)
                 if registration is None:
@@ -419,6 +448,6 @@ class PostgresStagingCacheIndex:
 
             async def claim(key: StagingKey) -> bool:
                 with _failures_translated(f"claim staging key {key} for cleanup"):
-                    return await _claim_entry(connection, key)
+                    return await self._claim(connection, key)
 
             return await delete_orphans(store, registered, claim=claim)

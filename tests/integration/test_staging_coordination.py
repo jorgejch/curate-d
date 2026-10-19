@@ -9,7 +9,7 @@ The object store is a fake, so the subject is the coordination and not the backe
 """
 
 import asyncio
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import BinaryIO
@@ -30,6 +30,12 @@ from curate_d.staging.objects import StagedObject, StagedObjectRef
 pytestmark = pytest.mark.integration
 
 _WHEN = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+
+# Two valid staging keys whose four-byte entry lock ids collide.
+_COLLIDING_KEYS: tuple[StagingKey, StagingKey] = (
+    StagingKey(f"{0xEAE7:032x}"),
+    StagingKey(f"{0x12388:032x}"),
+)
 
 # Long enough that a lock wait is not mistaken for scheduling latency, short enough that
 # the suite does not pay for it when the lock behaves.
@@ -82,6 +88,11 @@ class KeyIssuer:
         self.issued.append(key)
         return key
 
+    def colliding_pair(self) -> tuple[StagingKey, StagingKey]:
+        """Return two distinct keys that share an entry lock, remembered for cleanup."""
+        self.issued.extend(_COLLIDING_KEYS)
+        return _COLLIDING_KEYS
+
 
 def staged(
     key: StagingKey, *, size: int = 1024, digest: str = "b" * 64, attempt: UUID | None = None
@@ -102,14 +113,31 @@ def new_key() -> KeyIssuer:
     return KeyIssuer()
 
 
+async def _delete_registrations(engine: AsyncEngine, keys: Iterable[StagingKey]) -> None:
+    """Delete the registrations of `keys`."""
+    async with engine.begin() as connection:
+        await connection.execute(
+            delete(staged_objects).where(staged_objects.c.staging_key.in_(keys))
+        )
+
+
 @pytest.fixture
 async def _cleanup(ledger_engine: AsyncEngine, new_key: KeyIssuer) -> AsyncIterator[None]:
     """Delete every row the test's keys named, however the test ended."""
     yield
-    async with ledger_engine.begin() as connection:
-        await connection.execute(
-            delete(staged_objects).where(staged_objects.c.staging_key.in_(new_key.issued))
-        )
+    await _delete_registrations(ledger_engine, new_key.issued)
+
+
+@pytest.fixture
+async def colliding_keys(
+    ledger_engine: AsyncEngine, new_key: KeyIssuer
+) -> tuple[StagingKey, StagingKey]:
+    """Return the colliding pair, first deleting any row an interrupted run left for it.
+
+    The pair is fixed, so a leftover winner would make `register` keep the stale row.
+    """
+    await _delete_registrations(ledger_engine, _COLLIDING_KEYS)
+    return new_key.colliding_pair()
 
 
 @pytest.fixture
@@ -387,7 +415,7 @@ async def test_a_reader_behind_a_reclaiming_writer_reports_its_wait(
             return held
 
     with capture_logs() as events:
-        async with other_index.writer_lock("test"):
+        async with other_index.writer_lock("occupancy.reserve"):
             assert await other_index.reconcile(store) == 1
             reader = asyncio.create_task(read())
             with pytest.raises(TimeoutError):
@@ -399,6 +427,61 @@ async def test_a_reader_behind_a_reclaiming_writer_reports_its_wait(
     assert waits[0]["staging_key"] == str(key)
     assert waits[0]["registered"] is True
     assert waits[0]["wait_seconds"] > _BLOCKED_FOR / 2
+    # The holding that blocked the reader reports the one entry lock it held.
+    held = [e for e in events if e["event"] == "staging.writer_lock_held"]
+    assert [(e["caller"], e["entry_claims"]) for e in held] == [("occupancy.reserve", 1)]
+    assert held[0]["held_seconds"] >= _BLOCKED_FOR
+
+
+async def test_a_reader_waits_behind_a_writer_that_claimed_only_a_colliding_key(
+    index: PostgresStagingCacheIndex,
+    other_index: PostgresStagingCacheIndex,
+    colliding_keys: tuple[StagingKey, StagingKey],
+) -> None:
+    """On the blocking reader side a lock collision is a stall, not a skip."""
+    reclaimed, read_key = colliding_keys
+    winner = staged(read_key)
+    orphan = staged(reclaimed)
+    await index.register(winner)
+    store = FakeObjectStore(orphan.object_key)
+
+    async def read() -> StagedObject | None:
+        async with index.hold_for_download(read_key) as held:
+            return held
+
+    with capture_logs() as events:
+        async with other_index.writer_lock("test"):
+            assert await other_index.reconcile(store) == 1
+            reader = asyncio.create_task(read())
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(reader), timeout=_BLOCKED_FOR)
+        assert await reader == winner
+
+    assert store.deleted == [orphan.object_key]
+    waits = [e for e in events if e["event"] == "staging.reader_lock_wait"]
+    assert [(e["staging_key"], e["registered"]) for e in waits] == [(str(read_key), True)]
+    assert waits[0]["wait_seconds"] > _BLOCKED_FOR / 2
+
+
+async def test_a_reader_of_a_colliding_key_makes_reconciliation_skip_an_orphan(
+    index: PostgresStagingCacheIndex,
+    other_index: PostgresStagingCacheIndex,
+    colliding_keys: tuple[StagingKey, StagingKey],
+) -> None:
+    """On the writer's try-lock side a collision is an unnecessary skip, retried next pass."""
+    reclaimed, read_key = colliding_keys
+    winner = staged(read_key)
+    orphan = staged(reclaimed)
+    await index.register(winner)
+    store = FakeObjectStore(orphan.object_key)
+
+    async with index.hold_for_download(read_key) as held:
+        assert held == winner
+        assert await other_index.reconcile(store) == 0
+        assert store.deleted == []
+
+    assert await other_index.reconcile(store) == 1
+    assert store.deleted == [orphan.object_key]
 
 
 async def test_an_unblocked_reader_of_a_missing_key_reports_a_miss(
@@ -434,3 +517,38 @@ async def test_writer_lock_events_report_one_pods_hold_as_the_others_wait(
     assert set(held) == {"occupancy.sweep", "index.register"}
     assert held["occupancy.sweep"]["held_seconds"] >= _BLOCKED_FOR
     assert held["index.register"]["wait_seconds"] > _BLOCKED_FOR / 2
+
+
+async def test_a_holding_reports_every_entry_it_evicted(
+    index: PostgresStagingCacheIndex, other_index: PostgresStagingCacheIndex, new_key: KeyIssuer
+) -> None:
+    """Each evicted key's entry lock is held until the holding commits."""
+    evicted = [staged(new_key()), staged(new_key())]
+    for obj in evicted:
+        await index.register(obj)
+
+    with capture_logs() as events:
+        async with other_index.writer_lock("occupancy.reserve"):
+            for obj in evicted:
+                assert await other_index.evict(obj.key) == obj
+
+    held = [e for e in events if e["event"] == "staging.writer_lock_held"]
+    assert [(e["caller"], e["entry_claims"]) for e in held] == [("occupancy.reserve", 2)]
+
+
+async def test_a_claim_a_reader_refused_is_not_counted(
+    index: PostgresStagingCacheIndex, other_index: PostgresStagingCacheIndex, new_key: KeyIssuer
+) -> None:
+    """The reader's shared lock wins the try-lock, so the writer holds nothing it could block."""
+    obj = staged(new_key())
+    await index.register(obj)
+
+    with capture_logs() as events:
+        async with (
+            index.hold_for_download(obj.key),
+            other_index.writer_lock("occupancy.sweep"),
+        ):
+            assert await other_index.evict(obj.key) is None
+
+    held = [e for e in events if e["event"] == "staging.writer_lock_held"]
+    assert [(e["caller"], e["entry_claims"]) for e in held] == [("occupancy.sweep", 0)]

@@ -8,6 +8,7 @@ index records whether the writer lock was held for every operation, so "cleanup 
 under the writer lock" is asserted rather than assumed.
 """
 
+import asyncio
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -868,3 +869,65 @@ async def test_a_pass_with_nothing_to_delete_opens_no_connection_for_it(
     assert reclaimed.evicted == ()
     # Two listings — reconciliation's and the eviction candidates' — and nothing else.
     assert store.clients_opened - opened_before == 2
+
+
+class SlowListingStore(FakeObjectStore):
+    """Takes `delay` seconds to start every listing, standing in for a slow paginator."""
+
+    def __init__(self, delay: float) -> None:
+        """Start empty, with every listing delayed by `delay` seconds."""
+        super().__init__()
+        self.delay = delay
+
+    async def list_objects(self) -> AsyncIterator[StagedObjectRef]:
+        """Wait `delay` seconds, then list as the fake store does."""
+        await asyncio.sleep(self.delay)
+        async for ref in super().list_objects():
+            yield ref
+
+
+async def test_an_admission_reports_how_long_its_decision_took(index: FakeCacheIndex) -> None:
+    """The decision's time under the lock is the admission share of a reservation's hold."""
+    delay = 0.02
+    store = SlowListingStore(delay)
+    subject = occupancy_for(store, index, max_bytes=1000)
+
+    async with subject.reserve(100) as admitted:
+        assert admitted.admission_seconds >= delay
+
+
+async def test_an_admission_that_reclaims_counts_every_listing_it_waited_on(
+    index: FakeCacheIndex,
+) -> None:
+    """Measurement, reconciliation and the candidate listing all fall inside the decision."""
+    delay = 0.02
+    store = SlowListingStore(delay)
+    publish(index, store, seed=1, size=600)
+    subject = occupancy_for(store, index, max_bytes=1000)
+
+    async with subject.reserve(600) as admitted:
+        assert admitted.reclaimed.evicted == (StagingKey(f"{1:032x}"),)
+        assert admitted.admission_seconds >= 3 * delay
+
+
+async def test_an_uncontended_admission_reports_its_time(
+    store: FakeObjectStore, index: FakeCacheIndex
+) -> None:
+    """A fast decision still reports its time rather than leaving the default in place."""
+    subject = occupancy_for(store, index, max_bytes=1000)
+
+    async with subject.reserve(0) as admitted:
+        assert admitted.admission_seconds > 0
+
+
+async def test_a_refusal_raises_as_before_the_timing_was_added(
+    store: FakeObjectStore, index: FakeCacheIndex
+) -> None:
+    """A refusal yields no admission, so it has no admission time to report."""
+    held = publish(index, store, seed=1, size=800)
+    index.held.add(held.key)
+    subject = occupancy_for(store, index, max_bytes=1000)
+
+    with pytest.raises(StagingCapacityExhaustedError, match="being downloaded"):
+        async with subject.reserve(500):
+            pytest.fail("a refused reservation must not run its block")

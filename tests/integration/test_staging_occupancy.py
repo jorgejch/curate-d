@@ -23,15 +23,18 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from structlog.testing import capture_logs
 
 from curate_d.config import S3AddressingStyle, Settings, StagingRole
 from curate_d.ledger.tables import staged_objects
 from curate_d.staging.cache_index import PostgresStagingCacheIndex
 from curate_d.staging.errors import StagingCapacityExhaustedError, StagingObjectStoreError
+from curate_d.staging.factories import StagingWriterBackend
 from curate_d.staging.keys import StagingKey
 from curate_d.staging.object_store import S3StagingObjectStore
 from curate_d.staging.objects import StagedObject, StagedObjectRef, StagingObjectStore
 from curate_d.staging.occupancy import StagingOccupancy
+from curate_d.staging.publish import publish
 
 pytestmark = pytest.mark.integration
 
@@ -380,3 +383,38 @@ async def test_a_failed_deletion_mid_sweep_keeps_the_rows_it_already_removed(
     repaired = occupancy_for(store, other_index, max_bytes=4096)
     assert (await repaired.sweep()).orphans_deleted == 1
     assert [ref async for ref in store.list_objects()] == []
+
+
+async def test_a_reclaiming_publication_splits_its_hold_into_phases(
+    store: S3StagingObjectStore,
+    index: PostgresStagingCacheIndex,
+    other_index: PostgresStagingCacheIndex,
+    new_key: KeyIssuer,
+) -> None:
+    """The phases account for the reserve hold, and its eviction for an entry claim."""
+    idle = await stage(store, index, new_key())
+    key = new_key()
+    backend = StagingWriterBackend(
+        store=store,
+        index=other_index,
+        occupancy=occupancy_for(store, other_index, max_bytes=100),
+        upload_max_age=timedelta(hours=1),
+    )
+
+    with capture_logs() as events:
+        published = await publish(backend, key, BytesIO(_PAYLOAD), size_bytes=len(_PAYLOAD))
+
+    assert published.staged.key == key
+    assert await index.lookup(idle.key) is None
+    [phases] = [e for e in events if e["event"] == "staging.reservation_phases"]
+    assert phases["outcome"] == "registered"
+    assert phases["evicted"] >= 1
+    [reserve] = [
+        e
+        for e in events
+        if e["event"] == "staging.writer_lock_held" and e["caller"] == "occupancy.reserve"
+    ]
+    assert reserve["entry_claims"] >= 1
+    assert reserve["held_seconds"] >= (
+        phases["admission_seconds"] + phases["upload_seconds"] + phases["registration_seconds"]
+    )
