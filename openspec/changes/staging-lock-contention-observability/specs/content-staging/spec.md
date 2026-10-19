@@ -57,7 +57,8 @@ Every reader hold on a staged entry SHALL emit one `staging.reader_lock_wait` ev
 requested key, the time spent waiting for the shared entry lock alone, and whether the key
 was registered. A reader MUST wait, never fail, while a writer holds the entry lock,
 whether the writer claimed the reader's key or a key whose entry lock id collides with
-it, and MUST receive the registered winner once the writer's transaction ends.
+it. Once the writer's transaction ends, the reader MUST receive the registered winner, or
+a cache miss if the writer evicted the key.
 
 #### Scenario: A reader behind a reclaiming writer reports its wait
 - **WHEN** a writer deletes an orphan attempt under a registered key inside an open holding and a reader asks for that key
