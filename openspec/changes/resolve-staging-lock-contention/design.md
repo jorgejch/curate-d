@@ -127,8 +127,9 @@ async with occupancy.reserve(key, attempt_id, size) as reservation:   # holding 
     await reservation.register(staged)                                 # holding 2
 ```
 
-Holding 1 (`writer_lock("occupancy.reserve")`): expire dead reservations, measure (listing
-total + live reserved bytes), reclaim under pressure, insert this reservation; commit.
+Holding 1 (`writer_lock("occupancy.reserve")`): measure (listing total + live reserved
+bytes; expired rows are not counted), reclaim under pressure (its reconciliation deletes
+expired rows), insert this reservation; commit.
 `AdmissionReport` gains nothing new; `OccupancyReport` gains `reserved_bytes`, and
 `measure_occupancy(store, index)` keeps its signature and reads `reserved_bytes` from the
 index when it exposes `total_reserved_bytes()`, else 0. Holding 2
@@ -181,8 +182,12 @@ until holding 2.
 `staging.reservation_phases` keeps `admission_seconds` (holding 1 from acquisition to the
 decision, as today), `upload_seconds` (upload outside the lock), `registration_seconds`
 (from upload end to the registration insert, now including the wait for holding 2) and
-`commit_seconds` (insert to holding 2's end). The four add up to the reservation's lifetime
-after the admission lock wait, no longer to one `held_seconds`. `staging.writer_lock_held`
+`commit_seconds` (insert to holding 2's end). For any admitted reservation, the
+phases that started add up to its lifetime after the admission lock wait, no longer to one
+`held_seconds`: a phase that never started is null, and one cut short by a failure or
+cancellation runs to the reservation's end, so it absorbs the `occupancy.abandon` holding.
+The admission holding's reservation insert and commit and, after an eviction, the deletion
+of the evicted bytes fall between the decision and the upload and are in no phase. `staging.writer_lock_held`
 keeps `occupancy.reserve` for holding 1, so the "Revisit threshold" queries and the
 duty-cycle query keep working with their meaning sharpened (the duty cycle no longer
 includes transfers); it gains `occupancy.register` and `occupancy.abandon`. No field is
