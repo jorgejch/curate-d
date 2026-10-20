@@ -11,7 +11,7 @@ The object store is a fake, so the subject is the coordination and not the backe
 import asyncio
 from collections.abc import AsyncGenerator, AsyncIterator, Iterable
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import BinaryIO
 from uuid import UUID, uuid4
 
@@ -21,11 +21,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from structlog.testing import capture_logs
 
 from curate_d.config import Settings
-from curate_d.ledger.tables import staged_objects
+from curate_d.ledger.tables import staged_objects, staging_reservations
 from curate_d.staging.cache_index import PostgresStagingCacheIndex
 from curate_d.staging.errors import StagingObjectStoreError
 from curate_d.staging.keys import StagingKey
 from curate_d.staging.objects import StagedObject, StagedObjectRef
+from curate_d.staging.occupancy import StagingOccupancy
 
 pytestmark = pytest.mark.integration
 
@@ -40,6 +41,11 @@ _COLLIDING_KEYS: tuple[StagingKey, StagingKey] = (
 # Long enough that a lock wait is not mistaken for scheduling latency, short enough that
 # the suite does not pay for it when the lock behaves.
 _BLOCKED_FOR = 0.25
+
+# A reservation that outlives any test, and one the database clock has already expired to
+# every later transaction.
+_LIVE = timedelta(minutes=10)
+_EXPIRED = timedelta(0)
 
 
 class WriterInterruptedError(Exception):
@@ -121,11 +127,20 @@ async def _delete_registrations(engine: AsyncEngine, keys: Iterable[StagingKey])
         )
 
 
+async def _delete_reservations(engine: AsyncEngine, keys: Iterable[StagingKey]) -> None:
+    """Delete the reservations made under `keys`."""
+    async with engine.begin() as connection:
+        await connection.execute(
+            delete(staging_reservations).where(staging_reservations.c.staging_key.in_(keys))
+        )
+
+
 @pytest.fixture
 async def _cleanup(ledger_engine: AsyncEngine, new_key: KeyIssuer) -> AsyncIterator[None]:
     """Delete every row the test's keys named, however the test ended."""
     yield
     await _delete_registrations(ledger_engine, new_key.issued)
+    await _delete_reservations(ledger_engine, new_key.issued)
 
 
 @pytest.fixture
@@ -134,9 +149,11 @@ async def colliding_keys(
 ) -> tuple[StagingKey, StagingKey]:
     """Return the colliding pair, first deleting any row an interrupted run left for it.
 
-    The pair is fixed, so a leftover winner would make `register` keep the stale row.
+    The pair is fixed, so a leftover winner would make `register` keep the stale row, and
+    a leftover reservation would spare an orphan reconciliation is meant to collect.
     """
     await _delete_registrations(ledger_engine, _COLLIDING_KEYS)
+    await _delete_reservations(ledger_engine, _COLLIDING_KEYS)
     return new_key.colliding_pair()
 
 
@@ -163,6 +180,17 @@ async def registration_count(engine: AsyncEngine, key: StagingKey) -> int:
             select(func.count())
             .select_from(staged_objects)
             .where(staged_objects.c.staging_key == key)
+        )
+        return int(result.scalar_one())
+
+
+async def reservation_count(engine: AsyncEngine, attempt_id: UUID) -> int:
+    """Count reservation rows for `attempt_id` directly, expired or not."""
+    async with engine.connect() as connection:
+        result = await connection.execute(
+            select(func.count())
+            .select_from(staging_reservations)
+            .where(staging_reservations.c.attempt_id == attempt_id)
         )
         return int(result.scalar_one())
 
@@ -552,3 +580,206 @@ async def test_a_claim_a_reader_refused_is_not_counted(
 
     held = [e for e in events if e["event"] == "staging.writer_lock_held"]
     assert [(e["caller"], e["entry_claims"]) for e in held] == [("occupancy.sweep", 0)]
+
+
+async def test_a_reservation_is_counted_by_another_worker(
+    index: PostgresStagingCacheIndex, other_index: PostgresStagingCacheIndex, new_key: KeyIssuer
+) -> None:
+    """Headroom one pod reserved is spent for every pod before its bytes land."""
+    baseline = await other_index.total_reserved_bytes()
+
+    await index.reserve(new_key(), uuid4(), 4096, _LIVE)
+
+    assert await other_index.total_reserved_bytes() - baseline == 4096
+
+
+async def test_a_reservation_is_consumed_exactly_once(
+    index: PostgresStagingCacheIndex, other_index: PostgresStagingCacheIndex, new_key: KeyIssuer
+) -> None:
+    """The first consumer proves the bytes were protected; a repeat finds nothing to consume."""
+    attempt = uuid4()
+    await index.reserve(new_key(), attempt, 1024, _LIVE)
+
+    assert await other_index.consume_reservation(attempt) is True
+    assert await index.consume_reservation(attempt) is False
+
+
+async def test_an_expired_reservation_cannot_be_consumed(
+    ledger_engine: AsyncEngine,
+    index: PostgresStagingCacheIndex,
+    other_index: PostgresStagingCacheIndex,
+    new_key: KeyIssuer,
+) -> None:
+    """Past its expiry by the database clock, the reservation no longer protects anything."""
+    attempt = uuid4()
+    baseline = await other_index.total_reserved_bytes()
+    await index.reserve(new_key(), attempt, 1024, _EXPIRED)
+
+    assert await other_index.consume_reservation(attempt) is False
+    assert await other_index.total_reserved_bytes() == baseline
+    # Not consumed, so the row stays until reconciliation or abandonment removes it.
+    assert await reservation_count(ledger_engine, attempt) == 1
+
+
+async def test_reconciliation_collects_an_expired_reservations_object(
+    ledger_engine: AsyncEngine,
+    index: PostgresStagingCacheIndex,
+    other_index: PostgresStagingCacheIndex,
+    new_key: KeyIssuer,
+) -> None:
+    """A dead pod's completed upload is an orphan once its reservation expires."""
+    obj = staged(new_key())
+    await index.reserve(obj.key, obj.attempt_id, obj.size_bytes, _EXPIRED)
+    store = FakeObjectStore(obj.object_key)
+
+    assert await other_index.reconcile(store) == 1
+
+    assert store.deleted == [obj.object_key]
+    assert await reservation_count(ledger_engine, obj.attempt_id) == 0
+
+
+async def test_reconciliation_spares_another_workers_live_reservation(
+    index: PostgresStagingCacheIndex, other_index: PostgresStagingCacheIndex, new_key: KeyIssuer
+) -> None:
+    """A completed upload awaiting its registration survives a sweep, and then registers."""
+    obj = staged(new_key())
+    await index.reserve(obj.key, obj.attempt_id, obj.size_bytes, _LIVE)
+    store = FakeObjectStore(obj.object_key)
+
+    assert await other_index.reconcile(store) == 0
+    assert store.deleted == []
+
+    async with index.writer_lock("occupancy.register"):
+        assert await index.consume_reservation(obj.attempt_id) is True
+        await index.register(obj)
+
+    assert await other_index.lookup(obj.key) == obj
+    assert await other_index.reconcile(store) == 0
+
+
+async def test_a_forget_outside_any_holding_reports_an_abandon_holding(
+    ledger_engine: AsyncEngine, index: PostgresStagingCacheIndex, new_key: KeyIssuer
+) -> None:
+    """Abandonment is its own holding of the writer lock, labelled for the lock's demand."""
+    attempt = uuid4()
+    await index.reserve(new_key(), attempt, 1024, _LIVE)
+
+    with capture_logs() as events:
+        await index.forget_reservation(attempt)
+
+    held = [e for e in events if e["event"] == "staging.writer_lock_held"]
+    assert [(e["caller"], e["entry_claims"]) for e in held] == [("occupancy.abandon", 0)]
+    assert await reservation_count(ledger_engine, attempt) == 0
+
+
+async def test_forgetting_removes_an_expired_reservation_too(
+    ledger_engine: AsyncEngine,
+    index: PostgresStagingCacheIndex,
+    other_index: PostgresStagingCacheIndex,
+    new_key: KeyIssuer,
+) -> None:
+    """Abandonment removes the row whatever the clock says, so nothing waits for a sweep."""
+    attempt = uuid4()
+    await index.reserve(new_key(), attempt, 1024, _EXPIRED)
+
+    await other_index.forget_reservation(attempt)
+
+    assert await reservation_count(ledger_engine, attempt) == 0
+
+
+class ShrinkingObjectStore(FakeObjectStore):
+    """A fake store whose listing loses what it deletes, as the real one does.
+
+    Admission lists again after reconciling, so a deleted orphan that stayed listed would
+    look like occupancy and push it into evicting the very winner the reader wants.
+    """
+
+    async def delete(self, object_key: str) -> None:
+        await super().delete(object_key)
+        self.listing.remove(object_key)
+
+
+def admitting(other_index: PostgresStagingCacheIndex, store: FakeObjectStore) -> StagingOccupancy:
+    """Return a writer pod's occupancy whose 1500-byte bound a 1024-byte object pressures.
+
+    Pinned to the fake listing's timestamp, so nothing it lists is past the age bound.
+    """
+    return StagingOccupancy(
+        store,
+        other_index,
+        max_bytes=1500,
+        max_age=timedelta(hours=24),
+        reservation_ttl=_LIVE,
+        clock=lambda: _WHEN,
+    )
+
+
+async def read_within_bound(
+    index: PostgresStagingCacheIndex, key: StagingKey
+) -> tuple[StagedObject | None, list[dict[str, object]]]:
+    """Read `key`, failing if the entry lock keeps the reader waiting past `_BLOCKED_FOR`."""
+    with capture_logs() as events:
+        async with asyncio.timeout(_BLOCKED_FOR):
+            async with index.hold_for_download(key) as held:
+                pass
+    return held, [dict(e) for e in events if e["event"] == "staging.reader_lock_wait"]
+
+
+async def test_a_reader_is_not_blocked_by_an_admitted_upload_whose_admission_reclaimed_its_key(
+    index: PostgresStagingCacheIndex, other_index: PostgresStagingCacheIndex, new_key: KeyIssuer
+) -> None:
+    """The orphan delete's entry claim ended with the admission holding, before the upload."""
+    key = new_key()
+    winner = staged(key)
+    loser = staged(key)
+    await index.register(winner)
+    store = ShrinkingObjectStore(winner.object_key, loser.object_key)
+
+    # 400 bytes overflow the bound beside both objects and fit once the orphan is gone,
+    # so the winner is never an eviction candidate.
+    async with admitting(other_index, store).reserve(new_key(), uuid4(), 400) as reservation:
+        assert reservation.admission.reclaimed.orphans_deleted == 1
+        assert reservation.admission.reclaimed.evicted == ()
+        held, waits = await read_within_bound(index, key)
+
+    assert store.deleted == [loser.object_key]
+    assert held == winner
+    assert [(e["staging_key"], e["registered"]) for e in waits] == [(str(key), True)]
+
+
+async def test_a_reader_of_a_colliding_key_is_not_blocked_by_an_admitted_upload(
+    index: PostgresStagingCacheIndex,
+    other_index: PostgresStagingCacheIndex,
+    colliding_keys: tuple[StagingKey, StagingKey],
+    new_key: KeyIssuer,
+) -> None:
+    """A collision with a reclaimed key costs at most the admission holding, not a transfer."""
+    reclaimed, read_key = colliding_keys
+    winner = staged(read_key)
+    orphan = staged(reclaimed)
+    await index.register(winner)
+    store = ShrinkingObjectStore(orphan.object_key)
+
+    async with admitting(other_index, store).reserve(new_key(), uuid4(), 1024) as reservation:
+        assert reservation.admission.reclaimed.orphans_deleted == 1
+        held, waits = await read_within_bound(index, read_key)
+
+    assert held == winner
+    assert [(e["staging_key"], e["registered"]) for e in waits] == [(str(read_key), True)]
+
+
+async def test_a_reader_of_a_key_an_admission_evicted_gets_its_miss_without_waiting(
+    index: PostgresStagingCacheIndex, other_index: PostgresStagingCacheIndex, new_key: KeyIssuer
+) -> None:
+    """The eviction committed with the admission, so the reader learns of it at once."""
+    evicted = staged(new_key())
+    await index.register(evicted)
+    store = ShrinkingObjectStore(evicted.object_key)
+
+    async with admitting(other_index, store).reserve(new_key(), uuid4(), 1024) as reservation:
+        assert reservation.admission.reclaimed.evicted == (evicted.key,)
+        held, waits = await read_within_bound(index, evicted.key)
+
+    assert store.deleted == [evicted.object_key]
+    assert held is None
+    assert [(e["staging_key"], e["registered"]) for e in waits] == [(str(evicted.key), False)]

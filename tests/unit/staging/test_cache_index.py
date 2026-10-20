@@ -1,4 +1,4 @@
-"""Cache index behaviour that needs no database: lock derivation, mapping, cleanup.
+"""Cache index behaviour that needs no database: lock derivation, mapping, cleanup, reservations.
 
 The object store is a fake with a scripted listing, and the "database" is an engine
 pointed at a closed port, which is how the typed-failure contract is checked without
@@ -8,9 +8,9 @@ known time.
 """
 
 import asyncio
-from collections.abc import AsyncGenerator, AsyncIterator, Iterator, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import BinaryIO, cast
 from uuid import UUID, uuid4
 
@@ -482,7 +482,9 @@ class ScriptedEngine:
     """
 
     def __init__(
-        self, connection: SlowLockConnection, finalized: asyncio.Event | None = None
+        self,
+        connection: "SlowLockConnection | ReservationConnection",
+        finalized: asyncio.Event | None = None,
     ) -> None:
         self.connection = connection
         self.finalized = finalized
@@ -490,7 +492,7 @@ class ScriptedEngine:
         self.outcomes: list[str] = []
 
     @asynccontextmanager
-    async def begin(self) -> AsyncGenerator[SlowLockConnection, None]:
+    async def begin(self) -> AsyncGenerator["SlowLockConnection | ReservationConnection", None]:
         outcome = "rollback"
         try:
             yield self.connection
@@ -500,6 +502,11 @@ class ScriptedEngine:
             if self.finalized is not None:
                 await self.finalized.wait()
             self.outcomes.append(outcome)
+
+    @asynccontextmanager
+    async def connect(self) -> AsyncGenerator["SlowLockConnection | ReservationConnection", None]:
+        """Hand out the scripted connection outside any transaction."""
+        yield self.connection
 
 
 def slow_index(delay: float = _LOCK_DELAY, *, granted: bool = True) -> PostgresStagingCacheIndex:
@@ -739,3 +746,239 @@ async def test_a_failed_holding_still_reports_its_claims() -> None:
             raise RuntimeError
 
     assert held_events(events)[0]["entry_claims"] == 1
+
+
+async def test_cleanup_spares_an_object_a_live_reservation_names() -> None:
+    """A completed upload awaiting its registration is in flight, not an orphan."""
+    reserved = staged(key_for(6))
+    orphan = staged(key_for(7))
+    store = FakeObjectStore(reserved.object_key, orphan.object_key)
+
+    deleted = await delete_orphans(store, {reserved.object_key}, claim=ClaimRecorder())
+
+    assert deleted == 1
+    assert store.deleted == [orphan.object_key]
+
+
+async def test_reserving_without_a_database_is_a_typed_failure(
+    unreachable_index: PostgresStagingCacheIndex,
+) -> None:
+    """Admission must not proceed on headroom it could not record as claimed."""
+    with pytest.raises(StagingObjectStoreError, match="writer lock"):
+        await unreachable_index.reserve(key_for(1), uuid4(), 1024, timedelta(minutes=10))
+
+
+async def test_consuming_a_reservation_without_a_database_is_a_typed_failure(
+    unreachable_index: PostgresStagingCacheIndex,
+) -> None:
+    """A registration that cannot confirm its reservation must not read that as lost or held."""
+    with pytest.raises(StagingObjectStoreError, match="writer lock"):
+        await unreachable_index.consume_reservation(uuid4())
+
+
+async def test_forgetting_a_reservation_without_a_database_is_a_typed_failure(
+    unreachable_index: PostgresStagingCacheIndex,
+) -> None:
+    """An abandonment that did not commit is visible, so the caller can leave it to expiry."""
+    with pytest.raises(StagingObjectStoreError, match="writer lock"):
+        await unreachable_index.forget_reservation(uuid4())
+
+
+async def test_reserved_accounting_without_a_database_is_a_typed_failure(
+    unreachable_index: PostgresStagingCacheIndex,
+) -> None:
+    """Admission must fail closed rather than read unreachable reservations as none."""
+    with pytest.raises(StagingObjectStoreError, match="reserved staging bytes"):
+        await unreachable_index.total_reserved_bytes()
+
+
+class RowsResult:
+    """Grants every lock probe and answers row reads with the scripted rows."""
+
+    def __init__(self, rows: Sequence[Mapping[str, object]]) -> None:
+        """Answer row reads with `rows`."""
+        self._rows = list(rows)
+
+    def scalar_one(self) -> bool:
+        """Grant the lock probe."""
+        return True
+
+    def mappings(self) -> "RowsResult":
+        """Return the rows as mappings, which they already are."""
+        return self
+
+    def one_or_none(self) -> Mapping[str, object] | None:
+        """Return the single scripted row, or None when there is none."""
+        return self._rows[0] if self._rows else None
+
+    def one(self) -> Mapping[str, object]:
+        """Return the single scripted row."""
+        [row] = self._rows
+        return row
+
+    def __iter__(self) -> Iterator[Mapping[str, object]]:
+        """Iterate over the scripted rows."""
+        return iter(self._rows)
+
+
+class ReservationConnection:
+    """Answers reservation statements from a script and records every statement it runs.
+
+    `live` is what the reservation read returns, standing in for the rows the database
+    clock has not expired; `consumable` is whether a consuming delete finds its row.
+    """
+
+    def __init__(self, *, live: Sequence[StagedObject] = (), consumable: bool = False) -> None:
+        """Script the live reservations and the consuming delete's answer."""
+        self.live = list(live)
+        self.consumable = consumable
+        self.statements: list[str] = []
+
+    async def execute(
+        self, statement: Executable, parameters: Mapping[str, int] | None = None
+    ) -> RowsResult:
+        """Record `statement` and answer it from the script."""
+        sql = str(statement)
+        self.statements.append(sql)
+        if sql.startswith("SELECT staging_reservations.staging_key"):
+            return RowsResult(
+                [{"staging_key": str(obj.key), "attempt_id": obj.attempt_id} for obj in self.live]
+            )
+        if "sum(staging_reservations.reserved_bytes)" in sql:
+            return RowsResult([{"total": sum(obj.size_bytes for obj in self.live)}])
+        if sql.startswith("DELETE FROM staging_reservations") and "RETURNING" in sql:
+            return RowsResult([{"attempt_id": uuid4()}] if self.consumable else [])
+        return RowsResult([])
+
+    def reservation_statements(self) -> list[str]:
+        """Return the statements that touched the reservation table, in order."""
+        return [sql for sql in self.statements if "staging_reservations" in sql]
+
+
+def reservation_index(connection: ReservationConnection) -> PostgresStagingCacheIndex:
+    """Return an index whose every transaction runs on `connection`."""
+    return PostgresStagingCacheIndex(cast(AsyncEngine, ScriptedEngine(connection)))
+
+
+async def test_consuming_an_absent_or_expired_reservation_reports_false() -> None:
+    """No row deleted means nothing protected the bytes, so nothing may be registered."""
+    index = reservation_index(ReservationConnection(consumable=False))
+    assert await index.consume_reservation(uuid4()) is False
+
+
+async def test_consuming_a_live_reservation_reports_true() -> None:
+    """The row that went is the proof that the bytes were protected until now."""
+    index = reservation_index(ReservationConnection(consumable=True))
+    assert await index.consume_reservation(uuid4()) is True
+
+
+async def test_consumption_removes_only_a_reservation_the_database_clock_keeps_live() -> None:
+    """An expired reservation's bytes may already be collected; consuming it would hide that."""
+    connection = ReservationConnection()
+
+    await reservation_index(connection).consume_reservation(uuid4())
+
+    [consume] = connection.reservation_statements()
+    assert consume.startswith("DELETE FROM staging_reservations")
+    assert "staging_reservations.expires_at > now()" in consume
+
+
+async def test_a_reservation_expires_by_the_database_clock() -> None:
+    """The expiry is written from the server's now(), never a pod's clock."""
+    connection = ReservationConnection()
+
+    await reservation_index(connection).reserve(key_for(1), uuid4(), 1024, timedelta(minutes=10))
+
+    [reserve] = connection.reservation_statements()
+    assert reserve.startswith("INSERT INTO staging_reservations")
+    assert "(now() + " in reserve
+
+
+async def test_forgetting_removes_a_reservation_whether_or_not_it_expired() -> None:
+    """Abandonment clears the row either way; an expired leftover would only wait for reconcile."""
+    connection = ReservationConnection()
+
+    await reservation_index(connection).forget_reservation(uuid4())
+
+    [forget] = connection.reservation_statements()
+    assert forget.startswith("DELETE FROM staging_reservations")
+    assert "expires_at" not in forget
+
+
+async def test_live_reserved_bytes_are_totalled_by_the_database_clock() -> None:
+    """Admission counts only reservations the server still considers live."""
+    connection = ReservationConnection(live=[staged(key_for(1), size=7), staged(key_for(2))])
+
+    assert await reservation_index(connection).total_reserved_bytes() == 1031
+
+    [total] = connection.reservation_statements()
+    assert "FROM staging_reservations" in total
+    assert "staging_reservations.expires_at > now()" in total
+
+
+async def test_a_fresh_forget_reports_an_abandon_holding() -> None:
+    """Abandonment outside any holding is its own, labelled, demand for the lock."""
+    index = reservation_index(ReservationConnection())
+
+    with capture_logs() as events:
+        await index.forget_reservation(uuid4())
+
+    assert [(e["caller"], e["entry_claims"]) for e in held_events(events)] == [
+        ("occupancy.abandon", 0)
+    ]
+
+
+async def test_reservation_writes_join_the_holding_their_caller_has() -> None:
+    """Admission's reservation and registration's consumption commit with their holdings."""
+    index = reservation_index(ReservationConnection(consumable=True))
+
+    with capture_logs() as events:
+        async with index.writer_lock("occupancy.reserve"):
+            await index.reserve(key_for(1), uuid4(), 1024, timedelta(minutes=10))
+        async with index.writer_lock("occupancy.register"):
+            assert await index.consume_reservation(uuid4()) is True
+            await index.register(staged(key_for(1)))
+        async with index.writer_lock("occupancy.abandon"):
+            await index.forget_reservation(uuid4())
+
+    assert [e["caller"] for e in held_events(events)] == [
+        "occupancy.reserve",
+        "occupancy.register",
+        "occupancy.abandon",
+    ]
+
+
+async def test_reconciliation_expires_dead_reservations_before_reading_what_to_spare() -> None:
+    """An expired reservation's headroom returns, and its object is no longer spared."""
+    connection = ReservationConnection()
+
+    await reservation_index(connection).reconcile(FakeObjectStore())
+
+    expire, read = connection.reservation_statements()
+    assert expire.startswith("DELETE FROM staging_reservations")
+    assert "staging_reservations.expires_at <= now()" in expire
+    assert read.startswith("SELECT staging_reservations.staging_key")
+    assert "staging_reservations.expires_at > now()" in read
+
+
+async def test_reconciliation_spares_an_object_under_a_live_reservation() -> None:
+    """Another pod's completed upload awaiting registration survives the sweep."""
+    reserved = staged(key_for(1))
+    orphan = staged(key_for(2))
+    store = FakeObjectStore(reserved.object_key, orphan.object_key)
+
+    deleted = await reservation_index(ReservationConnection(live=[reserved])).reconcile(store)
+
+    assert deleted == 1
+    assert store.deleted == [orphan.object_key]
+
+
+async def test_reconciliation_collects_an_object_whose_reservation_expired() -> None:
+    """Once the database clock drops the reservation, the attempt's bytes are an orphan."""
+    expired = staged(key_for(1))
+    store = FakeObjectStore(expired.object_key)
+
+    deleted = await reservation_index(ReservationConnection(live=[])).reconcile(store)
+
+    assert deleted == 1
+    assert store.deleted == [expired.object_key]

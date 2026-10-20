@@ -8,12 +8,13 @@ SHA-256 while reading, as the S3 store does.
 
 import asyncio
 import hashlib
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import BinaryIO
+from uuid import UUID
 
 from curate_d.staging.errors import StagedEntryMissingError, StagingIntegrityError
 from curate_d.staging.factories import StagingReaderBackend, StagingWriterBackend
@@ -94,10 +95,12 @@ class MemoryStore:
 class MemoryIndex:
     """Registrations by key, with the writer lock and holds the real index offers."""
 
-    def __init__(self) -> None:
-        """Start empty."""
+    def __init__(self, *, clock: Callable[[], datetime] = lambda: datetime.now(UTC)) -> None:
+        """Start empty; `clock` judges reservation expiry, as the database clock does."""
         self.registrations: dict[StagingKey, StagedObject] = {}
+        self.reservations: dict[UUID, tuple[StagingKey, int, datetime]] = {}
         self.lock_callers: list[str] = []
+        self.clock = clock
 
     @asynccontextmanager
     async def writer_lock(self, caller: str) -> AsyncGenerator[object, None]:
@@ -126,13 +129,41 @@ class MemoryIndex:
         return self.registrations.pop(key, None)
 
     async def reconcile(self, store: StagingObjectStore) -> int:
-        """Delete unregistered objects."""
-        registered = {obj.object_key for obj in self.registrations.values()}
+        """Expire dead reservations, then delete objects neither registered nor reserved."""
+        now = self.clock()
+        self.reservations = {
+            attempt: row for attempt, row in self.reservations.items() if row[2] > now
+        }
+        protected = {obj.object_key for obj in self.registrations.values()}
+        protected |= {f"{key}/{attempt.hex}" for attempt, (key, _, _) in self.reservations.items()}
         doomed = [ref.object_key async for ref in store.list_objects()]
         for object_key in doomed:
-            if object_key not in registered:
+            if object_key not in protected:
                 await store.delete(object_key)
-        return len([k for k in doomed if k not in registered])
+        return len([k for k in doomed if k not in protected])
+
+    async def reserve(
+        self, key: StagingKey, attempt_id: UUID, reserved_bytes: int, ttl: timedelta
+    ) -> None:
+        """Record the claim, expiring `ttl` after the clock's now."""
+        self.reservations[attempt_id] = (key, reserved_bytes, self.clock() + ttl)
+
+    async def consume_reservation(self, attempt_id: UUID) -> bool:
+        """Remove the reservation only if live, leaving an expired row as PostgreSQL does."""
+        row = self.reservations.get(attempt_id)
+        if row is None or row[2] <= self.clock():
+            return False
+        del self.reservations[attempt_id]
+        return True
+
+    async def forget_reservation(self, attempt_id: UUID) -> None:
+        """Remove the reservation, live or expired."""
+        self.reservations.pop(attempt_id, None)
+
+    async def total_reserved_bytes(self) -> int:
+        """Sum of live reserved bytes."""
+        now = self.clock()
+        return sum(size for _, size, expires_at in self.reservations.values() if expires_at > now)
 
     def hold_for_download(
         self, key: StagingKey
@@ -157,7 +188,11 @@ class MemoryStaging:
             store=self.store,
             index=self.index,
             occupancy=StagingOccupancy(
-                self.store, self.index, max_bytes=max_bytes, max_age=timedelta(hours=1)
+                self.store,
+                self.index,
+                max_bytes=max_bytes,
+                max_age=timedelta(hours=1),
+                reservation_ttl=timedelta(minutes=10),
             ),
             upload_max_age=timedelta(hours=1),
         )

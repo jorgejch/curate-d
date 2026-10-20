@@ -9,15 +9,22 @@ under the writer lock" is asserted rather than assumed.
 """
 
 import asyncio
-from collections.abc import AsyncGenerator, AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import BinaryIO
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
+from structlog.testing import capture_logs
 
-from curate_d.staging.errors import StagingCapacityExhaustedError, StagingObjectStoreError
+from curate_d.staging import occupancy as occupancy_module
+from curate_d.staging.errors import (
+    StagingCapacityExhaustedError,
+    StagingObjectStoreError,
+    StagingReservationLostError,
+)
 from curate_d.staging.keys import StagingKey
 from curate_d.staging.objects import (
     StagedObject,
@@ -27,6 +34,7 @@ from curate_d.staging.objects import (
 from curate_d.staging.occupancy import (
     CoordinatedStagingIndex,
     OccupancyReport,
+    Reservation,
     StagingOccupancy,
     list_staged_objects,
     measure_occupancy,
@@ -35,6 +43,8 @@ from curate_d.staging.occupancy import (
 _NOW = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
 _DIGEST = "b" * 64
 _MAX_AGE = timedelta(hours=24)
+_TTL = timedelta(minutes=10)
+_KEY = StagingKey("f" * 32)
 
 
 class FakeObjectStore:
@@ -105,16 +115,33 @@ class FakeObjectStore:
         return self.clients_opened
 
 
+@dataclass(frozen=True)
+class FakeReservation:
+    """One in-flight attempt's claim on headroom, expiring by the fake index's clock."""
+
+    key: StagingKey
+    attempt_id: UUID
+    reserved_bytes: int
+    expires_at: datetime
+
+    @property
+    def object_key(self) -> str:
+        """Return the remote key the reserved attempt uploads to."""
+        return f"{self.key}/{self.attempt_id.hex}"
+
+
 class FakeCacheIndex:
     """An in-memory index with the writer lock, entry holds and eviction the real one has."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, clock: Callable[[], datetime] = lambda: _NOW) -> None:
         self.registrations: dict[StagingKey, StagedObject] = {}
+        self.reservations: dict[UUID, FakeReservation] = {}
         self.held: set[StagingKey] = set()
         self.released: list[StagingKey] = []
         self.lock_depth = 0
         self.lock_callers: list[str] = []
         self.operations: list[tuple[str, int]] = []
+        self.clock = clock
 
     @asynccontextmanager
     async def writer_lock(self, caller: str) -> AsyncGenerator[object, None]:
@@ -149,14 +176,51 @@ class FakeCacheIndex:
 
     async def reconcile(self, store: StagingObjectStore) -> int:
         self._observe("reconcile")
-        registered = {obj.object_key for obj in self.registrations.values()}
+        self._expire()
+        protected = {obj.object_key for obj in self.registrations.values()}
+        protected |= {row.object_key for row in self.reservations.values()}
         deleted = 0
         async for ref in store.list_objects():
-            if ref.object_key in registered or _key_of(ref) in self.held:
+            if ref.object_key in protected or _key_of(ref) in self.held:
                 continue
             await store.delete(ref.object_key)
             deleted += 1
         return deleted
+
+    async def reserve(
+        self, key: StagingKey, attempt_id: UUID, reserved_bytes: int, ttl: timedelta
+    ) -> None:
+        self._observe("reserve")
+        self.reservations[attempt_id] = FakeReservation(
+            key=key,
+            attempt_id=attempt_id,
+            reserved_bytes=reserved_bytes,
+            expires_at=self.clock() + ttl,
+        )
+
+    async def consume_reservation(self, attempt_id: UUID) -> bool:
+        """Remove the reservation only if live, leaving an expired row as PostgreSQL does."""
+        self._observe("consume_reservation")
+        row = self.reservations.get(attempt_id)
+        if row is None or row.expires_at <= self.clock():
+            return False
+        del self.reservations[attempt_id]
+        return True
+
+    async def forget_reservation(self, attempt_id: UUID) -> None:
+        self._observe("forget_reservation")
+        self.reservations.pop(attempt_id, None)
+
+    async def total_reserved_bytes(self) -> int:
+        now = self.clock()
+        return sum(row.reserved_bytes for row in self.reservations.values() if row.expires_at > now)
+
+    def _expire(self) -> None:
+        """Drop reservations whose expiry has passed, as reconciliation does in PostgreSQL."""
+        now = self.clock()
+        self.reservations = {
+            attempt: row for attempt, row in self.reservations.items() if row.expires_at > now
+        }
 
     def _observe(self, operation: str) -> None:
         """Record the writer-lock depth an operation ran at, for the tests to assert on."""
@@ -179,7 +243,7 @@ class LockDepthStore(FakeObjectStore):
 class ReleasingIndex(FakeCacheIndex):
     """An index whose reader lets go between reconciliation and eviction.
 
-    The only window in which `_drop` sees a losing attempt at all: reconciliation skips
+    The only window in which `_unpublish` sees a losing attempt at all: reconciliation skips
     the orphan because a download holds its key, the download then ends, and eviction
     for that same key succeeds against the winner instead.
     """
@@ -239,6 +303,17 @@ def orphan(
     return ref
 
 
+def uploaded(store: FakeObjectStore, attempt_id: UUID, *, size: int) -> StagedObject:
+    """Put one completed attempt under the test key into the store, as its upload would."""
+    obj = StagedObject(
+        key=_KEY, attempt_id=attempt_id, size_bytes=size, sha256=_DIGEST, created_at=_NOW
+    )
+    store.objects[obj.object_key] = StagedObjectRef(
+        object_key=obj.object_key, size_bytes=size, last_modified=_NOW
+    )
+    return obj
+
+
 def occupancy_for(
     store: FakeObjectStore,
     index: FakeCacheIndex,
@@ -247,7 +322,21 @@ def occupancy_for(
     max_age: timedelta = _MAX_AGE,
 ) -> StagingOccupancy:
     """A subject pinned to the test's clock so age eviction does not depend on runtime."""
-    return StagingOccupancy(store, index, max_bytes=max_bytes, max_age=max_age, clock=lambda: _NOW)
+    return StagingOccupancy(
+        store,
+        index,
+        max_bytes=max_bytes,
+        max_age=max_age,
+        reservation_ttl=_TTL,
+        clock=lambda: _NOW,
+    )
+
+
+def reserving(
+    subject: StagingOccupancy, declared_max_bytes: int, *, attempt_id: UUID | None = None
+) -> AbstractAsyncContextManager[Reservation]:
+    """Open a reservation under the test key, for a fresh attempt unless one is given."""
+    return subject.reserve(_KEY, attempt_id or uuid4(), declared_max_bytes)
 
 
 @pytest.fixture
@@ -273,7 +362,7 @@ def test_a_bound_that_refuses_everything_is_rejected_at_construction(
 ) -> None:
     """A zero budget is a misconfiguration, not a staging area that holds nothing."""
     with pytest.raises(ValueError, match="max_bytes"):
-        StagingOccupancy(store, index, max_bytes=0, max_age=_MAX_AGE)
+        StagingOccupancy(store, index, max_bytes=0, max_age=_MAX_AGE, reservation_ttl=_TTL)
 
 
 def test_an_age_bound_of_zero_is_rejected_at_construction(
@@ -281,7 +370,27 @@ def test_an_age_bound_of_zero_is_rejected_at_construction(
 ) -> None:
     """A zero age bound would evict content the moment it was published."""
     with pytest.raises(ValueError, match="max_age"):
-        StagingOccupancy(store, index, max_bytes=1024, max_age=timedelta())
+        StagingOccupancy(store, index, max_bytes=1024, max_age=timedelta(), reservation_ttl=_TTL)
+
+
+def test_a_negative_reservation_ttl_is_rejected_at_construction(
+    store: FakeObjectStore, index: FakeCacheIndex
+) -> None:
+    """A reservation that expired before it was written would lose every upload."""
+    with pytest.raises(ValueError, match="reservation_ttl"):
+        StagingOccupancy(
+            store, index, max_bytes=1024, max_age=_MAX_AGE, reservation_ttl=-timedelta(seconds=1)
+        )
+
+
+def test_the_reservation_ttl_is_kept_as_given(
+    store: FakeObjectStore, index: FakeCacheIndex
+) -> None:
+    """Zero is allowed: it expires a reservation in the next transaction, for tests."""
+    subject = StagingOccupancy(
+        store, index, max_bytes=1024, max_age=_MAX_AGE, reservation_ttl=timedelta()
+    )
+    assert subject.reservation_ttl == timedelta()
 
 
 async def test_occupancy_counts_every_page_of_the_listing(
@@ -353,7 +462,7 @@ async def test_a_failed_listing_admits_nothing_and_evicts_nothing(
     subject = occupancy_for(store, index, max_bytes=1000)
 
     with pytest.raises(StagingObjectStoreError):
-        async with subject.reserve(10):
+        async with reserving(subject, 10):
             pass
 
     assert store.deleted == []
@@ -375,26 +484,46 @@ async def test_admission_reserves_the_declared_maximum_before_the_stream(
     """The upper bound is what is reserved; the actual size is not known until later."""
     publish(index, store, seed=1, size=400)
     subject = occupancy_for(store, index, max_bytes=1000)
+    attempt = uuid4()
 
-    async with subject.reserve(600) as admitted:
-        assert admitted.reserved_bytes == 600
-        assert admitted.occupancy.total_bytes == 400
-        assert index.lock_depth == 1
+    async with reserving(subject, 600, attempt_id=attempt) as reservation:
+        assert reservation.admission.reserved_bytes == 600
+        assert reservation.admission.occupancy.total_bytes == 400
+        assert index.reservations[attempt].reserved_bytes == 600
+        assert index.reservations[attempt].key == _KEY
 
     assert store.deleted == []
 
 
-async def test_admission_holds_the_writer_lock_across_the_publication(
+async def test_no_lock_is_held_while_the_reservation_is_open(
     store: FakeObjectStore, index: FakeCacheIndex
 ) -> None:
-    """Publishing inside the reservation is what stops the headroom being spent twice."""
+    """The reservation row keeps the headroom, so the upload runs outside every holding."""
     subject = occupancy_for(store, index, max_bytes=1000)
 
-    async with subject.reserve(100):
-        await index.register(publish(index, store, seed=1, size=100))
+    async with reserving(subject, 100):
+        assert index.lock_depth == 0
+        assert ("reserve", 1) in index.operations
 
-    assert ("register", 1) in index.operations
-    assert index.lock_depth == 0
+
+async def test_a_reservation_registers_and_is_consumed_in_one_holding(
+    store: FakeObjectStore, index: FakeCacheIndex
+) -> None:
+    """The row and the reservation's removal commit together, under the register holding."""
+    subject = occupancy_for(store, index, max_bytes=1000)
+    attempt = uuid4()
+
+    async with reserving(subject, 100, attempt_id=attempt) as reservation:
+        index.operations.clear()
+        index.lock_callers.clear()
+        await reservation.register(uploaded(store, attempt, size=100))
+        assert reservation.registered
+        assert reservation.registered_at is not None
+
+    assert index.operations == [("consume_reservation", 1), ("register", 1)]
+    assert index.lock_callers == ["occupancy.register"]
+    assert index.reservations == {}
+    assert index.registrations[_KEY].attempt_id == attempt
 
 
 async def test_the_bound_is_inclusive_at_its_last_byte(
@@ -405,11 +534,11 @@ async def test_the_bound_is_inclusive_at_its_last_byte(
     index.held.add(held.key)
     subject = occupancy_for(store, index, max_bytes=1000)
 
-    async with subject.reserve(600) as admitted:
-        assert admitted.reclaimed.evicted == ()
+    async with reserving(subject, 600) as reservation:
+        assert reservation.admission.reclaimed.evicted == ()
 
     with pytest.raises(StagingCapacityExhaustedError):
-        async with subject.reserve(601):
+        async with reserving(subject, 601):
             pass
 
 
@@ -421,7 +550,7 @@ async def test_content_larger_than_the_whole_bound_is_refused_outright(
     subject = occupancy_for(store, index, max_bytes=1000)
 
     with pytest.raises(StagingCapacityExhaustedError, match="never fit"):
-        async with subject.reserve(1001):
+        async with reserving(subject, 1001):
             pass
 
     assert store.deleted == []
@@ -434,7 +563,7 @@ async def test_a_negative_declaration_is_a_programming_error(
     subject = occupancy_for(store, index, max_bytes=1000)
 
     with pytest.raises(ValueError, match="nonnegative"):
-        async with subject.reserve(-1):
+        async with reserving(subject, -1):
             pass
 
 
@@ -445,8 +574,8 @@ async def test_empty_content_is_admitted_against_a_full_volume(
     publish(index, store, seed=1, size=1000)
     subject = occupancy_for(store, index, max_bytes=1000)
 
-    async with subject.reserve(0) as admitted:
-        assert admitted.reserved_bytes == 0
+    async with reserving(subject, 0) as reservation:
+        assert reservation.admission.reserved_bytes == 0
 
 
 async def test_pressure_evicts_the_oldest_entries_first(
@@ -458,8 +587,8 @@ async def test_pressure_evicts_the_oldest_entries_first(
     middle = publish(index, store, seed=3, size=300, age=timedelta(hours=2))
     subject = occupancy_for(store, index, max_bytes=1000)
 
-    async with subject.reserve(500) as admitted:
-        assert admitted.reclaimed.evicted == (oldest.key, middle.key)
+    async with reserving(subject, 500) as reservation:
+        assert reservation.admission.reclaimed.evicted == (oldest.key, middle.key)
 
     assert store.deleted == [oldest.object_key, middle.object_key]
     assert newest.key in index.registrations
@@ -474,9 +603,9 @@ async def test_pressure_stops_evicting_once_the_content_fits(
         publish(index, store, seed=seed, size=200, age=timedelta(hours=1))
     subject = occupancy_for(store, index, max_bytes=1000)
 
-    async with subject.reserve(300) as admitted:
-        assert admitted.reclaimed.evicted == (oldest.key,)
-        assert admitted.occupancy.total_bytes == 400
+    async with reserving(subject, 300) as reservation:
+        assert reservation.admission.reclaimed.evicted == (oldest.key,)
+        assert reservation.admission.occupancy.total_bytes == 400
 
 
 async def test_unreferenced_objects_are_reclaimed_before_live_entries(
@@ -487,9 +616,9 @@ async def test_unreferenced_objects_are_reclaimed_before_live_entries(
     stale = orphan(store, seed=2, size=400, age=timedelta(hours=9))
     subject = occupancy_for(store, index, max_bytes=1000)
 
-    async with subject.reserve(500) as admitted:
-        assert admitted.reclaimed.orphans_deleted == 1
-        assert admitted.reclaimed.evicted == ()
+    async with reserving(subject, 500) as reservation:
+        assert reservation.admission.reclaimed.orphans_deleted == 1
+        assert reservation.admission.reclaimed.evicted == ()
 
     assert store.deleted == [stale.object_key]
     assert live.key in index.registrations
@@ -504,7 +633,7 @@ async def test_an_entry_being_downloaded_is_never_evicted_under_pressure(
     subject = occupancy_for(store, index, max_bytes=1000)
 
     with pytest.raises(StagingCapacityExhaustedError, match="being downloaded"):
-        async with subject.reserve(500):
+        async with reserving(subject, 500):
             pass
 
     assert store.deleted == []
@@ -520,9 +649,9 @@ async def test_a_protected_entry_does_not_stop_an_admission_that_still_fits(
     evictable = publish(index, store, seed=2, size=400, age=timedelta(hours=8))
     subject = occupancy_for(store, index, max_bytes=1000)
 
-    async with subject.reserve(600) as admitted:
-        assert admitted.reclaimed.protected == (held.key,)
-        assert admitted.reclaimed.evicted == (evictable.key,)
+    async with reserving(subject, 600) as reservation:
+        assert reservation.admission.reclaimed.protected == (held.key,)
+        assert reservation.admission.reclaimed.evicted == (evictable.key,)
 
 
 async def test_a_failed_deletion_during_eviction_is_surfaced(
@@ -534,10 +663,13 @@ async def test_a_failed_deletion_during_eviction_is_surfaced(
     subject = occupancy_for(store, index, max_bytes=1000)
 
     with pytest.raises(StagingObjectStoreError, match="rejected"):
-        async with subject.reserve(600):
-            pass
+        async with reserving(subject, 600):
+            pytest.fail("an admission whose eviction failed must not run its block")
 
     assert store.objects[doomed.object_key].size_bytes == 600
+    # Abandoned once the deletion failed: the orphan counts in the listing instead.
+    assert index.reservations == {}
+    assert doomed.key not in index.registrations
 
 
 async def test_reclamation_runs_while_the_writer_lock_is_held(
@@ -547,7 +679,7 @@ async def test_reclamation_runs_while_the_writer_lock_is_held(
     publish(index, store, seed=1, size=900, age=timedelta(hours=9))
     subject = occupancy_for(store, index, max_bytes=1000)
 
-    async with subject.reserve(500):
+    async with reserving(subject, 500):
         pass
 
     assert index.operations
@@ -761,12 +893,22 @@ async def test_each_entry_point_labels_the_writer_lock_it_takes(
     obj = publish(index, store, seed=1, size=512)
     subject = occupancy_for(store, index, max_bytes=10_000)
 
-    async with subject.reserve(100):
+    attempt = uuid4()
+    async with reserving(subject, 100, attempt_id=attempt) as reservation:
+        await reservation.register(uploaded(store, attempt, size=100))
+    async with reserving(subject, 100):
         pass
     await subject.sweep()
     await subject.release(obj.key)
 
-    assert index.lock_callers == ["occupancy.reserve", "occupancy.sweep", "occupancy.release"]
+    assert index.lock_callers == [
+        "occupancy.reserve",
+        "occupancy.register",
+        "occupancy.reserve",
+        "occupancy.abandon",
+        "occupancy.sweep",
+        "occupancy.release",
+    ]
 
 
 async def test_measuring_reports_the_same_totals_the_subject_admits_against(
@@ -780,8 +922,8 @@ async def test_measuring_reports_the_same_totals_the_subject_admits_against(
     report = await subject.measure()
 
     assert report.total_bytes == 500
-    async with subject.reserve(500) as admitted:
-        assert admitted.occupancy == report
+    async with reserving(subject, 500) as reservation:
+        assert reservation.admission.occupancy == report
 
 
 async def test_a_sweep_deletes_bytes_only_after_the_unregistration_has_committed(
@@ -811,18 +953,20 @@ async def test_release_deletes_bytes_only_after_the_unregistration_has_committed
     assert store.depths == [0]
 
 
-async def test_admission_still_deletes_under_the_lock_it_holds_for_the_upload(
+async def test_admission_deletes_evicted_bytes_only_after_its_holding_has_committed(
     index: FakeCacheIndex,
 ) -> None:
-    """Admission cannot wait for its own commit: the lock is the reservation."""
+    """The reservation row keeps the headroom, so admission can wait for its own commit."""
     store = LockDepthStore(index)
-    publish(index, store, seed=1, size=900, age=timedelta(hours=25))
+    stale = publish(index, store, seed=1, size=900, age=timedelta(hours=25))
     subject = occupancy_for(store, index, max_bytes=1000)
 
-    async with subject.reserve(500):
-        pass
+    async with reserving(subject, 500) as reservation:
+        assert store.deleted == [stale.object_key]
+        assert reservation.admission.reclaimed.evicted == (stale.key,)
 
-    assert store.depths == [1]
+    assert store.depths == [0]
+    assert ("evict", 1) in index.operations
 
 
 async def test_a_sweep_deletes_every_aged_entry_on_one_connection(
@@ -848,9 +992,9 @@ async def test_pressure_eviction_deletes_on_one_connection_too(
         publish(index, store, seed=seed, size=100, age=timedelta(hours=1))
     subject = occupancy_for(store, index, max_bytes=1000)
 
-    async with subject.reserve(800) as admitted:
+    async with reserving(subject, 800) as reservation:
         # Six of the eight entries are the 600 bytes of surplus this admission needs.
-        assert len(admitted.reclaimed.evicted) == 6
+        assert len(reservation.admission.reclaimed.evicted) == 6
 
     assert len(store.delete_clients) == 6
     assert len(set(store.delete_clients)) == 1
@@ -892,8 +1036,8 @@ async def test_an_admission_reports_how_long_its_decision_took(index: FakeCacheI
     store = SlowListingStore(delay)
     subject = occupancy_for(store, index, max_bytes=1000)
 
-    async with subject.reserve(100) as admitted:
-        assert admitted.admission_seconds >= delay
+    async with reserving(subject, 100) as reservation:
+        assert reservation.admission.admission_seconds >= delay
 
 
 async def test_an_admission_that_reclaims_counts_every_listing_it_waited_on(
@@ -905,9 +1049,9 @@ async def test_an_admission_that_reclaims_counts_every_listing_it_waited_on(
     publish(index, store, seed=1, size=600)
     subject = occupancy_for(store, index, max_bytes=1000)
 
-    async with subject.reserve(600) as admitted:
-        assert admitted.reclaimed.evicted == (StagingKey(f"{1:032x}"),)
-        assert admitted.admission_seconds >= 3 * delay
+    async with reserving(subject, 600) as reservation:
+        assert reservation.admission.reclaimed.evicted == (StagingKey(f"{1:032x}"),)
+        assert reservation.admission.admission_seconds >= 3 * delay
 
 
 async def test_an_uncontended_admission_reports_its_time(
@@ -916,8 +1060,8 @@ async def test_an_uncontended_admission_reports_its_time(
     """A fast decision still reports its time rather than leaving the default in place."""
     subject = occupancy_for(store, index, max_bytes=1000)
 
-    async with subject.reserve(0) as admitted:
-        assert admitted.admission_seconds > 0
+    async with reserving(subject, 0) as reservation:
+        assert reservation.admission.admission_seconds > 0
 
 
 async def test_a_refusal_raises_as_before_the_timing_was_added(
@@ -929,5 +1073,397 @@ async def test_a_refusal_raises_as_before_the_timing_was_added(
     subject = occupancy_for(store, index, max_bytes=1000)
 
     with pytest.raises(StagingCapacityExhaustedError, match="being downloaded"):
-        async with subject.reserve(500):
+        async with reserving(subject, 500):
             pytest.fail("a refused reservation must not run its block")
+
+
+class Clock:
+    """A settable instant, shared by a fake index judging reservation expiry."""
+
+    def __init__(self) -> None:
+        """Start at the test's fixed instant."""
+        self.now = _NOW
+
+    def __call__(self) -> datetime:
+        """Return the current instant."""
+        return self.now
+
+
+def reservation_events[E: Mapping[str, object]](events: list[E], name: str) -> list[E]:
+    """Return the events named `name` among `events`."""
+    return [e for e in events if e["event"] == name]
+
+
+async def test_measuring_reports_live_reservations_beside_the_listing(
+    store: FakeObjectStore,
+) -> None:
+    """An in-flight upload's claim is occupancy before its bytes land; an expired one is not."""
+    clock = Clock()
+    index = FakeCacheIndex(clock=clock)
+    publish(index, store, seed=1, size=100)
+    await index.reserve(_KEY, uuid4(), 300, timedelta(minutes=1))
+    await index.reserve(_KEY, uuid4(), 50, timedelta(minutes=5))
+    clock.now += timedelta(minutes=2)
+
+    report = await occupancy_for(store, index, max_bytes=1000).measure()
+
+    assert (report.total_bytes, report.reserved_bytes, report.claimed_bytes) == (100, 50, 150)
+
+
+async def test_a_plain_index_reports_no_reservations(store: FakeObjectStore) -> None:
+    """A reader-side index keeps no reservations, so it reports none rather than failing."""
+
+    class PlainIndex:
+        """Registrations only, as `StagingCacheIndex` declares them."""
+
+        async def total_registered_bytes(self) -> int:
+            """Report nothing registered."""
+            return 0
+
+    report = await measure_occupancy(store, PlainIndex())  # type: ignore[arg-type]
+
+    assert report.reserved_bytes == 0
+
+
+async def test_an_open_reservation_counts_against_another_admission(
+    store: FakeObjectStore, index: FakeCacheIndex
+) -> None:
+    """Two workers cannot spend one headroom, though neither holds a lock while uploading."""
+    first = occupancy_for(store, index, max_bytes=1000)
+    second = occupancy_for(store, index, max_bytes=1000)
+
+    async with reserving(first, 600):
+        with pytest.raises(StagingCapacityExhaustedError, match="600 reserved"):
+            async with reserving(second, 600):
+                pytest.fail("the second admission spent headroom the first had reserved")
+        async with reserving(second, 400) as beside:
+            assert beside.admission.occupancy.reserved_bytes == 600
+            assert len(index.reservations) == 2
+
+
+async def test_an_expired_reservation_no_longer_counts_against_admission(
+    store: FakeObjectStore,
+) -> None:
+    """A dead worker's headroom returns once the database clock passes its expiry."""
+    clock = Clock()
+    index = FakeCacheIndex(clock=clock)
+    await index.reserve(_KEY, uuid4(), 600, _TTL)
+    subject = occupancy_for(store, index, max_bytes=1000)
+
+    with pytest.raises(StagingCapacityExhaustedError):
+        async with reserving(subject, 600):
+            pass
+    clock.now += _TTL
+
+    async with reserving(subject, 600) as reservation:
+        assert reservation.admission.occupancy.reserved_bytes == 0
+
+
+async def test_a_refusal_reserves_nothing(store: FakeObjectStore, index: FakeCacheIndex) -> None:
+    """Refused headroom is not held for an upload that will never run."""
+    held = publish(index, store, seed=1, size=800)
+    index.held.add(held.key)
+    subject = occupancy_for(store, index, max_bytes=1000)
+
+    with pytest.raises(StagingCapacityExhaustedError):
+        async with reserving(subject, 500):
+            pass
+
+    assert index.reservations == {}
+    assert ("reserve", 1) not in index.operations
+
+
+async def test_a_refusal_after_eviction_still_frees_what_it_unregistered(
+    index: FakeCacheIndex,
+) -> None:
+    """The unregistrations commit and their bytes go after it, refusal or not."""
+    store = LockDepthStore(index)
+    stale = publish(index, store, seed=1, size=300, age=timedelta(hours=25))
+    held = publish(index, store, seed=2, size=600)
+    index.held.add(held.key)
+    subject = occupancy_for(store, index, max_bytes=1000)
+
+    with pytest.raises(StagingCapacityExhaustedError, match="being downloaded"):
+        async with reserving(subject, 500):
+            pass
+
+    assert store.deleted == [stale.object_key]
+    assert store.depths == [0]
+    assert stale.key not in index.registrations
+    assert index.reservations == {}
+
+
+async def test_a_refusal_whose_eviction_fails_reports_the_failure(
+    store: FakeObjectStore, index: FakeCacheIndex
+) -> None:
+    """A failed delete is the louder problem, and the refusal travels with it as a note."""
+    stale = publish(index, store, seed=1, size=300, age=timedelta(hours=25))
+    store.rejects.add(stale.object_key)
+    held = publish(index, store, seed=2, size=600)
+    index.held.add(held.key)
+    subject = occupancy_for(store, index, max_bytes=1000)
+
+    with pytest.raises(StagingObjectStoreError, match="rejected") as raised:
+        async with reserving(subject, 500):
+            pass
+
+    assert any("refused as well" in note for note in raised.value.__notes__)
+    assert index.reservations == {}
+
+
+async def test_a_lost_reservation_registers_nothing_and_removes_its_bytes(
+    store: FakeObjectStore,
+) -> None:
+    """An upload that outlived its reservation may name bytes reconciliation took."""
+    clock = Clock()
+    index = FakeCacheIndex(clock=clock)
+    subject = occupancy_for(store, index, max_bytes=1000)
+    attempt = uuid4()
+
+    with capture_logs() as events, pytest.raises(StagingReservationLostError, match="deleted"):
+        async with reserving(subject, 100, attempt_id=attempt) as reservation:
+            staged = uploaded(store, attempt, size=100)
+            clock.now += _TTL
+            await reservation.register(staged)
+
+    assert not reservation.registered
+    assert reservation.registered_at is None
+    assert index.registrations == {}
+    # Consuming leaves an expired row; the block's abandonment is what removes it.
+    assert index.reservations == {}
+    assert index.operations[-1] == ("forget_reservation", 1)
+    assert index.lock_callers[-2:] == ["occupancy.register", "occupancy.abandon"]
+    assert store.deleted == [staged.object_key]
+    assert ("register", 1) not in index.operations
+    [event] = reservation_events(events, "staging.reservation_lost")
+    assert event["log_level"] == "warning"
+    assert (event["staging_key"], event["attempt_id"], event["reserved_bytes"]) == (
+        str(_KEY),
+        str(attempt),
+        100,
+    )
+
+
+async def test_a_lost_reservation_whose_bytes_cannot_be_deleted_is_still_lost(
+    store: FakeObjectStore,
+) -> None:
+    """The caller needs the retryable failure; the orphan is reconciliation's."""
+    clock = Clock()
+    index = FakeCacheIndex(clock=clock)
+    subject = occupancy_for(store, index, max_bytes=1000)
+    attempt = uuid4()
+    staged = uploaded(store, attempt, size=100)
+    store.rejects.add(staged.object_key)
+
+    with pytest.raises(StagingReservationLostError, match="orphan") as raised:
+        async with reserving(subject, 100, attempt_id=attempt) as reservation:
+            clock.now += _TTL
+            await reservation.register(staged)
+
+    assert isinstance(raised.value.__cause__, StagingObjectStoreError)
+    assert staged.object_key in store.objects
+    assert index.registrations == {}
+
+
+async def test_a_reservation_refuses_another_attempts_object(
+    store: FakeObjectStore, index: FakeCacheIndex
+) -> None:
+    """Consuming one attempt's reservation for another's bytes would publish unreserved bytes."""
+    subject = occupancy_for(store, index, max_bytes=1000)
+
+    with pytest.raises(ValueError, match="cannot register"):
+        async with reserving(subject, 100) as reservation:
+            await reservation.register(uploaded(store, uuid4(), size=100))
+
+    assert index.registrations == {}
+    assert index.reservations == {}
+
+
+async def test_a_reservation_registers_once(store: FakeObjectStore, index: FakeCacheIndex) -> None:
+    """A second registration would find no reservation and delete the published bytes."""
+    subject = occupancy_for(store, index, max_bytes=1000)
+    attempt = uuid4()
+
+    async with reserving(subject, 100, attempt_id=attempt) as reservation:
+        staged = uploaded(store, attempt, size=100)
+        await reservation.register(staged)
+        with pytest.raises(RuntimeError, match="already used"):
+            await reservation.register(staged)
+
+    assert index.registrations[_KEY] == staged
+    assert staged.object_key in store.objects
+
+
+async def test_a_block_that_raises_abandons_its_reservation(
+    store: FakeObjectStore, index: FakeCacheIndex
+) -> None:
+    """A failed upload's headroom returns at once rather than at expiry."""
+    subject = occupancy_for(store, index, max_bytes=1000)
+
+    with pytest.raises(StagingObjectStoreError, match="upload failed"):
+        async with reserving(subject, 100):
+            raise StagingObjectStoreError("upload failed")
+
+    assert index.reservations == {}
+    assert ("forget_reservation", 1) in index.operations
+    assert index.lock_callers == ["occupancy.reserve", "occupancy.abandon"]
+
+
+async def test_a_cancelled_block_abandons_its_reservation(
+    store: FakeObjectStore, index: FakeCacheIndex
+) -> None:
+    """A drained worker's reservation goes with its upload, and the cancellation propagates."""
+    subject = occupancy_for(store, index, max_bytes=1000)
+    entered = asyncio.Event()
+
+    async def upload_forever() -> None:
+        """Hold the reservation open until cancelled."""
+        async with reserving(subject, 100):
+            entered.set()
+            await asyncio.Event().wait()
+
+    task = asyncio.create_task(upload_forever())
+    await entered.wait()
+    assert len(index.reservations) == 1
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert index.reservations == {}
+
+
+async def test_a_failed_abandonment_is_logged_and_the_block_error_propagates(
+    store: FakeObjectStore, index: FakeCacheIndex, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cleanup failure must not hide why the upload failed; expiry removes the row."""
+
+    async def unreachable(attempt_id: UUID) -> None:
+        """Fail as the database would when it cannot be reached."""
+        raise StagingObjectStoreError("database unreachable")
+
+    monkeypatch.setattr(index, "forget_reservation", unreachable)
+    subject = occupancy_for(store, index, max_bytes=1000)
+    attempt = uuid4()
+
+    with capture_logs() as events, pytest.raises(ValueError, match="the upload's own"):
+        async with reserving(subject, 100, attempt_id=attempt):
+            raise ValueError("the upload's own failure")
+
+    [event] = reservation_events(events, "staging.reservation_abandon_failed")
+    assert event["log_level"] == "warning"
+    assert (event["staging_key"], event["attempt_id"]) == (str(_KEY), str(attempt))
+    assert event["reserved_bytes"] == 100
+    assert event["error_type"] == "StagingObjectStoreError"
+    assert attempt in index.reservations
+
+
+async def test_a_cancelled_abandonment_is_bounded_and_the_cancellation_propagates(
+    store: FakeObjectStore, index: FakeCacheIndex, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hung removal cannot hold a drain past its bound; the row is left to expire."""
+
+    answered = asyncio.Event()
+
+    async def hung(attempt_id: UUID) -> None:
+        """Answer only once the test lets it, as a database stalled mid-drain would."""
+        await answered.wait()
+
+    monkeypatch.setattr(index, "forget_reservation", hung)
+    monkeypatch.setattr(occupancy_module, "_ABANDON_SECONDS", 0.01)
+    subject = occupancy_for(store, index, max_bytes=1000)
+    entered = asyncio.Event()
+
+    async def upload_forever() -> None:
+        """Hold the reservation open until cancelled."""
+        async with reserving(subject, 100):
+            entered.set()
+            await asyncio.Event().wait()
+
+    with capture_logs() as events:
+        task = asyncio.create_task(upload_forever())
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    [event] = reservation_events(events, "staging.reservation_abandon_failed")
+    assert event["error_type"] == "TimeoutError"
+    # The shielded removal outlives the bound in the background; let it finish.
+    answered.set()
+    await asyncio.sleep(0)
+
+
+async def test_a_block_that_does_not_register_abandons_its_reservation(
+    store: FakeObjectStore, index: FakeCacheIndex
+) -> None:
+    """Leaving without publishing is an abandonment too, not a reservation left to expire."""
+    subject = occupancy_for(store, index, max_bytes=1000)
+
+    async with reserving(subject, 100):
+        pass
+
+    assert index.reservations == {}
+
+
+async def test_a_second_cancellation_during_abandonment_still_ends_in_the_first(
+    store: FakeObjectStore, index: FakeCacheIndex, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A drain that cancels again only gives up on the cleanup, which is logged."""
+    answered = asyncio.Event()
+    forgetting = asyncio.Event()
+
+    async def stalled(attempt_id: UUID) -> None:
+        """Answer only once the test lets it."""
+        forgetting.set()
+        await answered.wait()
+
+    monkeypatch.setattr(index, "forget_reservation", stalled)
+    subject = occupancy_for(store, index, max_bytes=1000)
+    entered = asyncio.Event()
+
+    async def upload_forever() -> None:
+        """Hold the reservation open until cancelled."""
+        async with reserving(subject, 100):
+            entered.set()
+            await asyncio.Event().wait()
+
+    with capture_logs() as events:
+        task = asyncio.create_task(upload_forever())
+        await entered.wait()
+        task.cancel()
+        await forgetting.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    [event] = reservation_events(events, "staging.reservation_abandon_failed")
+    assert event["error_type"] == "CancelledError"
+    answered.set()
+    await asyncio.sleep(0)
+
+
+async def test_a_cancellation_during_an_ordinary_abandonment_propagates(
+    store: FakeObjectStore, index: FakeCacheIndex, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a block already cancelled shields its cleanup; a new cancellation is obeyed."""
+    forgetting = asyncio.Event()
+
+    async def stalled(attempt_id: UUID) -> None:
+        """Wait until cancelled."""
+        forgetting.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(index, "forget_reservation", stalled)
+    subject = occupancy_for(store, index, max_bytes=1000)
+
+    async def failing_upload() -> None:
+        """Fail inside the reservation."""
+        async with reserving(subject, 100):
+            raise StagingObjectStoreError("upload failed")
+
+    task = asyncio.create_task(failing_upload())
+    await forgetting.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
