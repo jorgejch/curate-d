@@ -9,17 +9,24 @@ created, so a real execution afterwards proceeds as though it had never run.
 Content that cannot be evaluated — unclassified, awaiting review, or failing to render —
 is reported with the reason, and evaluation continues with the rest.
 
+A run evaluates with the policy in force, with a draft policy submitted with it, or
+against destinations it names, ignoring rules; and with the template set in force or a
+draft one. A draft is carried in the request and recorded on the run's header, never
+stored as a configuration version. Each item names the rules that selected its
+destination, and classified content no rule selects is reported as one `unselected`
+item with no destination.
+
 A locator the run has already proposed for other content counts as taken, as it would be
 once that copy started: the later content is given its suffixed locator, just as a real
 start claims one. Content is evaluated in id order, so the earlier id keeps the rendered
 locator; in a real run whichever copy starts first does.
 """
 
-from collections.abc import Sequence
-from typing import Final
+from collections.abc import Mapping, Sequence
+from typing import Final, Self
 from uuid import UUID
 
-from pydantic import AwareDatetime, Field
+from pydantic import AwareDatetime, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -34,6 +41,7 @@ from curate_d.domain import (
     HashAlgorithm,
     Placement,
     PlacementPolicy,
+    PolicySource,
     Provider,
     RejectedValue,
     SourceObject,
@@ -41,7 +49,15 @@ from curate_d.domain import (
     VerificationLevel,
 )
 from curate_d.ledger import ContentObjectRepository, PlacementRepository, SourceObjectRepository
-from curate_d.ledger.mapping import Row, identifier, moment, opt_moment, opt_text, text
+from curate_d.ledger.mapping import (
+    Row,
+    identifier,
+    moment,
+    opt_moment,
+    opt_number,
+    opt_text,
+    text,
+)
 from curate_d.ledger.tables import content_objects, dry_run_items, dry_runs, provider_connections
 from curate_d.placement.pipeline import claim
 from curate_d.placement.verification import expected_level
@@ -56,24 +72,63 @@ NO_DESTINATION: Final = ""
 
 
 class DryRunRequest(DomainModel):
-    """One dry run: its identity, and optionally the destinations to evaluate against."""
+    """One dry run: its identity, and optionally what to evaluate with instead of what is in force.
+
+    Drafts travel in the request, so the workflow evaluates exactly what was submitted
+    whenever it runs, and nothing is written to the configuration versions.
+    """
 
     run_id: UUID
     destinations: tuple[DestinationConfig, ...] = Field(
         default=(),
         description="Evaluate every classified object against each of these. Empty: the "
-        "active policy's rules decide, as for a real placement.",
+        "policy's rules decide, as for a real placement.",
     )
+    policy: PlacementPolicy | None = Field(
+        default=None,
+        description="A draft policy whose rules decide instead of the policy in force.",
+    )
+    templates: TemplateSet | None = Field(
+        default=None,
+        description="A draft template set to render with instead of the set in force.",
+    )
+
+    @model_validator(mode="after")
+    def _check(self) -> Self:
+        """Refuse a draft policy alongside named destinations, which ignore its rules.
+
+        Raises:
+            ValueError: both a draft policy and destinations were given.
+        """
+        if self.policy is not None and self.destinations:
+            raise ValueError(
+                "a draft policy and named destinations cannot be combined: named "
+                "destinations ignore the policy's rules"
+            )
+        return self
 
 
 class DryRun(DomainModel):
-    """A dry run's header."""
+    """A dry run's header: when it ran, and what it evaluated with.
+
+    `policy_source` is None for a run recorded before the source was. The draft
+    documents are kept as the JSON they were evaluated as, so a run stays readable
+    whatever later versions of the parser accept.
+    """
 
     id: UUID
     started_at: AwareDatetime
     finished_at: AwareDatetime | None = None
     template_version: str
     taxonomy_version: int
+    policy_source: PolicySource | None = None
+    policy_version: int | None = Field(
+        default=None, description="The policy version in force; set only for an active run."
+    )
+    policy_rules: tuple[str, ...] = ()
+    templates_draft: bool = False
+    policy_document: Mapping[str, object] | None = None
+    templates_document: Mapping[str, object] | None = None
 
 
 class DryRunItem(DomainModel):
@@ -89,6 +144,9 @@ class DryRunItem(DomainModel):
     expected_level: VerificationLevel | None = None
     reason: str | None = None
     rejected_values: tuple[RejectedValue, ...] = ()
+    rules: tuple[str, ...] = Field(
+        default=(), description="The policy rules that selected the destination, in order."
+    )
 
 
 class DryRunStore:
@@ -102,7 +160,7 @@ class DryRunStore:
         """Record that a run started; a repeat of the same run changes nothing."""
         existing = await self.get(run.id)
         if existing is None:
-            await self._connection.execute(dry_runs.insert().values(**run.model_dump()))
+            await self._connection.execute(dry_runs.insert().values(**_run_values(run)))
 
     async def finish(self, run_id: UUID, now: AwareDatetime) -> None:
         """Record that a run finished."""
@@ -134,13 +192,7 @@ class DryRunStore:
         )
         if row is None:
             return None
-        return DryRun(
-            id=identifier(row, "id"),
-            started_at=moment(row, "started_at"),
-            finished_at=opt_moment(row, "finished_at"),
-            template_version=text(row, "template_version"),
-            taxonomy_version=int(row["taxonomy_version"]),
-        )
+        return _to_run(row)
 
     async def proposed_for(
         self, run_id: UUID, destination_name: str, locator: str
@@ -166,6 +218,55 @@ class DryRunStore:
         return [_to_item(row) for row in rows.mappings()]
 
 
+def _run_values(run: DryRun) -> dict[str, object]:
+    """Return the dry_runs row for a header."""
+    return {
+        "id": run.id,
+        "started_at": run.started_at,
+        "finished_at": run.finished_at,
+        "template_version": run.template_version,
+        "taxonomy_version": run.taxonomy_version,
+        "policy_source": None if run.policy_source is None else run.policy_source.value,
+        "policy_version": run.policy_version,
+        "policy_rules": list(run.policy_rules),
+        "templates_draft": run.templates_draft,
+        "policy_document": None if run.policy_document is None else dict(run.policy_document),
+        "templates_document": (
+            None if run.templates_document is None else dict(run.templates_document)
+        ),
+    }
+
+
+def _document(row: Row, column: str) -> Mapping[str, object] | None:
+    """Return a JSON document column as a mapping, or None if it is empty."""
+    value = row[column]
+    return {str(key): item for key, item in value.items()} if isinstance(value, dict) else None
+
+
+def _names(row: Row, column: str) -> tuple[str, ...]:
+    """Return a JSON list-of-names column as a tuple."""
+    value = row[column]
+    return tuple(str(name) for name in value) if isinstance(value, list) else ()
+
+
+def _to_run(row: Row) -> DryRun:
+    """Return a header from its dry_runs row."""
+    source = opt_text(row, "policy_source")
+    return DryRun(
+        id=identifier(row, "id"),
+        started_at=moment(row, "started_at"),
+        finished_at=opt_moment(row, "finished_at"),
+        template_version=text(row, "template_version"),
+        taxonomy_version=int(str(row["taxonomy_version"])),
+        policy_source=None if source is None else PolicySource(source),
+        policy_version=opt_number(row, "policy_version"),
+        policy_rules=_names(row, "policy_rules"),
+        templates_draft=bool(row["templates_draft"]),
+        policy_document=_document(row, "policy_document"),
+        templates_document=_document(row, "templates_document"),
+    )
+
+
 def _item_values(item: DryRunItem) -> dict[str, object]:
     """The dry_run_items row for an item."""
     return {
@@ -179,6 +280,7 @@ def _item_values(item: DryRunItem) -> dict[str, object]:
         "expected_level": None if item.expected_level is None else int(item.expected_level),
         "reason": item.reason,
         "rejected_values": [value.model_dump(mode="json") for value in item.rejected_values],
+        "rules": list(item.rules),
     }
 
 
@@ -202,6 +304,7 @@ def _to_item(row: Row) -> DryRunItem:
             RejectedValue.model_validate(value, strict=False)
             for value in (values if isinstance(values, list) else [])
         ),
+        rules=_names(row, "rules"),
     )
 
 
@@ -284,14 +387,28 @@ class Evaluator:
         if content is None:
             return [unresolved.model_copy(update={"reason": "content object is gone"})]
         facts = classification.facts
-        destinations = self._destinations or tuple(
-            destination
-            for name in self._policy.desired_destinations(facts)
-            if (destination := self._policy.destination(name)) is not None
-        )
+        selected: list[tuple[DestinationConfig, tuple[str, ...]]] = [
+            (destination, ()) for destination in self._destinations
+        ]
+        if not self._destinations:
+            selected = [
+                (destination, rules)
+                for name, rules in self._policy.selections(facts).items()
+                if (destination := self._policy.destination(name)) is not None
+            ]
+            if not selected:
+                return [
+                    unresolved.model_copy(
+                        update={
+                            "outcome": DryRunOutcome.UNSELECTED,
+                            "facts": facts,
+                            "reason": "no placement rule selects it",
+                        }
+                    )
+                ]
         copied = next((s for s in sources if s.state is SourceObjectState.FINGERPRINTED), None)
         items: list[DryRunItem] = []
-        for destination in destinations:
+        for destination, rules in selected:
             outcome = await plan_at(
                 self._connection,
                 self._templates,
@@ -308,6 +425,7 @@ class Evaluator:
                 outcome=DryRunOutcome.RENDER_FAILED,
                 paths=paths,
                 facts=facts,
+                rules=rules,
             )
             if isinstance(outcome, RenderFailure):
                 items.append(base.model_copy(update={"reason": outcome.reason}))
