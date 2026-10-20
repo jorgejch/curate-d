@@ -13,6 +13,8 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import make_url, text
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -44,11 +46,11 @@ async def empty_database(settings: Settings) -> AsyncIterator[str]:
         await admin.dispose()
 
 
-def _alembic(database_url: str, *arguments: str) -> None:
-    """Run the Alembic command line against one database, with the system schema beside it."""
+def _run_alembic(database_url: str, *arguments: str) -> subprocess.CompletedProcess[str]:
+    """Run the Alembic command line against one database and return how it ended."""
     environment = dict(os.environ)
     environment["CURATE_D_LEDGER_DATABASE_URL"] = database_url
-    completed = subprocess.run(
+    return subprocess.run(
         [sys.executable, "-m", "alembic", *arguments],
         cwd=REPOSITORY_ROOT,
         env=environment,
@@ -56,6 +58,11 @@ def _alembic(database_url: str, *arguments: str) -> None:
         text=True,
         check=False,
     )
+
+
+def _alembic(database_url: str, *arguments: str) -> None:
+    """Run the Alembic command line against one database, with the system schema beside it."""
+    completed = _run_alembic(database_url, *arguments)
     assert completed.returncode == 0, completed.stderr
 
 
@@ -107,6 +114,87 @@ async def test_a_full_downgrade_round_trips(empty_database: str) -> None:
 
     _alembic(empty_database, "upgrade", "head")
     assert (await _views_and_head(empty_database))[0] >= VIEWS
+
+
+def test_the_chain_has_a_single_head() -> None:
+    """Every revision descends from the one before: no two migrations share a parent."""
+    scripts = ScriptDirectory.from_config(Config(str(REPOSITORY_ROOT / "alembic.ini")))
+    assert len(scripts.get_heads()) == 1
+
+
+# 0021 adds what a dry run evaluated with and the unselected outcome.
+BEFORE_DRY_RUN_DRAFTS = "0020_lease_versions"
+DRY_RUN_DRAFTS = "0021_dry_run_drafts"
+_DRY_RUN_COLUMNS = {
+    "policy_source",
+    "policy_version",
+    "policy_rules",
+    "templates_draft",
+    "policy_document",
+    "templates_document",
+}
+
+
+async def _columns(database_url: str, table: str) -> set[str]:
+    """Return the names of a public table's columns."""
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.connect() as connection:
+            rows = await connection.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = 'public' AND table_name = :table"
+                ),
+                {"table": table},
+            )
+            return {row[0] for row in rows}
+    finally:
+        await engine.dispose()
+
+
+async def _execute(database_url: str, statement: str, **parameters: object) -> None:
+    """Run one statement in its own transaction."""
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(text(statement), parameters)
+    finally:
+        await engine.dispose()
+
+
+_INSERT_RUN = (
+    "INSERT INTO dry_runs (id, started_at, template_version, taxonomy_version) "
+    "VALUES (:id, now(), 'seed-1', 1)"
+)
+_INSERT_UNSELECTED = (
+    "INSERT INTO dry_run_items (run_id, content_object_id, destination_name, outcome, paths, "
+    "rules) VALUES (:run_id, :content_id, '', 'unselected', '/a.jpg', '[]'::jsonb)"
+)
+
+
+async def test_dry_run_drafts_round_trip(empty_database: str) -> None:
+    """The columns and the unselected outcome come and go; downgrade waits on unselected items."""
+    _alembic(empty_database, "upgrade", BEFORE_DRY_RUN_DRAFTS)
+    assert not await _columns(empty_database, "dry_runs") & _DRY_RUN_COLUMNS
+    assert "rules" not in await _columns(empty_database, "dry_run_items")
+
+    _alembic(empty_database, "upgrade", DRY_RUN_DRAFTS)
+    assert await _columns(empty_database, "dry_runs") >= _DRY_RUN_COLUMNS
+    assert "rules" in await _columns(empty_database, "dry_run_items")
+    run_id = uuid4()
+    await _execute(empty_database, _INSERT_RUN, id=run_id)
+    await _execute(empty_database, _INSERT_UNSELECTED, run_id=run_id, content_id=uuid4())
+
+    refused = _run_alembic(empty_database, "downgrade", BEFORE_DRY_RUN_DRAFTS)
+    assert refused.returncode != 0
+    assert "DELETE FROM dry_run_items WHERE outcome = 'unselected'" in refused.stderr
+    assert (await _views_and_head(empty_database))[1] == DRY_RUN_DRAFTS
+
+    await _execute(empty_database, "DELETE FROM dry_run_items WHERE outcome = 'unselected'")
+    _alembic(empty_database, "downgrade", BEFORE_DRY_RUN_DRAFTS)
+    assert not await _columns(empty_database, "dry_runs") & _DRY_RUN_COLUMNS
+    assert "rules" not in await _columns(empty_database, "dry_run_items")
+    assert (await _views_and_head(empty_database))[1] == BEFORE_DRY_RUN_DRAFTS
 
 
 # 0008 moves the partitioned queues' limit from partition_concurrency to its per-worker
