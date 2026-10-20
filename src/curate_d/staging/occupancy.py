@@ -264,8 +264,9 @@ class CoordinatedStagingIndex(StagingCacheIndex, Protocol):
     ) -> None:
         """Record `attempt_id`'s claim on `reserved_bytes` of headroom until `ttl` passes.
 
-        Expiry is judged by the database clock alone, written as its `now()` plus `ttl` and
-        compared against its `now()` on every read, so workers with skewed clocks agree.
+        Expiry is judged by the database clock alone, written as its time at the insert
+        plus `ttl` and compared against its `now()` on every read, so workers with skewed
+        clocks agree, and a slow admission does not shorten the reservation it writes.
         Runs inside the writer lock its caller holds.
         """
         ...

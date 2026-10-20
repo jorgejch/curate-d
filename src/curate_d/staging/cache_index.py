@@ -412,11 +412,13 @@ class PostgresStagingCacheIndex:
 
         Written on the writer connection, so the reservation commits with the admission
         decision that counted the headroom it claims; a fresh `index.reserve` holding is
-        taken when the caller holds none. The expiry is the database's `now()` plus `ttl`
-        and every read compares it against the database's `now()`, so pods with skewed
-        clocks agree on it. `now()` is fixed per transaction and the comparison is
-        strict, so a zero `ttl` writes a reservation no read counts, not even its own
-        transaction's.
+        taken when the caller holds none. The expiry is the database's `clock_timestamp()`
+        at the insert plus `ttl`, and every read compares it against the database's
+        `now()`, so pods with skewed clocks agree on it. Not `now()` at the insert: that
+        is the transaction's start, before the writer-lock wait and the reclamation, so
+        a slow admission would commit a reservation already expired and its upload
+        would fail at registration. A zero `ttl` is therefore live in the transaction
+        that wrote it and expired in every later one.
 
         Args:
             key: Staging key the attempt uploads under.
@@ -437,7 +439,8 @@ class PostgresStagingCacheIndex:
                         attempt_id=attempt_id,
                         staging_key=str(key),
                         reserved_bytes=reserved_bytes,
-                        expires_at=func.now() + literal(ttl, Interval()),
+                        reserved_at=func.clock_timestamp(),
+                        expires_at=func.clock_timestamp() + literal(ttl, Interval()),
                     )
                 )
 

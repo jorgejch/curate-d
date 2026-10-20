@@ -621,6 +621,37 @@ async def test_an_expired_reservation_cannot_be_consumed(
     assert await reservation_count(ledger_engine, attempt) == 1
 
 
+async def test_a_slow_admission_does_not_shorten_its_reservation(
+    index: PostgresStagingCacheIndex,
+    other_index: PostgresStagingCacheIndex,
+    new_key: KeyIssuer,
+) -> None:
+    """The expiry runs from the insert, not from the transaction's start before the lock wait."""
+    attempt = uuid4()
+    ttl = timedelta(seconds=1)
+    async with index.writer_lock("test.slow_admission"):
+        # Longer than the TTL: a reservation timed from the transaction's start would
+        # commit already expired.
+        await asyncio.sleep(1.5)
+        await index.reserve(new_key(), attempt, 1024, ttl)
+
+    assert await other_index.consume_reservation(attempt) is True
+
+
+async def test_a_zero_ttl_reservation_counts_in_the_holding_that_wrote_it(
+    index: PostgresStagingCacheIndex,
+    new_key: KeyIssuer,
+) -> None:
+    """A TTL of zero is live in its own transaction and expired in every later one."""
+    attempt = uuid4()
+    async with index.writer_lock("test.zero_ttl"):
+        baseline = await index.total_reserved_bytes()
+        await index.reserve(new_key(), attempt, 1024, _EXPIRED)
+        assert await index.total_reserved_bytes() == baseline + 1024
+
+    assert await index.consume_reservation(attempt) is False
+
+
 async def test_reconciliation_collects_an_expired_reservations_object(
     ledger_engine: AsyncEngine,
     index: PostgresStagingCacheIndex,

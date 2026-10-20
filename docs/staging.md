@@ -58,8 +58,9 @@ A reservation ends in exactly one of three ways:
   best effort; a row it fails to remove is left to expire. It also runs after a lost
   reservation, and removes the expired row.
 - **Expired** once the database clock passes its `expires_at`, written at admission as
-  `now()` plus twice `CURATE_D_STAGING_TRANSFER_TIMEOUT_SECONDS` (600 s by default). This
-  is how a dead pod's headroom returns. Expiry is judged by the database clock alone, so
+  the database's time at the insert (`clock_timestamp()`, so a slow admission does not
+  shorten it) plus twice `CURATE_D_STAGING_TRANSFER_TIMEOUT_SECONDS` (600 s by default).
+  This is how a dead pod's headroom returns. Expiry is judged by the database clock alone, so
   pods with skewed clocks agree; an expired reservation is neither counted nor consumed.
   Reconciliation deletes expired rows: every sweep, and an admission only when it reclaims
   under pressure.

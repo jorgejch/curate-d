@@ -884,14 +884,15 @@ async def test_consumption_removes_only_a_reservation_the_database_clock_keeps_l
 
 
 async def test_a_reservation_expires_by_the_database_clock() -> None:
-    """The expiry is written from the server's now(), never a pod's clock."""
+    """The expiry is written from the server's clock at the insert, never a pod's clock."""
     connection = ReservationConnection()
 
     await reservation_index(connection).reserve(key_for(1), uuid4(), 1024, timedelta(minutes=10))
 
     [reserve] = connection.reservation_statements()
     assert reserve.startswith("INSERT INTO staging_reservations")
-    assert "(now() + " in reserve
+    assert "(clock_timestamp() + " in reserve
+    assert "now()" not in reserve
 
 
 async def test_forgetting_removes_a_reservation_whether_or_not_it_expired() -> None:

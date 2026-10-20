@@ -35,7 +35,7 @@ Stream 5 runs last. Each task's test or command is run green before the task is 
 - [x] 2.1 Implement `reserve`, `consume_reservation`, `forget_reservation` and
       `total_reserved_bytes` on `PostgresStagingCacheIndex` (`cache_index.py`): `reserve`
       and `consume_reservation` run on the writer connection (re-entrant holding required;
-      `expires_at = now() + :ttl`; consume is `DELETE ... WHERE attempt_id = :id AND
+      `expires_at = clock_timestamp() + :ttl`; consume is `DELETE ... WHERE attempt_id = :id AND
       expires_at > now()` and returns whether a row went); `forget_reservation` takes a
       fresh `writer_lock("occupancy.abandon")` when none is held and deletes regardless of
       expiry; `total_reserved_bytes` sums live rows on the current connection; all failures

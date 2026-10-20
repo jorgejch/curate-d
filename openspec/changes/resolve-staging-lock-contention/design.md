@@ -108,9 +108,11 @@ so a TTL is tight enough. (c) Counting in-flight multipart uploads from
 size is available.
 
 **D3. Expiry is judged by the database clock.** `expires_at` is written as
-`now() + :ttl` and compared as `expires_at > now()` in every read, so pods with skewed
-clocks agree. `now()` is fixed per transaction, which makes a TTL of zero expire in the next
-transaction; the tests use that. TTL is `2 × staging_transfer_timeout_seconds`, derived in
+`clock_timestamp() + :ttl` and compared as `expires_at > now()` in every read, so pods with
+skewed clocks agree. Not `now() + :ttl`: `now()` is the transaction's start, before the
+writer-lock wait and reclamation, so a slow admission would commit an already-expired
+reservation (found in review on #65). `now()` is fixed per transaction, so a TTL of zero is
+live in the transaction that wrote it and expired in the next; the tests use that. TTL is `2 × staging_transfer_timeout_seconds`, derived in
 `factories.build_writer_backend` and passed to `StagingOccupancy(reservation_ttl=...)`: one
 transfer deadline covers the upload, the second covers lock waits and scheduling. No new
 setting; the derivation is documented in `docs/staging.md`'s configuration table under the
