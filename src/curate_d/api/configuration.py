@@ -12,6 +12,7 @@ puts content from its next pass; until then every placement stays as it is.
 """
 
 from collections.abc import Callable, Mapping, Sequence
+from functools import partial
 from typing import Annotated, Final, Protocol
 
 from fastapi import APIRouter, Depends, Header, Request
@@ -27,6 +28,7 @@ from curate_d.configuration.store import (
     ConfigurationRepository,
     ConfigurationVersion,
     DocumentValidator,
+    check_document,
 )
 from curate_d.domain import ConfigurationKind, PlacementPolicy, Taxonomy
 from curate_d.placement.policy import active_policy
@@ -54,6 +56,45 @@ def _lax(parser: DocumentValidator) -> BeforeValidator:
 SubmittedTaxonomy = Annotated[Taxonomy, _lax(parse_taxonomy)]
 SubmittedTemplates = Annotated[TemplateSet, _lax(parse_templates)]
 SubmittedPolicy = Annotated[PlacementPolicy, _lax(parse_policy)]
+
+
+def _submission_parser(kind: ConfigurationKind, taxonomy: Taxonomy | None) -> DocumentValidator:
+    """Return the parser activating `kind` validates with, against `taxonomy` when given."""
+    if taxonomy is None or kind is ConfigurationKind.TAXONOMY:
+        return _PARSERS[kind]
+    if kind is ConfigurationKind.POLICY:
+        return partial(parse_policy, taxonomy=taxonomy)
+    return partial(parse_templates, taxonomy=taxonomy)
+
+
+def check_submission(
+    kind: ConfigurationKind, document: BaseModel, *, taxonomy: Taxonomy | None = None
+) -> BaseModel:
+    """Validate a submitted document as activating it would, storing nothing.
+
+    Activation and a dry run's drafts both pass through here, so a draft a dry run
+    accepts is one `PUT /configuration/{kind}` would accept too.
+
+    Args:
+        kind: The kind `document` is submitted as.
+        document: The submitted document, already parsed from its request body.
+        taxonomy: The taxonomy in force, read by the caller under the taxonomy's shared
+            lock: every category and subcategory condition of a policy or template set
+            must be one it lists. Ignored for a taxonomy.
+
+    Returns:
+        The document as parsed from its stored (JSON) form.
+
+    Raises:
+        RejectedError: the document is invalid for `kind`, or names a category or
+            subcategory `taxonomy` does not list.
+    """
+    try:
+        return check_document(
+            kind, document.model_dump(mode="json"), _submission_parser(kind, taxonomy)
+        )
+    except ConfigurationError as error:
+        raise RejectedError(str(error)) from None
 
 
 class TaxonomyConfiguration(BaseModel):
