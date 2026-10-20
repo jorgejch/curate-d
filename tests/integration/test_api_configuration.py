@@ -5,14 +5,14 @@ from collections.abc import AsyncIterator, Iterator
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from curate_d.api.app import create_app
 from curate_d.classification.taxonomy import active_taxonomy
 from curate_d.config import Settings
-from curate_d.configuration.documents import parse_policy, parse_taxonomy
-from curate_d.configuration.store import ConfigurationRepository
+from curate_d.configuration.documents import parse_stored_policy, parse_taxonomy
+from curate_d.configuration.store import ConfigurationRepository, DocumentValidator
 from curate_d.domain import (
     ConfigurationKind,
     ContentObject,
@@ -21,17 +21,17 @@ from curate_d.domain import (
     StrongFingerprint,
 )
 from curate_d.ledger import ContentObjectRepository, PlacementRepository
-from curate_d.ledger.tables import content_objects, placements
+from curate_d.ledger.tables import configurations, content_objects, placements
 from curate_d.placement.policy import active_policy
 from curate_d.rendering.planning import active_templates
 from curate_d.rendering.templates import parse_templates
 
 pytestmark = pytest.mark.integration
 
-_PARSERS = {
+_PARSERS: dict[ConfigurationKind, DocumentValidator] = {
     ConfigurationKind.TAXONOMY: parse_taxonomy,
     ConfigurationKind.TEMPLATES: parse_templates,
-    ConfigurationKind.POLICY: parse_policy,
+    ConfigurationKind.POLICY: parse_stored_policy,
 }
 
 
@@ -149,3 +149,48 @@ async def test_a_template_change_leaves_existing_placements_untouched(
             await connection.execute(
                 delete(content_objects).where(content_objects.c.id == content.id)
             )
+
+
+def _retired_flag_policy() -> dict[str, object]:
+    """Return a policy whose one retention rule carries `source_counts_as_copy`."""
+    rule = {"name": f"keep-{uuid.uuid4().hex[:8]}", "release_source": False, "required_copies": 3}
+    return {"destinations": [], "rules": [], "retention": [rule | {"source_counts_as_copy": False}]}
+
+
+async def test_a_policy_carrying_the_retired_flag_is_refused(http: TestClient) -> None:
+    """A new document with `source_counts_as_copy` is 422 and the version in force stays."""
+    before = http.get("/configuration/policy").json()
+    refused = http.put("/configuration/policy", json=_retired_flag_policy())
+    assert refused.status_code == 422
+    assert "source_counts_as_copy" in refused.text
+    assert http.get("/configuration/policy").json() == before
+
+
+async def test_a_stored_policy_with_the_retired_flag_is_served_without_it(
+    http: TestClient, ledger_engine: AsyncEngine
+) -> None:
+    """A version stored with `source_counts_as_copy` is still in force and read without it."""
+    http.get("/configuration/policy")
+    stored = _retired_flag_policy()
+    policies = configurations.c.kind == ConfigurationKind.POLICY.value
+    async with ledger_engine.begin() as connection:
+        latest = await connection.scalar(select(func.max(configurations.c.version)).where(policies))
+        version = int(latest) + 1
+        await connection.execute(
+            configurations.update().where(policies, configurations.c.active).values(active=False)
+        )
+        await connection.execute(
+            configurations.insert().values(
+                kind=ConfigurationKind.POLICY.value,
+                version=version,
+                document=stored,
+                active=True,
+                created_by="test-retired-flag",
+            )
+        )
+    served = http.get("/configuration/policy")
+    assert served.status_code == 200
+    assert served.json()["version"] == version
+    [retention] = served.json()["document"]["retention"]
+    assert retention["required_copies"] == 3
+    assert "source_counts_as_copy" not in retention

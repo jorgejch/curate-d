@@ -23,7 +23,7 @@ class TaxonomyField(StrEnum):
     PLACE_LABEL = "place_label"
 
 
-def _check_value(value: str) -> None:
+def check_value(value: str) -> None:
     """Reject a value that cannot name a folder or that pads itself with whitespace.
 
     Raises:
@@ -49,13 +49,13 @@ class Taxonomy(DomainModel):
             ValueError: a value is malformed, or a subcategory or label is listed twice.
         """
         for category, subcategories in self.categories.items():
-            _check_value(category)
+            check_value(category)
             for subcategory in subcategories:
-                _check_value(subcategory)
+                check_value(subcategory)
             if len(set(subcategories)) != len(subcategories):
                 raise ValueError(f"category {category!r} lists a subcategory twice")
         for label in self.place_labels:
-            _check_value(label)
+            check_value(label)
         if len(set(self.place_labels)) != len(self.place_labels):
             raise ValueError("a place label is listed twice")
         return self
@@ -77,7 +77,7 @@ class Taxonomy(DomainModel):
             ValueError: a subcategory is promoted without an existing category, or the
                 value is malformed.
         """
-        _check_value(value)
+        check_value(value)
         categories = {name: tuple(subs) for name, subs in self.categories.items()}
         labels = self.place_labels
         if field is TaxonomyField.CATEGORY:

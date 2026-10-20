@@ -474,18 +474,19 @@ async def test_retention_follows_the_strongly_verified_copies(
         decisions = await _audit(ledger_engine, content_id, AuditEntryType.RETENTION_DECIDED, since)
         assert [(d.details["outcome"], d.details["reason"]) for d in decisions] == [
             ("retain", "0 of 2 required copies are strongly verified"),
-            ("retain", "the original is one of the 2 required copies; releasing it would leave 1"),
+            ("retain", "1 of 2 required copies are strongly verified"),
             (
                 "release_permitted",
                 "2 strongly verified copies meet the 2 required without the original",
             ),
             (
                 "retain",
-                "the original is one of the 2 required copies; releasing it would leave 1; "
-                f"1 weaker copies do not count ({offsite})",
+                "1 of 2 required copies are strongly verified; 1 weaker copies do not count "
+                f"({offsite})",
             ),
         ]
         assert decisions[-1].details["rule"] == "archive"
+        assert "source_counts_as_copy" not in decisions[-1].details
         assert decisions[-1].details["weak_copies"] == offsite
         assert decisions[-1].details["strong_copies"] == library
 

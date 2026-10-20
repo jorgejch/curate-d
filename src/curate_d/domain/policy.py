@@ -3,40 +3,37 @@
 Destinations are named targets. Placement rules map facts to the destinations content
 should have copies at; every matching rule contributes, so policies compose. Retention is
 separate: an original is kept unless a retention rule explicitly permits release, and even
-then only once enough strongly verified copies exist — counting the original itself when
-the policy says it is one of the copies.
+then only once the required number of strongly verified copies exist besides the original,
+at destinations the policy defines.
+
+Every value a policy names is checked when it is parsed: a condition's `media_kind` must
+be a `MediaKind`, and a destination's `profile` a `CapabilityProfileName`. Category and
+subcategory conditions are checked against the taxonomy only when a validation context
+carries one, which activation does (`domain.conditions`).
 """
 
 from collections.abc import Mapping
+from enum import StrEnum
 from typing import Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, ValidationInfo, model_validator
 
 from curate_d.domain.base import DomainModel
+from curate_d.domain.conditions import check_conditions, matches, taxonomy_in
 from curate_d.domain.facts import Facts
 from curate_d.domain.placement import VerificationLevel
 from curate_d.domain.source import Provider
 
-_CONDITION_FIELDS = frozenset({"media_kind", "category", "subcategory"})
 
+class CapabilityProfileName(StrEnum):
+    """The capability profiles a destination can name.
 
-def _matches(when: Mapping[str, str], facts: Facts) -> bool:
-    """Whether every condition matches the facts."""
-    values = facts.model_dump(mode="json")
-    return all(values.get(field) == value for field, value in when.items())
-
-
-def _check_conditions(owner: str, when: Mapping[str, str]) -> None:
-    """Reject a condition on a fact that cannot select.
-
-    Raises:
-        ValueError: the condition names another fact.
+    Rendering holds a profile for each (`rendering.templates.PROFILES`); the domain holds
+    only the names, so a policy naming another is refused when it is parsed.
     """
-    unknown = set(when) - _CONDITION_FIELDS
-    if unknown:
-        raise ValueError(
-            f"{owner} selects on {sorted(unknown)}; only {sorted(_CONDITION_FIELDS)} can select"
-        )
+
+    PCLOUD = "pcloud"
+    PORTABLE = "portable"
 
 
 class DestinationConfig(DomainModel):
@@ -46,7 +43,9 @@ class DestinationConfig(DomainModel):
     provider: Provider
     account: str = Field(min_length=1)
     root_path: str = Field(min_length=1, pattern=r"^/")
-    profile: str = Field(default="pcloud", description="Capability profile name.")
+    profile: CapabilityProfileName = Field(
+        default=CapabilityProfileName.PCLOUD, description="Capability profile name."
+    )
 
 
 class PlacementRule(DomainModel):
@@ -57,13 +56,16 @@ class PlacementRule(DomainModel):
     destinations: tuple[str, ...] = Field(min_length=1)
 
     @model_validator(mode="after")
-    def _check(self) -> Self:
-        """Reject conditions on facts that cannot select.
+    def _check(self, info: ValidationInfo[object]) -> Self:
+        """Reject conditions that cannot match.
 
         Raises:
-            ValueError: a condition names another fact.
+            ValueError: a condition names another fact or a value no fact can hold, or,
+                with a taxonomy in the validation context, a value it does not list.
         """
-        _check_conditions(f"placement rule {self.name!r}", self.when)
+        check_conditions(
+            f"placement rule {self.name!r}", self.when, taxonomy=taxonomy_in(info.context)
+        )
         return self
 
 
@@ -73,19 +75,26 @@ class RetentionRule(DomainModel):
     name: str = Field(min_length=1)
     when: Mapping[str, str] = Field(default_factory=dict)
     release_source: bool = False
-    required_copies: int = Field(default=2, ge=1)
-    source_counts_as_copy: bool = True
+    required_copies: int = Field(
+        default=2,
+        ge=1,
+        description="Strongly verified copies at destinations, not counting the original, "
+        "needed before release is permitted; the original is retained until they exist.",
+    )
     minimum_level: VerificationLevel = VerificationLevel.STRONG_IN_TRANSIT
 
     @model_validator(mode="after")
-    def _check(self) -> Self:
-        """Reject conditions on unknown facts and a release below the strong rungs.
+    def _check(self, info: ValidationInfo[object]) -> Self:
+        """Reject conditions that cannot match and a release below the strong rungs.
 
         Raises:
-            ValueError: a condition names another fact, or release would accept a copy
-                weaker than the strong rungs.
+            ValueError: a condition names another fact or a value no fact can hold, or,
+                with a taxonomy in the validation context, a value it does not list; or
+                release would accept a copy weaker than the strong rungs.
         """
-        _check_conditions(f"retention rule {self.name!r}", self.when)
+        check_conditions(
+            f"retention rule {self.name!r}", self.when, taxonomy=taxonomy_in(info.context)
+        )
         if self.release_source and not self.minimum_level.permits_source_release:
             raise ValueError(
                 f"retention rule {self.name!r} would release sources on "
@@ -123,16 +132,37 @@ class PlacementPolicy(DomainModel):
         """A destination by name."""
         return next((d for d in self.destinations if d.name == name), None)
 
+    def destination_names(self) -> frozenset[str]:
+        """Return the names of the destinations this policy defines.
+
+        These are the destinations the destination checks verify, so only copies at them
+        count toward source release.
+        """
+        return frozenset(d.name for d in self.destinations)
+
     def desired_destinations(self, facts: Facts) -> tuple[str, ...]:
-        """Every destination a matching rule asks for, in a stable order."""
-        wanted = {
-            name for rule in self.rules if _matches(rule.when, facts) for name in rule.destinations
-        }
-        return tuple(sorted(wanted))
+        """Return every destination a matching rule asks for, in a stable order."""
+        return tuple(self.selections(facts))
+
+    def selections(self, facts: Facts) -> dict[str, tuple[str, ...]]:
+        """Return each destination a matching rule asks for, with the rules that do.
+
+        Returns:
+            Destination names in sorted order, each mapped to the names of the matching
+            rules that target it, in policy order.
+        """
+        selected: dict[str, list[str]] = {}
+        for rule in self.rules:
+            if matches(rule.when, facts):
+                for name in rule.destinations:
+                    rules = selected.setdefault(name, [])
+                    if rule.name not in rules:
+                        rules.append(rule.name)
+        return {name: tuple(selected[name]) for name in sorted(selected)}
 
     def retention_for(self, facts: Facts) -> RetentionRule | None:
         """The first retention rule that applies, or None: retain by default."""
-        return next((rule for rule in self.retention if _matches(rule.when, facts)), None)
+        return next((rule for rule in self.retention if matches(rule.when, facts)), None)
 
 
 # No destinations: nothing is placed until a person configures where things go.

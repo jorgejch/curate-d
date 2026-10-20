@@ -1,9 +1,10 @@
 """Taxonomy, path templates and placement policy: view, change, and list versions.
 
 A change is a new version made active in one transaction, so an invalid document never
-replaces the one in force. Documents arrive as JSON and are parsed the way stored ones
-are, leniently in type and strictly in shape, before the endpoint sees them; a document
-the parser refuses is answered 422 with each problem located.
+replaces the one in force. Documents arrive as JSON and are parsed leniently in type and
+strictly in shape before the endpoint sees them; a document the parser refuses, including
+one carrying a retired field a stored version may still hold, is answered 422 with each
+problem located.
 
 A new taxonomy version asks the workers to classify again what it would now accept.
 Nothing here touches placements. A new template version changes where reconciliation
@@ -46,7 +47,7 @@ _PARSERS: Final[Mapping[ConfigurationKind, DocumentValidator]] = {
 
 
 def _lax(parser: DocumentValidator) -> BeforeValidator:
-    """Parse a submitted JSON object the way a stored document is parsed."""
+    """Parse a submitted JSON object leniently in type and strictly in shape."""
     return BeforeValidator(lambda value: parser(value) if isinstance(value, Mapping) else value)
 
 
