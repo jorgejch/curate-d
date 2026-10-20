@@ -6,10 +6,14 @@ verification rungs. The original never counts toward them. Weaker copies never c
 decision is re-derived from the placements as they stand on every evaluation, so a copy
 whose level is later found weaker changes it.
 
+Only copies at destinations the policy in force defines count, because only those are
+checked: a copy at a destination dropped from the policy is never verified again, so it
+may be gone without the ledger knowing. Such copies are named in the decision instead.
+
 Nothing here releases anything: the decision is recorded, with its inputs and rule.
 """
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from enum import StrEnum
 
 from pydantic import Field
@@ -45,6 +49,11 @@ class RetentionDecision(DomainModel):
     weak_copies: tuple[str, ...] = Field(
         default=(), description="Destinations holding a present copy too weakly verified to count."
     )
+    unchecked_copies: tuple[str, ...] = Field(
+        default=(),
+        description="Destinations no longer in the policy holding a present copy; nothing "
+        "checks them, so they do not count.",
+    )
 
     def audit_details(self, *, policy_version: int | None = None) -> dict[str, AuditValue]:
         """Return the decision as audit entry details, with the policy version it applied."""
@@ -59,13 +68,24 @@ class RetentionDecision(DomainModel):
             else self.minimum_level.name.lower(),
             "strong_copies": ", ".join(self.strong_copies) or None,
             "weak_copies": ", ".join(self.weak_copies) or None,
+            "unchecked_copies": ", ".join(self.unchecked_copies) or None,
         }
 
 
 def decide_retention(
-    rule: RetentionRule | None, placements: Sequence[Placement]
+    rule: RetentionRule | None,
+    placements: Sequence[Placement],
+    *,
+    destinations: Collection[str],
 ) -> RetentionDecision:
-    """Decide retention for one content object from its rule and its placements."""
+    """Decide retention for one content object from its rule and its placements.
+
+    Args:
+        rule: The retention rule governing the content, or None.
+        placements: The content's placements, at any destination.
+        destinations: The names of the destinations the policy in force defines. Present
+            copies elsewhere do not count; they are listed in `unchecked_copies`.
+    """
     if rule is None:
         return RetentionDecision(
             outcome=RetentionOutcome.RETAIN,
@@ -81,24 +101,34 @@ def decide_retention(
     if not rule.release_source:
         return base
     present = [p for p in placements if p.state is PlacementState.PRESENT]
+    checked = [p for p in present if p.destination_name in destinations]
+    unchecked = tuple(sorted(p.destination_name for p in present if p not in checked))
     counts = [
         p
-        for p in present
+        for p in checked
         if p.verification_level.permits_source_release
         and p.verification_level >= rule.minimum_level
     ]
     strong = tuple(sorted(p.destination_name for p in counts))
-    weak = tuple(sorted(p.destination_name for p in present if p not in counts))
-    decided = base.model_copy(update={"strong_copies": strong, "weak_copies": weak})
+    weak = tuple(sorted(p.destination_name for p in checked if p not in counts))
+    decided = base.model_copy(
+        update={"strong_copies": strong, "weak_copies": weak, "unchecked_copies": unchecked}
+    )
+    dropped = (
+        f"; {len(unchecked)} copies at destinations no longer in the policy do not count "
+        f"({', '.join(unchecked)})"
+        if unchecked
+        else ""
+    )
     if len(strong) >= rule.required_copies:
         return decided.model_copy(
             update={
                 "outcome": RetentionOutcome.RELEASE_PERMITTED,
                 "reason": f"{len(strong)} strongly verified copies meet the "
-                f"{rule.required_copies} required without the original",
+                f"{rule.required_copies} required without the original{dropped}",
             }
         )
     reason = f"{len(strong)} of {rule.required_copies} required copies are strongly verified"
     if weak:
         reason += f"; {len(weak)} weaker copies do not count ({', '.join(weak)})"
-    return decided.model_copy(update={"reason": reason})
+    return decided.model_copy(update={"reason": reason + dropped})
