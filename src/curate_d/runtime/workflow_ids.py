@@ -9,11 +9,15 @@ This is what makes reconciliation cheap. The reconciler can enqueue every placem
 believes is missing on every pass, without first checking whether that work is already
 running and without a deduplication table, because redundant enqueues collapse. Two
 overlapping reconciliation passes therefore cannot produce two transfers of the same file.
+
+"The destination" is its identity (`DestinationId`: provider, account and root path), not
+the policy's name for it. A rename keeps the work's identity; a name pointed at another
+account is other work. The identifier's string form holds no separator.
 """
 
 import hashlib
 
-from curate_d.domain import ContentObjectId, StrongFingerprint
+from curate_d.domain import ContentObjectId, DestinationId, StrongFingerprint
 
 # Namespaced so a placement identifier can never collide with a scan or classification
 # one, and readable in the workflow tables so an operator can tell what a row is.
@@ -47,7 +51,7 @@ def _join(*parts: str) -> str:
 
 
 def placement_attempt_workflow_id(
-    fingerprint: StrongFingerprint, destination_name: str, locator: str, attempt: int
+    fingerprint: StrongFingerprint, destination_id: DestinationId, locator: str, attempt: int
 ) -> str:
     """Return the identity of one attempt at putting these bytes at this path of this destination.
 
@@ -55,19 +59,19 @@ def placement_attempt_workflow_id(
     re-rendered to a new path is new work rather than a repeat of the old placement;
     the attempt is, so that a failed placement can be tried again.
     """
-    base = placement_workflow_id(fingerprint, destination_name)
+    base = placement_workflow_id(fingerprint, destination_id)
     tag = hashlib.sha256(locator.encode()).hexdigest()[:_LOCATOR_TAG_DIGITS]
     return f"{base}@{tag}" if attempt == 0 else f"{base}@{tag}#{attempt}"
 
 
-def placement_workflow_id(fingerprint: StrongFingerprint, destination_name: str) -> str:
+def placement_workflow_id(fingerprint: StrongFingerprint, destination_id: DestinationId) -> str:
     """Return the identity of "put these bytes at this destination".
 
     Keyed on the fingerprint rather than the placement row so that the identifier exists
     before any row does, which is what lets the reconciler enqueue optimistically.
     """
     return _join(
-        PLACEMENT_PREFIX, fingerprint.algorithm.value, fingerprint.digest, destination_name
+        PLACEMENT_PREFIX, fingerprint.algorithm.value, fingerprint.digest, str(destination_id)
     )
 
 
@@ -100,9 +104,11 @@ def full_rescan_workflow_id(provider: str, account: str, cycle: str) -> str:
     return _join(FULL_RESCAN_PREFIX, provider, account, cycle)
 
 
-def content_placement_workflow_id(content_object_id: ContentObjectId, destination_name: str) -> str:
+def content_placement_workflow_id(
+    content_object_id: ContentObjectId, destination_id: DestinationId
+) -> str:
     """Return a placement identity for callers holding a content object, not a fingerprint."""
-    return _join(PLACEMENT_PREFIX, "id", str(content_object_id), destination_name)
+    return _join(PLACEMENT_PREFIX, "id", str(content_object_id), str(destination_id))
 
 
 def dry_run_workflow_id(run_id: str) -> str:
@@ -115,6 +121,6 @@ def reconcile_workflow_id(run: str, part: int) -> str:
     return _join(RECONCILE_PREFIX, run, str(part))
 
 
-def destination_check_workflow_id(destination_name: str, cycle: str) -> str:
+def destination_check_workflow_id(destination_id: DestinationId, cycle: str) -> str:
     """Return the identity of one destination's check in one checking cycle."""
-    return _join(DESTINATION_CHECK_PREFIX, destination_name, cycle)
+    return _join(DESTINATION_CHECK_PREFIX, str(destination_id), cycle)

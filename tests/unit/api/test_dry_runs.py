@@ -21,11 +21,13 @@ from curate_d.domain import (
     RejectedValue,
     TaxonomyField,
     VerificationLevel,
+    derive_destination_id,
 )
 from curate_d.placement.dry_run import DryRun, DryRunItem, DryRunRequest
 from tests.unit.api.fakes import FakeDryRuns, backends, client
 
 _AT = datetime(2026, 9, 30, 8, tzinfo=UTC)
+_LIBRARY = derive_destination_id("pcloud", "1", "/library")
 _RECEIPTS = RejectedValue(field=TaxonomyField.SUBCATEGORY, value="Receipts", category="Documents")
 
 
@@ -36,6 +38,7 @@ def _items(run_id: UUID) -> list[DryRunItem]:
             run_id=run_id,
             content_object_id=ContentObjectId(uuid4()),
             destination_name="library",
+            destination_id=_LIBRARY,
             outcome=DryRunOutcome.PROPOSED,
             paths=("/Camera/IMG_0001.JPG",),
             facts=Facts(media_kind=MediaKind.PHOTO, category="Photos"),
@@ -167,6 +170,43 @@ def test_a_malformed_destination_is_refused() -> None:
     assert fake.started == []
 
 
+@pytest.mark.parametrize(
+    ("second", "problem"),
+    [
+        ({"name": "mirror", "account": "1", "root_path": "/Org/"}, "same place"),
+        ({"name": "mirror", "account": "1", "root_path": "/Org/Photos"}, "overlap"),
+        ({"name": "library", "account": "2", "root_path": "/Other"}, "unique"),
+    ],
+)
+def test_destinations_a_policy_would_refuse_are_refused(
+    second: dict[str, str], problem: str
+) -> None:
+    """One place under two names, nested roots in one account, or a repeated name: 422."""
+    fake = FakeDryRuns()
+    library = {"name": "library", "provider": "pcloud", "account": "1", "root_path": "/Org"}
+    with client(replace(backends(), dry_runs=fake)) as http:
+        response = http.post(
+            "/dry-runs", json={"destinations": [library, {"provider": "pcloud", **second}]}
+        )
+    assert response.status_code == 422
+    assert problem in response.text
+    assert fake.started == []
+
+
+def test_one_root_in_two_accounts_is_accepted() -> None:
+    """Two accounts' copies of one template are two destinations."""
+    fake = FakeDryRuns()
+    destinations = [
+        {"name": name, "provider": "pcloud", "account": account, "root_path": "/Org"}
+        for name, account in (("library", "1"), ("mirror", "2"))
+    ]
+    with client(replace(backends(), dry_runs=fake)) as http:
+        response = http.post("/dry-runs", json={"destinations": destinations})
+    assert response.status_code == 202
+    [request] = fake.started
+    assert len({d.id for d in request.destinations}) == 2
+
+
 def test_the_export_carries_facts_locators_and_what_could_not_be_resolved() -> None:
     """Counted by outcome; unresolved items keep their reason and refused values."""
     run_id = uuid4()
@@ -180,6 +220,8 @@ def test_the_export_carries_facts_locators_and_what_could_not_be_resolved() -> N
     assert proposed["facts"]["category"] == "Photos"
     assert proposed["locator"] == "/library/Photos/2024/2024-05/IMG_0001.JPG"
     assert proposed["expected_verification"] == "strong_common_hash"
+    assert proposed["destination_id"] == str(_LIBRARY)
+    assert unresolved["destination_id"] is None
     assert unresolved["reason"].startswith("awaiting review")
     assert unresolved["rejected_values"] == [_RECEIPTS.model_dump(mode="json")]
 

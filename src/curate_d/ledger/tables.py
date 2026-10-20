@@ -191,6 +191,30 @@ content_objects = Table(
 )
 
 
+destinations = Table(
+    "destinations",
+    metadata,
+    Column(
+        "id",
+        UUID(as_uuid=True),
+        primary_key=True,
+        comment="Derived from provider, account and root path; see derive_destination_id.",
+    ),
+    Column("provider", Text, nullable=False),
+    Column("account", Text, nullable=False),
+    Column("root_path", Text, nullable=False, comment="Canonical form: see normalize_root."),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("provider", "account", "root_path"),
+    CheckConstraint(
+        enum_check("provider", *(member.value for member in Provider)),
+        name="provider_known",
+    ),
+    comment="Every place a copy was ever started at. The policy's name for a destination "
+    "is a label and is not kept here: a rename keeps the row, and a name pointed at "
+    "another account or root is another row.",
+)
+
+
 placements = Table(
     "placements",
     metadata,
@@ -201,7 +225,19 @@ placements = Table(
         ForeignKey("content_objects.id", ondelete="RESTRICT"),
         nullable=False,
     ),
-    Column("destination_name", Text, nullable=False),
+    Column(
+        "destination_id",
+        UUID(as_uuid=True),
+        ForeignKey("destinations.id", ondelete="RESTRICT"),
+        nullable=False,
+        comment="Where the copy is. Part of the placement's identity.",
+    ),
+    Column(
+        "destination_name",
+        Text,
+        nullable=False,
+        comment="The policy's name for the destination when this was last placed: a label.",
+    ),
     Column("locator", Text, nullable=False),
     Column("template_version", Text, nullable=False),
     Column("state", Text, nullable=False, server_default=PlacementState.PENDING.value),
@@ -246,11 +282,13 @@ placements = Table(
         onupdate=func.now(),
     ),
     # One placement per content object per destination. Several destinations per content
-    # object are the point; several rows for one destination would be a duplicate.
-    UniqueConstraint("content_object_id", "destination_name"),
+    # object are the point; several rows for one destination would be a duplicate. Keyed
+    # on the destination's identity, not its name: one name pointed at two accounts is
+    # two destinations.
+    UniqueConstraint("content_object_id", "destination_id"),
     # One content object per path at a destination: two copies to one locator would
     # overwrite each other while both are registered present.
-    UniqueConstraint("destination_name", "locator"),
+    UniqueConstraint("destination_id", "locator"),
     CheckConstraint(
         enum_check("state", *(member.value for member in PlacementState)),
         name="state_known",
@@ -631,6 +669,13 @@ dry_run_items = Table(
         nullable=False,
         comment="Empty for content that did not reach rendering.",
     ),
+    Column(
+        "destination_id",
+        UUID(as_uuid=True),
+        nullable=True,
+        comment="The destination's identity; NULL for content that did not reach rendering. "
+        "No foreign key: a dry run records no destination.",
+    ),
     Column("outcome", Text, nullable=False),
     Column("paths", Text, nullable=False, comment="The content's source paths."),
     Column(
@@ -655,16 +700,22 @@ dry_run_items = Table(
     ),
 )
 Index(
-    "ix_dry_run_items_run_id_destination_name_locator",
+    "ix_dry_run_items_run_id_destination_id_locator",
     dry_run_items.c.run_id,
-    dry_run_items.c.destination_name,
+    dry_run_items.c.destination_id,
     dry_run_items.c.locator,
 )
 
 destination_checks = Table(
     "destination_checks",
     metadata,
-    Column("destination_name", Text, primary_key=True),
+    Column("destination_id", UUID(as_uuid=True), primary_key=True),
+    Column(
+        "destination_name",
+        Text,
+        nullable=False,
+        comment="The policy's name for the destination when it was checked: a label.",
+    ),
     Column("checked_at", DateTime(timezone=True), nullable=False),
     Column("reachable", Boolean, nullable=False),
     Column("reason", Text, nullable=True, comment="Why the destination could not be checked."),

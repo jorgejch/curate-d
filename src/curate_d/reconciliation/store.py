@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from curate_d.domain import (
     AuditEntryType,
     ContentObjectId,
+    DestinationId,
     DomainModel,
     PlacementId,
     PlacementState,
@@ -22,8 +23,12 @@ DECIDED_BY: Final = "reconciliation"
 
 
 class DestinationCheck(DomainModel):
-    """The latest look at one destination for its registered placements."""
+    """The latest look at one destination for its registered placements.
 
+    Kept per destination identity; the name is the policy's label when it was checked.
+    """
+
+    destination_id: DestinationId
     destination_name: str
     checked_at: AwareDatetime
     reachable: bool
@@ -60,13 +65,17 @@ class ReconciliationStore:
         return str(row["details"].get("outcome")), str(row["details"].get("reason"))
 
     async def present_at(
-        self, destination_name: str, *, after: PlacementId | None, limit: int
+        self, destination_id: DestinationId, *, after: PlacementId | None, limit: int
     ) -> list[tuple[PlacementId, str]]:
-        """(id, locator) of placements registered as present at a destination, in id order."""
+        """(id, locator) of placements registered as present at a destination, in id order.
+
+        Only placements at that identity: those another account or root holds under the
+        same name are not there to be found.
+        """
         query = (
             select(placements.c.id, placements.c.locator)
             .where(
-                placements.c.destination_name == destination_name,
+                placements.c.destination_id == destination_id,
                 placements.c.state == PlacementState.PRESENT.value,
             )
             .order_by(placements.c.id)
@@ -85,17 +94,24 @@ class ReconciliationStore:
         await self._connection.execute(
             insert(destination_checks)
             .values(**values)
-            .on_conflict_do_update(index_elements=["destination_name"], set_=values)
+            .on_conflict_do_update(index_elements=["destination_id"], set_=values)
         )
 
-    async def checks(self, names: Sequence[str] = ()) -> list[DestinationCheck]:
-        """The latest check of each destination, or of those named."""
-        query = select(destination_checks).order_by(destination_checks.c.destination_name)
+    async def checks(
+        self, names: Sequence[str] = (), *, ids: Sequence[DestinationId] = ()
+    ) -> list[DestinationCheck]:
+        """The latest check of each destination, or of those named or identified."""
+        query = select(destination_checks).order_by(
+            destination_checks.c.destination_name, destination_checks.c.destination_id
+        )
         if names:
             query = query.where(destination_checks.c.destination_name.in_(names))
+        if ids:
+            query = query.where(destination_checks.c.destination_id.in_(ids))
         rows = await self._connection.execute(query)
         return [
             DestinationCheck(
+                destination_id=DestinationId(identifier(row, "destination_id")),
                 destination_name=text(row, "destination_name"),
                 checked_at=moment(row, "checked_at"),
                 reachable=bool(row["reachable"]),

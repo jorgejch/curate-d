@@ -95,7 +95,7 @@ class PlaceOutcome(StrEnum):
 def placement_workflow_for(request: PlacementRequest) -> str:
     """The workflow identity of one attempt at one placement."""
     return placement_attempt_workflow_id(
-        request.fingerprint, request.destination.name, request.locator, request.attempt
+        request.fingerprint, request.destination.id, request.locator, request.attempt
     )
 
 
@@ -194,7 +194,7 @@ async def _start_tx(
         connection,
         content_object_id=request.content_object_id,
         fingerprint=request.fingerprint,
-        destination_name=request.destination.name,
+        destination=request.destination,
         locator=request.locator,
         template_version=request.template_version,
         source=source,

@@ -8,7 +8,7 @@ Maintains the authoritative record of what content exists, where each copy of it
 
 ### Requirement: Three-layer identity model
 
-The system SHALL distinguish three separate identities: a source object identified by provider, account, and provider-native identifier; a content object identified by content fingerprint; and a placement identified by content object and destination.
+The system SHALL distinguish three separate identities: a source object identified by provider, account, and provider-native identifier; a content object identified by content fingerprint; and a placement identified by content object and destination. A destination SHALL be identified by its provider, account and root path; the name a policy gives it SHALL be a label recorded on the placement, not part of any identity.
 
 #### Scenario: Same content in two source locations
 - **WHEN** two source objects in different providers or paths yield the same content fingerprint
@@ -19,6 +19,21 @@ The system SHALL distinguish three separate identities: a source object identifi
 - **WHEN** a source object's path changes but its provider-native identifier is unchanged
 - **THEN** the existing source object record is updated rather than a new one created
 - **AND** existing placements remain valid
+
+#### Scenario: One destination name in two accounts
+- **WHEN** a policy points a destination name at another account or root path than the one existing placements under that name were made at
+- **THEN** those placements keep the account and root path they were made at
+- **AND** they are not counted as copies at the new account or root path
+- **AND** locators they hold do not take a path at the new account or root path
+
+#### Scenario: Destinations sharing a provider
+- **WHEN** two destinations on one provider differ in account or root path
+- **THEN** one-placement-per-destination and one-content-per-locator hold at each separately
+- **AND** each can hold a copy at the same locator
+
+#### Scenario: Two names for one place refused
+- **WHEN** a policy defines two destinations with the same provider, account and root path, or one whose root path lies inside another's in the same account
+- **THEN** the policy is refused, because one file would count as a copy at both
 
 ### Requirement: Content fingerprinting
 

@@ -2,7 +2,8 @@
 
 Evaluation reads the ledger only. For each content object it derives the destinations the
 policy wants, renders where the content goes at each, and pairs every target with the
-placement the ledger holds for that content at that destination. What to do about each
+placement the ledger holds for that content at that destination — at its identity, so a
+name pointed at another account or root starts with nothing there. What to do about each
 pair is `decide`'s: nothing when the copy is registered at the rendered locator, nothing
 while an attempt is still running, otherwise a new attempt. Deciding needs to know which
 attempts are still running, which the workflow asks DBOS for between the two.
@@ -31,7 +32,12 @@ from curate_d.domain import (
     SourceObjectState,
     StrongFingerprint,
 )
-from curate_d.ledger import ContentObjectRepository, PlacementRepository, SourceObjectRepository
+from curate_d.ledger import (
+    ContentObjectRepository,
+    DestinationRepository,
+    PlacementRepository,
+    SourceObjectRepository,
+)
 from curate_d.reconciliation.retention import RetentionDecision, decide_retention
 from curate_d.reconciliation.store import ReconciliationStore
 from curate_d.rendering.planning import RenderFailure, plan_at
@@ -107,11 +113,10 @@ async def evaluate(
         return nothing
     facts = classification.facts
     sources = await SourceObjectRepository(connection).find_by_content_object(content_object_id)
-    existing = {
-        p.destination_name: p
-        for p in await PlacementRepository(connection).find_for_content_object(content_object_id)
-    }
-    retention = decide_retention(policy.retention_for(facts), list(existing.values()))
+    placements = await PlacementRepository(connection).find_for_content_object(content_object_id)
+    existing = {p.destination_id: p for p in placements}
+    identities = await DestinationRepository(connection).get_many(list(existing))
+    retention = decide_retention(policy.retention_for(facts), placements, identities)
     last = await ReconciliationStore(connection).last_retention(content_object_id)
     changed = last != (retention.outcome.value, retention.reason)
     evaluation = nothing.model_copy(update={"retention": retention if changed else None})
@@ -142,7 +147,7 @@ async def evaluate(
                 locator=planned.locator,
                 template_version=planned.rendered.template_version,
                 originals={t.rendered: t.original for t in planned.rendered.transformations},
-                existing=existing.get(destination.name),
+                existing=existing.get(destination.id),
             )
         )
     return evaluation.model_copy(

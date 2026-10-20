@@ -138,7 +138,11 @@ async def plan_at(
     paths: Sequence[str],
     destination: DestinationConfig,
 ) -> PlacementPlan | RenderFailure:
-    """Plan one placement at `destination`, resolved against what the ledger has there."""
+    """Plan one placement at `destination`, resolved against what the ledger has there.
+
+    "There" is the destination's identity: a placement another account made under the
+    same name occupies nothing here.
+    """
     profile = PROFILES.get(destination.profile)
     if profile is None:
         return RenderFailure(
@@ -165,7 +169,7 @@ async def plan_at(
     if isinstance(first, RenderFailure):
         return first
     occupant = await PlacementRepository(connection).find_at_locator(
-        destination_name=destination.name, locator=first.rendered.locator
+        destination_id=destination.id, locator=first.rendered.locator
     )
     return first if occupant is None else attempt({first.rendered.locator: occupant})
 

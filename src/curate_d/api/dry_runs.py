@@ -9,21 +9,23 @@ what informs taxonomy refinement.
 
 from collections.abc import Callable, Mapping, Sequence
 from enum import StrEnum
-from typing import Annotated, Final, Protocol
+from typing import Annotated, Final, Protocol, Self
 from uuid import UUID, uuid4
 
 from dbos import DBOSClient, EnqueueOptions, WorkflowStatus
 from fastapi import APIRouter, Depends, Request, status
-from pydantic import AwareDatetime, BaseModel, BeforeValidator
+from pydantic import AwareDatetime, BaseModel, BeforeValidator, model_validator
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from curate_d.api.errors import NOT_FOUND, NotFoundError, problems
 from curate_d.domain import (
     ContentObjectId,
     DestinationConfig,
+    DestinationId,
     DryRunOutcome,
     Facts,
     RejectedValue,
+    check_destinations,
 )
 from curate_d.placement.dry_run import DryRun, DryRunItem, DryRunRequest, DryRunStore
 from curate_d.runtime.queues import QueueName
@@ -42,6 +44,16 @@ class DryRunOrder(BaseModel):
     """What to evaluate against: these destinations, or the policy's rules when empty."""
 
     destinations: list[Annotated[DestinationConfig, BeforeValidator(_lax_destination)]] = []
+
+    @model_validator(mode="after")
+    def _check(self) -> Self:
+        """Refuse destinations a policy would refuse: see `check_destinations`.
+
+        Raises:
+            ValueError: a name or identity repeats, or two roots overlap in one account.
+        """
+        check_destinations(self.destinations)
+        return self
 
 
 class DryRunStarted(BaseModel):
@@ -79,6 +91,8 @@ class ExportedItem(BaseModel):
 
     content_object_id: ContentObjectId
     destination: str
+    destination_id: DestinationId | None = None
+    """The destination's identity; None for content that did not reach rendering."""
     outcome: DryRunOutcome
     paths: list[str]
     facts: Facts | None = None
@@ -146,6 +160,7 @@ def exported(item: DryRunItem) -> ExportedItem:
     return ExportedItem(
         content_object_id=item.content_object_id,
         destination=item.destination_name,
+        destination_id=item.destination_id,
         outcome=item.outcome,
         paths=list(item.paths),
         facts=item.facts,

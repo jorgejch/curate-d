@@ -16,9 +16,11 @@ from curate_d.domain import (
     AuditEntryType,
     ContentObject,
     ContentObjectId,
+    DestinationIdentity,
     HashAlgorithm,
     Placement,
     PlacementState,
+    Provider,
     StrongFingerprint,
     VerificationLevel,
 )
@@ -47,10 +49,18 @@ def _entry(entry_type: AuditEntryType, minutes: int, content: ContentObject) -> 
     )
 
 
-def _placement(content: ContentObject, destination: str) -> Placement:
-    """A strongly verified copy at `destination`."""
+def _identity(destination: str, account: str = "acct-1") -> DestinationIdentity:
+    """Return where a destination named `destination` keeps copies in `account`."""
+    return DestinationIdentity(
+        provider=Provider.PCLOUD, account=account, root_path=f"/{destination}"
+    )
+
+
+def _placement(content: ContentObject, destination: str, account: str = "acct-1") -> Placement:
+    """A strongly verified copy at `destination`, in `account`."""
     return Placement.build(
         content_object_id=content.id,
+        destination_id=_identity(destination, account).id,
         destination_name=destination,
         locator=f"/{destination}/x.jpg",
         template_version="seed-1",
@@ -82,6 +92,30 @@ def test_history_keeps_the_recorded_order_and_names_verification_levels() -> Non
     assert [p.destination for p in history.placements] == ["library", "offsite"]
     assert history.placements[0].verification_level == "strong_common_hash"
     assert history.fingerprint == f"sha256:{'ab' * 32}"
+
+
+def test_each_placement_says_where_its_copy_is() -> None:
+    """One name at two accounts reads as two places, each with its provider, account and root."""
+    content = _content()
+    first, second = _placement(content, "library"), _placement(content, "library", "acct-2")
+    history = history_of(
+        content,
+        [second, first],
+        [],
+        {
+            first.destination_id: _identity("library"),
+            second.destination_id: _identity("library", "acct-2"),
+        },
+    )
+    assert [(p.destination, p.account, p.root_path) for p in history.placements] == sorted(
+        [("library", "acct-1", "/library"), ("library", "acct-2", "/library")],
+        key=lambda row: str(_identity(row[0], row[1]).id),
+    )
+    assert {p.destination_id for p in history.placements} == {
+        first.destination_id,
+        second.destination_id,
+    }
+    assert all(p.provider is Provider.PCLOUD for p in history.placements)
 
 
 def test_the_endpoint_serves_a_history() -> None:

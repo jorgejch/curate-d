@@ -1,10 +1,11 @@
 """Transfers for integration tests, through the local stack's rclone daemon.
 
 Provider accounts are directories of the daemon's own filesystem: every source account is
-one, the destination account `DESTINATION_ACCOUNT` another, and an account listed as
-offline cannot be reached at all. The daemon's local backend reports every hash, so an
-honest copy verifies on the common-hash rung. `ScriptedAccess` passes calls through to
-the daemon, counting copies and injecting failures when told to.
+one, the destination account `DESTINATION_ACCOUNT` another, an account given a directory
+of its own has that one, and an account listed as offline cannot be reached at all. The
+daemon's local backend reports every hash, so an honest copy verifies on the common-hash
+rung. `ScriptedAccess` passes calls through to the daemon, counting copies and injecting
+failures when told to.
 """
 
 import asyncio
@@ -36,10 +37,21 @@ _NO_SPACE: Final = -1
 class WorkspaceRemotes:
     """Accounts as directories of one daemon workspace."""
 
-    def __init__(self, workspace: str, *, offline: Collection[str] = ()) -> None:
-        """Resolve into `workspace`; the `offline` accounts cannot be reached."""
+    def __init__(
+        self,
+        workspace: str,
+        *,
+        offline: Collection[str] = (),
+        directories: Mapping[str, str] | None = None,
+    ) -> None:
+        """Resolve into `workspace`; the `offline` accounts cannot be reached.
+
+        `directories` gives accounts a directory of their own in the workspace, so two
+        accounts under one provider hold different files.
+        """
         self.workspace = workspace
         self.offline = set(offline)
+        self.directories = dict(directories or {})
 
     async def fs_for(self, provider: Provider, account: str) -> str:
         """The directory standing in for the account.
@@ -49,6 +61,9 @@ class WorkspaceRemotes:
         """
         if account in self.offline:
             raise ProviderRequestError(provider, account, "configure remote", "unreachable")
+        own = self.directories.get(account)
+        if own is not None:
+            return f"/{self.workspace}/{own}"
         side = "destination" if account == DESTINATION_ACCOUNT else "source"
         return f"/{self.workspace}/{side}"
 

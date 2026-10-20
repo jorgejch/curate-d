@@ -25,6 +25,7 @@ from curate_d.classification.store import ReviewRepository, SpendRepository
 from curate_d.config import Settings
 from curate_d.domain import (
     ContentObject,
+    DestinationConfig,
     HashAlgorithm,
     PendingFolder,
     Placement,
@@ -36,7 +37,12 @@ from curate_d.domain import (
     StrongFingerprint,
 )
 from curate_d.inventory.scans import ScanRepository
-from curate_d.ledger import ContentObjectRepository, PlacementRepository, SourceObjectRepository
+from curate_d.ledger import (
+    ContentObjectRepository,
+    DestinationRepository,
+    PlacementRepository,
+    SourceObjectRepository,
+)
 from curate_d.ledger.tables import (
     content_objects,
     placements,
@@ -116,10 +122,15 @@ async def _failed_units(ledger_engine: AsyncEngine) -> AsyncGenerator[dict[str, 
             )
             for _ in range(2)
         ]
+        library = DestinationConfig(
+            name=f"lib-{tag}", provider=Provider.PCLOUD, account=f"acct-{tag}", root_path="/lib"
+        )
+        await DestinationRepository(connection).ensure(library.identity)
         placement = await PlacementRepository(connection).upsert(
             Placement.build(
                 content_object_id=placed.id,
-                destination_name=f"lib-{tag}",
+                destination_id=library.id,
+                destination_name=library.name,
                 locator=f"/lib-{tag}/x.jpg",
                 template_version="seed-1",
             ).model_copy(
@@ -216,6 +227,8 @@ async def test_each_failed_unit_reports_what_it_concerned_and_why(
     assert placement["stage"] == "placement"
     assert placement["content_object_id"] == str(failed_units["placed"])
     assert placement["reason"].startswith("failed: copy timed out")
+    assert placement["where"].startswith("lib-")
+    assert "@pcloud:acct-" in placement["where"]
     review = find("content_object_id", failed_units["reviewed"])
     assert review["stage"] == "classification"
     assert review["reason"].startswith("low_confidence: no tier was sure")
