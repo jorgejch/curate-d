@@ -27,6 +27,7 @@ from curate_d.staging.errors import StagingObjectStoreError
 from curate_d.staging.keys import StagingKey
 from curate_d.staging.objects import StagedObject, StagedObjectRef
 from curate_d.staging.occupancy import StagingOccupancy
+from tests.integration.staging_keys import delete_suite_reservations, suite_key
 
 pytestmark = pytest.mark.integration
 
@@ -90,7 +91,7 @@ class KeyIssuer:
         self.issued: list[StagingKey] = []
 
     def __call__(self) -> StagingKey:
-        key = StagingKey(uuid4().hex)
+        key = suite_key()
         self.issued.append(key)
         return key
 
@@ -137,7 +138,12 @@ async def _delete_reservations(engine: AsyncEngine, keys: Iterable[StagingKey]) 
 
 @pytest.fixture
 async def _cleanup(ledger_engine: AsyncEngine, new_key: KeyIssuer) -> AsyncIterator[None]:
-    """Delete every row the test's keys named, however the test ended."""
+    """Delete every row the test's keys named, however the test ended.
+
+    The suite's reservations are cleared before the test too, in case an interrupted run
+    left a live one that would count against this test's admissions.
+    """
+    await delete_suite_reservations(ledger_engine)
     yield
     await _delete_registrations(ledger_engine, new_key.issued)
     await _delete_reservations(ledger_engine, new_key.issued)

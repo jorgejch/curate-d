@@ -41,6 +41,7 @@ from curate_d.staging.object_store import S3StagingObjectStore
 from curate_d.staging.objects import StagedObject, StagedObjectRef, StagingObjectStore
 from curate_d.staging.occupancy import StagingOccupancy
 from curate_d.staging.publish import publish
+from tests.integration.staging_keys import delete_suite_reservations, suite_key
 
 pytestmark = pytest.mark.integration
 
@@ -69,7 +70,7 @@ class KeyIssuer:
         self.issued: list[StagingKey] = []
 
     def __call__(self) -> StagingKey:
-        key = StagingKey(uuid4().hex)
+        key = suite_key()
         self.issued.append(key)
         return key
 
@@ -113,8 +114,10 @@ async def _cleanup(ledger_engine: AsyncEngine, new_key: KeyIssuer) -> AsyncItera
     """Delete every row the test's keys named, however the test ended.
 
     Reservations included: a live one left behind would count against every later
-    test's small bound until it expired.
+    test's small bound until it expired. The suite's reservations are cleared before the
+    test too, in case an interrupted run never reached this cleanup.
     """
+    await delete_suite_reservations(ledger_engine)
     yield
     async with ledger_engine.begin() as connection:
         await connection.execute(
