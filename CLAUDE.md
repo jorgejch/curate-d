@@ -148,9 +148,11 @@ how it is made idempotent, whether it belongs in a workflow — against the `dbo
   a re-executed step appends new audit entries. That is intended: the trail keeps the
   original decision and the new one. Don't deduplicate audit entries by workflow or step.
 - Rewind does not re-run child workflows. A rewound parent calling a child under the same
-  deterministic ID gets the child's old result back, so rewind or delete the children too.
+  deterministic ID gets the child's old result back, so rewind the children after the
+  parent; never delete them (`docs/rewind.md`).
 - Nothing in curate.d rewinds a workflow, so the two points above concern a rewind run by
-  hand; record who ran it, from which step and why in the audit trail.
+  hand; record who ran it, from which step and why in the issue tracking the incident. The
+  rewind itself writes no audit entry.
 - New periodic work uses persisted schedules: declare them in `schedules_for`
   (`workflows/registry.py`); `worker/schedules.py`'s `apply_schedules` writes them after
   launch, and its reconciler periodically, through the schedule authority.
