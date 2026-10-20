@@ -27,6 +27,7 @@ from typing import Final, Self
 from pydantic import Field, ValidationInfo, model_validator
 
 from curate_d.domain import (
+    CapabilityProfileName,
     DomainModel,
     Facts,
     Taxonomy,
@@ -77,9 +78,10 @@ PORTABLE_PROFILE: Final = CapabilityProfile(
     max_component_bytes=255,
     reserved_names=frozenset({"CON", "PRN", "AUX", "NUL", "COM1", "LPT1"}),
 )
-PROFILES: Final[Mapping[str, CapabilityProfile]] = {
-    "pcloud": PCLOUD_PROFILE,
-    "portable": PORTABLE_PROFILE,
+# Every name a destination can give has a profile; a unit test holds the two together.
+PROFILES: Final[Mapping[CapabilityProfileName, CapabilityProfile]] = {
+    CapabilityProfileName.PCLOUD: PCLOUD_PROFILE,
+    CapabilityProfileName.PORTABLE: PORTABLE_PROFILE,
 }
 
 
