@@ -1,15 +1,20 @@
-"""Template conditions refuse values that could never match."""
+"""Template conditions refuse values that could never match; every profile name resolves."""
 
 import pytest
 from pydantic import ValidationError
 
-from curate_d.domain import SEED_TAXONOMY, Facts, MediaKind
-from curate_d.rendering.templates import SEED_TEMPLATES, parse_templates
+from curate_d.domain import SEED_TAXONOMY, CapabilityProfileName, Facts, MediaKind
+from curate_d.rendering.templates import PROFILES, SEED_TEMPLATES, parse_templates
 
 
 def _document(when: dict[str, str]) -> dict[str, object]:
     """Return a one-template set selecting `when`."""
     return {"version": "v1", "templates": [{"name": "t", "path": "{original_name}", "when": when}]}
+
+
+def test_every_profile_name_has_a_profile() -> None:
+    """A destination's profile always resolves, so planning has no unknown-profile case."""
+    assert set(PROFILES) == set(CapabilityProfileName)
 
 
 def test_a_template_selecting_an_unknown_media_kind_is_refused() -> None:
