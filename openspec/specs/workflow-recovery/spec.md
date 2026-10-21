@@ -394,9 +394,9 @@ The operator sweep SHALL print every field of the sweep's outcome. It SHALL exit
 - **WHEN** any row is reported as failed
 - **THEN** the command exits 1
 
-### Requirement: Re-enqueue is gated, verified and capped
+### Requirement: Re-enqueue is gated and verified
 
-The sweep SHALL re-enqueue a dead executor's row through DBOS's public resume, only after re-reading, immediately before the resume, that the row is still PENDING under that executor, always onto the row's own queue. After the resume it SHALL read the row back: ENQUEUED counts as re-enqueued; PENDING under another executor counts as left running; anything else SHALL be reported as failed and logged as `recovery_sweep.redispatch_unverified`. Because a resume resets DBOS's recovery-attempt count, the sweep SHALL count its own redispatches of a row in the row's workflow attributes, per application version, and SHALL refuse a row at `MAX_SWEEP_REDISPATCHES` (10), reporting it as failed and logging `recovery_sweep.redispatch_cap`. A count recorded under another version SHALL start at zero.
+The sweep SHALL re-enqueue a dead executor's row through DBOS's public resume, only after re-reading, immediately before the resume, that the row is still PENDING under that executor, always onto the row's own queue. After the resume it SHALL read the row back: ENQUEUED counts as re-enqueued; PENDING under another executor counts as left running; anything else SHALL be reported as failed and logged as `recovery_sweep.redispatch_unverified`.
 
 #### Scenario: Row changed after listing
 - **WHEN** the re-read shows the row no longer PENDING under the dead executor
@@ -405,6 +405,14 @@ The sweep SHALL re-enqueue a dead executor's row through DBOS's public resume, o
 #### Scenario: Row cancelled after the counter write
 - **WHEN** the row no longer reads PENDING under the dead executor right before the resume
 - **THEN** nothing is resumed and the row is not counted as re-enqueued
+
+#### Scenario: Resume does not read back
+- **WHEN** the row reads back neither ENQUEUED nor PENDING under another executor after the resume
+- **THEN** the row is reported as failed and `recovery_sweep.redispatch_unverified` is logged
+
+### Requirement: Re-enqueue is capped per application version
+
+Because a resume resets DBOS's recovery-attempt count, the sweep SHALL count its own redispatches of a row in the row's workflow attributes, per application version, and SHALL refuse a row at `MAX_SWEEP_REDISPATCHES` (10), reporting it as failed and logging `recovery_sweep.redispatch_cap`. A count recorded under another version SHALL start at zero.
 
 #### Scenario: Row at the cap
 - **WHEN** a row's recorded redispatch count under its version is at the cap
@@ -416,7 +424,7 @@ The sweep SHALL re-enqueue a dead executor's row through DBOS's public resume, o
 
 ### Requirement: A lost lock stops the batch
 
-Before each fork the sweep SHALL check, on the lock sessions themselves, that it still holds the promotion fence and the source version's lock. If either is lost it SHALL report the row as failed, log `recovery_sweep.version_lock_lost`, and skip every remaining fork and retirement of that sweep. A lock lost between a fork and its cancel SHALL still cancel the original, then stop the batch the same way. Before the cancel of an original whose successor is already confirmed, and before cancelling a stale tick of its own schedule, the sweep SHALL check both locks the same way. Lost before such a cancel, it SHALL still cancel an original whose successor is confirmed, SHALL NOT cancel a stale tick, SHALL report the row as failed, log `recovery_sweep.version_lock_lost` and skip the rest of the batch.
+Before each fork the sweep SHALL check, on the lock sessions themselves, that it still holds the promotion fence and the source version's lock. If either is lost it SHALL report the row as failed, log `recovery_sweep.version_lock_lost`, and skip every remaining fork and retirement of that sweep. A lock lost between a fork and its cancel SHALL still cancel the original, then stop the batch the same way.
 
 #### Scenario: Fence lost before a fork
 - **WHEN** the promotion fence is no longer held when a fork is about to run
@@ -426,29 +434,45 @@ Before each fork the sweep SHALL check, on the lock sessions themselves, that it
 - **WHEN** the version lock is lost after a successor was created and before the original was cancelled
 - **THEN** the original is still cancelled, the row is reported as failed, and the remaining rows are skipped
 
+### Requirement: A lost lock before a cancel retires only a confirmed successor's original
+
+Before the cancel of an original whose successor is already confirmed, and before cancelling a stale tick of its own schedule, the sweep SHALL check both locks the same way. Lost before such a cancel, it SHALL still cancel an original whose successor is confirmed, SHALL NOT cancel a stale tick, SHALL report the row as failed, log `recovery_sweep.version_lock_lost` and skip the rest of the batch.
+
 #### Scenario: Version lock lost before retiring a committed successor's original
 - **WHEN** the version lock is lost and the row's deterministic successor already exists
 - **THEN** the original is still cancelled, the row is reported as failed, `recovery_sweep.version_lock_lost` is logged and the remaining rows are skipped
 
-### Requirement: Schedule reconciliation is serialized, verified and repaired
+#### Scenario: Lock lost before cancelling a stale tick
+- **WHEN** either lock is lost right before the sweep cancels a stale tick of its own schedule
+- **THEN** the tick is not cancelled, the row is reported as failed, `recovery_sweep.version_lock_lost` is logged and the remaining rows are skipped
 
-Workers SHALL reconcile persisted schedules under a session advisory lock held on a dedicated connection, through DBOS's public schedule API, only when their version is DBOS's latest. After writing, a reconciliation SHALL verify that it still holds the lock and that the latest version has not changed; if either fails it SHALL log `worker.schedule_reconciliation_unverified` and SHALL NOT fail the worker. An I/O worker SHALL re-run the reconciliation every `schedule_reconciliation_interval_seconds` (default 600) from a worker thread until it stops, so a stale write is repaired within one interval and a promoted version's schedules apply without a restart. The declarations in code and the settings they read are the only source of a schedule's cron, queue and context: a hand edit to a schedule row SHALL be reverted by the next reconciliation. A paused schedule SHALL stay paused across reconciliations, so pause and resume remain the operator's kill switch.
+### Requirement: Schedule reconciliation is serialized and verified
+
+Workers SHALL reconcile persisted schedules under a session advisory lock held on a dedicated connection, through DBOS's public schedule API, only when their version is DBOS's latest. After writing, a reconciliation SHALL verify that it still holds the lock and that the latest version has not changed; if either fails it SHALL log `worker.schedule_reconciliation_unverified` and SHALL NOT fail the worker.
 
 #### Scenario: Lock lost mid-write
 - **WHEN** a worker's authority session is terminated while it writes schedules
 - **THEN** its writes are reported as unverified and the latest version's next reconciliation restores the rows
 
-#### Scenario: Hand-edited schedule row
-- **WHEN** an operator changes a schedule's cron or queue directly in the database
-- **THEN** the next reconciliation restores the declared values, while a paused status is kept
+#### Scenario: Builds exclude each other
+- **WHEN** a build holding the authority as a transaction lock and one holding it as a session lock reconcile at once
+- **THEN** one waits for the other
+
+### Requirement: Schedule reconciliation repeats and repairs
+
+An I/O worker SHALL re-run the reconciliation every `schedule_reconciliation_interval_seconds` (default 600) from a worker thread until it stops, so a stale write is repaired within one interval and a promoted version's schedules apply without a restart.
 
 #### Scenario: Promotion without restart
 - **WHEN** a version is promoted while its workers run
 - **THEN** those workers apply their schedules within one reconciliation interval
 
-#### Scenario: Builds exclude each other
-- **WHEN** a build holding the authority as a transaction lock and one holding it as a session lock reconcile at once
-- **THEN** one waits for the other
+### Requirement: Schedule declarations are the only source of truth
+
+The declarations in code and the settings they read are the only source of a schedule's cron, queue and context: a hand edit to a schedule row SHALL be reverted by the next reconciliation. A paused schedule SHALL stay paused across reconciliations, so pause and resume remain the operator's kill switch.
+
+#### Scenario: Hand-edited schedule row
+- **WHEN** an operator changes a schedule's cron or queue directly in the database
+- **THEN** the next reconciliation restores the declared values, while a paused status is kept
 
 ### Requirement: Workflow history pruning is application-owned
 

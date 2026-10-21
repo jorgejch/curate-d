@@ -39,11 +39,41 @@ PostgreSQL or S3 implementations. Construction lives in
 [factories.py](../src/curate_d/staging/factories.py); storage contracts live in
 [objects.py](../src/curate_d/staging/objects.py).
 
-The writer holds the global PostgreSQL advisory lock across admission, upload and
-registration. Unique attempt keys prevent interrupted or competing uploads overwriting a
-published winner. Upload computes SHA-256, enforces the declared bound, and verifies
-remote size/storage class with HEAD before registration. Download verifies the complete
-content against registered size and SHA-256; multipart ETags are opaque identifiers.
+The writer takes the global PostgreSQL advisory lock twice per publication, for its
+admission and its registration, and never for the upload. Admission (`occupancy.reserve`)
+measures the listing plus the bytes of live reservations, reclaims under pressure
+(reconciliation first deletes expired reservations), inserts this attempt's row in
+`staging_reservations`, and commits; bytes it evicted are deleted after that commit. The
+upload then runs unlocked under its reservation, which every worker counts as occupancy,
+so admissions on different pods proceed side by side and still cannot spend the same
+headroom. Registration (`occupancy.register`) consumes the reservation and inserts the
+registration row in one transaction. Entry locks reclamation takes end with the admission
+holding, so a reader waits at most for one reclamation, never for a transfer.
+
+A reservation ends in exactly one of three ways:
+
+- **Consumed** by the registration of its attempt.
+- **Abandoned** (`occupancy.abandon`) when the reserving block exits without registering:
+  a failed upload, a cancellation, or a deletion failure after admission. Abandonment is
+  best effort; a row it fails to remove is left to expire. It also runs after a lost
+  reservation, and removes the expired row.
+- **Expired** once the database clock passes its `expires_at`, written at admission as
+  the database's time at the insert (`clock_timestamp()`, so a slow admission does not
+  shorten it) plus twice `CURATE_D_STAGING_TRANSFER_TIMEOUT_SECONDS` (600 s by default).
+  This is how a dead pod's headroom returns. Expiry is judged by the database clock alone, so
+  pods with skewed clocks agree; an expired reservation is neither counted nor consumed.
+  Reconciliation deletes expired rows: every sweep, and an admission only when it reclaims
+  under pressure.
+
+Reconciliation spares a completed object whose attempt holds a live reservation and
+collects it once the reservation has ended without a registration. A registration whose
+reservation is gone publishes nothing and fails retryably
+([Lost or expired reservation](#lost-or-expired-reservation)), so no row ever names bytes
+reconciliation removed. Unique attempt keys prevent interrupted or competing uploads
+overwriting a published winner. Upload computes SHA-256, enforces the declared bound, and
+verifies remote size/storage class with HEAD before registration. Download verifies the
+complete content against registered size and SHA-256; multipart ETags are opaque
+identifiers.
 
 The shared download lock protects remote bytes until the local copy has been verified.
 The decoder then uses its independent, seekable snapshot. Its byte reservation lasts
@@ -126,7 +156,7 @@ variables; credentials must be supplied through the secret-delivery mechanism.
 | `CURATE_D_STAGING_MAX_BYTES` | Completed active cache ceiling; default 100 GiB |
 | `CURATE_D_STAGING_CAPACITY_RETRY_SECONDS` | First durable ingest wait when staging is full, doubling up to 15 times this; default 60 seconds |
 | `CURATE_D_STAGING_MAX_AGE_HOURS` | Completed-entry eviction age and explicit stale-upload cutoff; default 24 hours |
-| `CURATE_D_STAGING_TRANSFER_TIMEOUT_SECONDS` | Upload/download and startup readiness timeout; default 300 seconds |
+| `CURATE_D_STAGING_TRANSFER_TIMEOUT_SECONDS` | Upload/download and startup readiness timeout; default 300 seconds. Also sets the reservation TTL, twice this (600 seconds by default): one deadline covers the upload, the second the lock waits and scheduling around it. Raising it raises the TTL, so a dead pod's headroom returns later |
 | `CURATE_D_STAGING_LOCAL_SCRATCH_ROOT` | Disposable seekable snapshots; default `/var/lib/curate-d/scratch` |
 | `CURATE_D_STAGING_LOCAL_SCRATCH_MAX_BYTES` | Per-process concurrent snapshot reservations; default 20 GiB |
 
@@ -143,8 +173,9 @@ profile builds it, and worker factories never select it as an S3 fallback.
 
 ## Lock contention events
 
-These events measure the writer-lock and reader-lock contention that #1's revisit trigger
-depends on (#4). Each is one JSON log line per occurrence. Durations are seconds, as
+These events measure writer-lock and reader-lock contention, which the
+[lock contention alarms](#lock-contention-alarms) read (#4), and report reservations that
+ended badly. Each is one JSON log line per occurrence. Durations are seconds, as
 floats, from a monotonic clock. The events carry no pod or executor identity: the pod the
 line came from supplies it, whether that is the pod named in `kubectl logs` or the log
 shipper's pod metadata. Every line also has the logger's ISO-8601 UTC `timestamp`, taken
@@ -156,50 +187,71 @@ when the line is written.
 | `staging.reservation_phases` | info | I/O, once per `publish()` reservation, however it ended | `staging_key`, `declared_bytes`, `outcome`, `error`, `admission_seconds`, `upload_seconds`, `registration_seconds`, `commit_seconds`, `evicted`, `protected`, `orphans_deleted` |
 | `staging.reader_lock_wait` | info | CPU (and I/O if it reads), once per `hold_for_download` | `staging_key`, `wait_seconds` (the `pg_advisory_xact_lock_shared` call alone), `registered` (`false` is a cache miss) |
 | `staging.transfer_deadline_hit` | warning | Either profile, when an upload or download exceeds `CURATE_D_STAGING_TRANSFER_TIMEOUT_SECONDS` | `transfer` (`uploading <object key>` or `downloading <object key>`), `deadline_seconds` |
+| `staging.reservation_lost` | warning | I/O, when a registration finds its reservation expired or gone, after the registration holding ends; nothing was registered | `staging_key`, `attempt_id`, `reserved_bytes` |
+| `staging.reservation_abandon_failed` | warning | I/O, when removing the reservation of a block that registered nothing raises or runs out of time; the row is left to expire | `staging_key`, `attempt_id`, `reserved_bytes`, `error_type` (the exception's class name) |
 
-`caller` is `occupancy.reserve`, `occupancy.sweep` or `occupancy.release`: those are the
-only paths that take the writer lock fresh. `index.register`, `index.evict`,
-`index.reconcile` and `index.release` label the index's own acquisitions, which in
-production always re-enter an occupancy holding. A re-entrant acquisition emits nothing,
-because its time and its entry claims are already inside the outer holding.
+`caller` is `occupancy.reserve`, `occupancy.register`, `occupancy.abandon`,
+`occupancy.sweep` or `occupancy.release`: those are the only paths that take the writer
+lock fresh. A publication takes it for its admission (`occupancy.reserve`) and its
+registration (`occupancy.register`), and for its abandonment (`occupancy.abandon`) when
+it registers nothing; no holding spans the upload, which runs between the first two. A
+lost reservation takes all three, `occupancy.abandon` after `occupancy.register`.
+`occupancy.reserve` therefore labels the admission alone: measuring, reclaiming, evicting
+and inserting the reservation, but not deleting the evicted bytes, which happens after
+its commit. `index.register`, `index.evict`, `index.reconcile` and `index.release` label
+the index's own acquisitions, which in production always re-enter an occupancy holding. A
+re-entrant acquisition emits nothing, because its time and its entry claims are already
+inside the outer holding.
 
 `entry_claims` counts entry locks, not keys: a key claimed twice, or two keys whose
 four-byte lock ids collide, is one lock. Eviction and reconciliation both claim, and a
 claim counts even when the key turns out to have nothing registered, because the lock is
 held all the same. That is #1's case: collecting an orphan locks its key, and a reader of
-the key's registered winner waits until the holding ends. A claim a reader refused is
-not counted. `entry_claims` together with `held_seconds` is the window #1 describes.
+the key's registered winner waits until the holding ends. Only `occupancy.reserve` and
+`occupancy.sweep` holdings reclaim, so only they claim. A claim a reader refused is not
+counted. `entry_claims` together with `held_seconds` is the window #1 described; it no
+longer contains a transfer.
 
 A `staging.reader_lock_wait` names the key the reader asked for, not the key the writer
 claimed. A reclaiming writer holds every entry lock it claims until its transaction ends,
 and it claims a live key whenever it deletes an orphan attempt under that key. Entry locks
 are also a four-byte hash of the key, so a writer that claimed only a colliding key holds
 the reader's lock too. A long `registered: true` wait on a key no worker evicted is one of
-those two cases, the coupling #1 tracks, and ends with the writer's transaction.
+those two cases, the coupling #1 tracked, and ends with the writer's transaction: an
+admission or a sweep, bounded by its listing pages and orphan deletes, never by an upload.
 
-`staging.reservation_phases` splits the `occupancy.reserve` hold. `admission_seconds`
-runs from acquiring the lock to the admission decision (measuring, reclaiming and
-evicting). `upload_seconds` is the upload and `registration_seconds` the row insert.
-`commit_seconds` runs from the insert to the end of the reservation block, which is
-mostly the writer transaction's commit. Admission, upload, registration and commit add
-up to the holding's `held_seconds`, give or take a few statements. The lock wait is not a
-phase: it is the holding's `wait_seconds`. `outcome` is one of:
+`staging.reservation_phases` splits a reservation's lifetime. `admission_seconds` runs
+from acquiring the lock through the admission decision (measuring, reclaiming and
+evicting) and the reservation insert, inside the `occupancy.reserve` holding. `upload_seconds` is the upload, outside any lock.
+`registration_seconds` runs from the upload's end to the registration insert, so it
+includes the wait for the `occupancy.register` holding. `commit_seconds` runs from the
+insert to that holding's end, which is mostly its commit. The four add up to the
+reservation's lifetime after the admission lock wait, give or take the admission
+holding's commit and, after an eviction, the deletion of the evicted bytes, which fall
+between the insert and the upload. They no longer add up to
+one holding's `held_seconds`: the upload is in no holding. The admission lock wait is not
+a phase: it is the `occupancy.reserve` holding's `wait_seconds`. `outcome` is one of:
 
-- `registered`: the reservation committed. A later lookup that finds another attempt's
-  registration (the insert lost the race and wrote nothing) still raises
-  `StagingIntegrityError`, but outside the reservation.
-- `refused`: admission raised `StagingCapacityExhaustedError`, so the block never ran.
-- `cancelled`: the task was cancelled, typically by a drain.
-- `failed`: any other exception, such as a short source, a transfer deadline or a
-  database failure.
+- `registered`: the registration consumed the reservation and committed. A later lookup
+  that finds another attempt's registration (the insert lost the race and wrote nothing)
+  still raises `StagingIntegrityError`, but outside the reservation.
+- `refused`: admission raised `StagingCapacityExhaustedError`, so nothing was reserved and
+  the block never ran.
+- `cancelled`: the task was cancelled, typically by a drain. The reservation is abandoned.
+- `failed`: any other exception, such as a short source, a transfer deadline, a database
+  failure, or a lost reservation (`StagingReservationLostError`, logged as
+  `staging.reservation_lost`). The reservation is abandoned, a lost one included: its
+  abandonment removes the expired row after the `occupancy.register` holding.
 
 `error` is the exception's class name, or `null` when the outcome is `registered`.
 `admission_seconds` and the reclamation counts come from the admission the reservation
 yielded, so they are `null` whenever admission did not admit: a refusal, or a failure or
 cancellation while measuring or evicting. That admission still ran under the lock, and
-its time, eviction included, is in the holding's `held_seconds` (`occupancy.reserve`).
+its time is in the `occupancy.reserve` holding's `held_seconds`.
 Upload, registration and commit are `null` when they never started. A phase that a
 failure or cancellation cut short runs to the end of the reservation, rollback included.
+A lost reservation therefore reports non-null upload and registration phases and a null
+commit: the registration holding ran but inserted nothing.
 `evicted` and `protected` count keys, and `orphans_deleted` counts objects, from the
 admission's reclamation.
 
@@ -280,6 +332,18 @@ kubectl logs -n <namespace> <pod> --since=24h \
   | jq -s 'group_by(.transfer | split(" ")[0])
       | map({direction: (.[0].transfer | split(" ")[0]), count: length,
              deadline_seconds: (map(.deadline_seconds) | unique)})'
+
+# Lost reservations and failed abandonments across every I/O pod, by event, with the
+# pods and keys they came from. Both should be rare: see "Lost or expired reservation"
+# under Recovery. The `capture` keeps the `--prefix` pod name instead of stripping it.
+kubectl logs -n <namespace> -l <io-selector> --since=24h --tail=-1 --prefix \
+    --max-log-requests=<io-pod-count> \
+  | jq -cR 'capture("^\\[(?<pod>[^]]*)\\] (?<line>.*)$") | (.line | fromjson?) + {pod}
+      | select(.event == "staging.reservation_lost"
+          or .event == "staging.reservation_abandon_failed")' \
+  | jq -s 'group_by(.event) | map({event: .[0].event, count: length,
+      reserved_bytes: (map(.reserved_bytes) | add), pods: (map(.pod) | unique),
+      keys: (map(.staging_key) | unique), errors: (map(.error_type // empty) | unique)})'
 ```
 
 An empty selection makes the grouped queries print `[]`, and the duty-cycle query print
@@ -287,11 +351,30 @@ An empty selection makes the grouped queries print `[]`, and the duty-cycle quer
 only as far as the container's current log, so a reading that spans restarts needs the
 log shipper's store. The fields and filters are the same there.
 
-### Revisit threshold for #1
+The queries predate the two-holding reservation and run unchanged; what they measure
+narrowed with it. The by-caller query now lists `occupancy.register` and
+`occupancy.abandon` beside the others, and its `occupancy.reserve` row is admission alone.
+The duty cycle no longer includes transfers, and the entry-lock query's `held_p95` is a
+reclamation's, not an upload's.
+
+### Lock contention alarms
+
+These criteria were #1's revisit threshold. On 2026-09-15 the global writer lock spanning
+admission, upload and registration was reviewed and kept: the transfer timeout bounded the
+worst case, and narrowing the lock needed a reservation row whose crash semantics needed
+their own evidence. The narrowing was deferred until measured upload concurrency showed
+the lock binding (#4), and #63 landed that measurement, the events above, and these
+criteria. The workload could not produce a representative reading, while the defect,
+readers stalled behind unrelated uploads and uploads serialized across the cluster, was
+understood without one, so on 2026-10-18 the `resolve-staging-lock-contention` change
+superseded the deferral: reservation rows let the lock end at admission
+([Authority and data flow](#authority-and-data-flow)), with deterministic tests as the
+evidence instead of production readings. The criteria are kept verbatim as regression
+alarms: one firing now means the narrowing regressed or a reclamation holding grew, not
+that a deferred fix is due.
 
 These are proposed defaults, open to change in review. Read them over at least seven days
-of real ingest in one environment. The global writer lock counts as binding, and #1's
-narrowing is due, when any of these holds:
+of real ingest in one environment. An alarm fires when any of these holds:
 
 - `occupancy.reserve` `wait_seconds` p95 is 30 seconds or more. That is 10% of the default
   300-second `CURATE_D_STAGING_TRANSFER_TIMEOUT_SECONDS`, so writers queue for a
@@ -305,7 +388,17 @@ narrowing is due, when any of these holds:
   60 seconds. That is #1's absolute cap: one stall that long is a defect signal whatever
   its rate. The reader query's `wait_max` for registered reads shows it.
 
-The first reading from dev, and the threshold's link, go in a comment on #1.
+The expected reading after the change is far inside every alarm. An `occupancy.reserve`
+holding is bounded by its reclamation, a few listing pages and serial orphan deletes, and
+an `occupancy.register` holding by a few statements, so neither `held_seconds` approaches
+a transfer, and `occupancy.reserve`'s `wait_seconds` is other pods' admissions,
+registrations and sweeps queued ahead of it. Registered reader waits are bounded the same
+way: by one admission's or sweep's reclamation, never by an upload. The duty cycle falls
+by orders of magnitude, since transfers no longer count. A 60-second registered reader
+wait is now a defect, not a cap: no holding left should take that long.
+
+The first reading from dev goes in a comment on #4. It is a regression check against
+these alarms, not a prerequisite for anything.
 
 ## DBOS step boundaries
 
@@ -314,9 +407,12 @@ Workflows place external staging effects in DBOS steps
 [classify.py](../src/curate_d/workflows/classify.py)):
 
 - **Stage** (`_stage_step`, [publish.py](../src/curate_d/staging/publish.py)): release any
-  earlier version of the key, then reserve the declared byte bound, upload and register
-  inside one global writer-lock holding; a lookup after commit confirms this attempt won.
-  Return serializable identity/metadata (`StagedRef`).
+  earlier version of the key, then reserve the declared byte bound in a short writer-lock
+  holding that records a reservation row, upload with no lock held, and register through
+  the reservation in a second holding that consumes the row with the insert. A block that
+  ends without registering abandons the row; one whose reservation expired publishes
+  nothing and fails with the retryable `StagingReservationLostError`. A lookup after the
+  commit confirms this attempt won. Return serializable identity/metadata (`StagedRef`).
 - **Read and decode** (`_inspect_step`, `_prepare_step`): open the verified local snapshot
   and consume/close the handle within the step. An open handle cannot be a durable step
   result.
@@ -500,6 +596,69 @@ A lifecycle expiration can remove a published object. Readers treat it as a cach
 the entry is invalidated and the I/O side re-stages. It is never a successful verification
 and never a source release. Escalate only if the re-stage also fails.
 
+### Lost or expired reservation
+
+`staging.reservation_lost` means an upload finished after its reservation had expired: its
+pod was paused, partitioned or starved for longer than the reservation TTL, twice
+`CURATE_D_STAGING_TRANSFER_TIMEOUT_SECONDS` (600 s by default), between admission and
+registration. Other workers may already have spent that headroom, and reconciliation may
+have collected the attempt's object, so the registration publishes nothing: no row is
+written, the attempt's bytes are deleted best effort (a failed delete leaves an orphan the
+next reconciliation collects), the block's abandonment removes the expired reservation
+row, and the stage raises `StagingReservationLostError`. That is a
+`StagingTransientError`. The ingest workflow fails the source, as it does after a
+transfer deadline hit, and the next full rescan retries it; it is not retried inline,
+because the bytes have to be uploaded again anyway. Nothing needs repairing. An occasional
+event needs no action. A steady rate means I/O pods stall for longer than the TTL: look at
+the pods' CPU throttling, node pressure and ledger database latency before raising the
+transfer timeout, which raises the TTL with it.
+
+A worker that dies after admission leaves its reservation behind, still counted as
+occupancy, until its `expires_at`. So does an abandonment that failed
+(`staging.reservation_abandon_failed`). Under pressure the row can make other pods'
+admissions refuse with `StagingCapacityExhaustedError`, which the ingest workflow retries
+with its durable backoff; the headroom returns within the TTL, inside that backoff's
+15-minute ceiling. `StagingOccupancy.measure()` reports the live total as
+`OccupancyReport.reserved_bytes`, beside the completed bytes. A stuck reservation is a row
+older than the transfer timeout whose attempt has no upload in flight. Read the rows on
+the ledger database:
+
+```sql
+SELECT attempt_id, staging_key, reserved_bytes, reserved_at, expires_at,
+       expires_at > now() AS live
+FROM staging_reservations
+ORDER BY reserved_at;
+```
+
+Once `expires_at` passes, the row is neither counted nor consumed, and the next
+reconciliation deletes it: the idle sweep, or an admission that reclaims under pressure.
+An admission without pressure leaves it in place, uncounted. The attempt's completed
+object, if one landed, is collected by the next reconciliation, and its incomplete
+multipart parts by the residual cleanup below. Never delete a live row by hand: it frees
+headroom the row's upload may still be using, and that upload then fails as a lost
+reservation.
+
+### Mixed-build window during the reservation rollout
+
+Migration `0021_staging_reservations` runs with `make migrate` before the build is
+deployed; it creates one empty table. The I/O StatefulSet then restarts pod by pod, so for
+one rolling restart old-build and new-build I/O pods run side by side, and an old-build
+holding still spans its upload. Two effects last that window and are not guarded in code:
+
+- An old-build reconciliation does not know reservations, so it can collect a new-build
+  pod's completed, not-yet-registered object. The new pod's reservation is still live, so
+  its registration writes a row naming absent bytes. The reader path repairs it: the
+  missing object is a cache miss, the entry is invalidated and the I/O side re-stages
+  ([Expired or missing staged object](#expired-or-missing-staged-object)).
+- An old-build admission does not count new-build reservations, so the bound can be
+  overspent by up to one object at a time. The next admission's listing repairs it, since
+  those bytes are completed occupancy by then.
+
+Neither needs operator action. CPU pods need no change and pick up the build with it. To
+roll back, revert the build: the table stays unused, or the migration's downgrade drops
+it. Reservations the new build left expire and the old build ignores them; their objects
+are orphans the old build's reconciliation collects.
+
 ### Residual multipart parts after a crash
 
 A writer killed mid-upload leaves an incomplete multipart upload. It is never readable and
@@ -509,7 +668,8 @@ is reclaimed automatically, by whichever comes first:
   older than `CURATE_D_STAGING_MAX_AGE_HOURS` (default 24 h);
 - the bucket lifecycle rule, after 7 days.
 
-`measure_occupancy` counts completed objects only, so it reports 0 while parts exist. Read
+`measure_occupancy` counts completed objects and live reservations only, so once a dead
+writer's reservation has expired it reports 0 while parts exist. Read
 residual parts as the writer identity:
 
 ```bash

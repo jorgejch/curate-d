@@ -380,6 +380,49 @@ staged_objects = Table(
 # LastModified from the S3 listing, so an index here would only cost every registration
 # a B-tree write for a scan nobody performs.
 
+# In-flight uploads' claims on staging headroom, so the writer lock need not span an
+# upload. Operational state like staged_objects: losing a row costs at most one upload's
+# headroom until the next admission's listing, never a ledger record. Holds only
+# in-flight attempts, so the primary key is the only index.
+staging_reservations = Table(
+    "staging_reservations",
+    metadata,
+    Column(
+        "attempt_id",
+        UUID(as_uuid=True),
+        primary_key=True,
+        comment="Upload attempt holding the reservation; part of the remote object name.",
+    ),
+    Column(
+        "staging_key",
+        Text,
+        nullable=False,
+        comment="Staging key the attempt uploads under.",
+    ),
+    Column(
+        "reserved_bytes",
+        BigInteger,
+        nullable=False,
+        comment="Declared maximum admission counted for the attempt.",
+    ),
+    Column(
+        "reserved_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        comment="When admission wrote the reservation, by the database clock.",
+    ),
+    Column(
+        "expires_at",
+        DateTime(timezone=True),
+        nullable=False,
+        comment="Database time after which the reservation is neither counted nor "
+        "consumed. Never compared against a worker's clock.",
+    ),
+    CheckConstraint("reserved_bytes >= 0", name="reserved_non_negative"),
+    CheckConstraint("staging_key ~ '^[0-9a-f]{32}$'", name="key_is_derived_identifier"),
+)
+
 scans = Table(
     "scans",
     metadata,

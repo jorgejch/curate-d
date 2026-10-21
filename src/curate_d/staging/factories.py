@@ -176,7 +176,13 @@ def build_writer_backend(
         store=store,
         index=index,
         occupancy=StagingOccupancy(
-            store, index, max_bytes=settings.staging_max_bytes, max_age=max_age
+            store,
+            index,
+            max_bytes=settings.staging_max_bytes,
+            max_age=max_age,
+            # One transfer deadline covers the upload, the second the lock waits and
+            # scheduling around it, so a live upload never outlives its reservation.
+            reservation_ttl=timedelta(seconds=2 * settings.staging_transfer_timeout_seconds),
         ),
         upload_max_age=max_age,
         refresh_readiness=refresh,

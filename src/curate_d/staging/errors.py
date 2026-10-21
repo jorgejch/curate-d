@@ -115,6 +115,15 @@ class StagingTransientError(StagingObjectStoreError):
     """
 
 
+class StagingReservationLostError(StagingTransientError):
+    """An upload finished after its staging reservation expired or was removed.
+
+    Nothing was registered: a reservation that is gone may already have had its bytes
+    reclaimed, so publishing them could name an absent object. Transient because the
+    next attempt re-uploads under a fresh reservation.
+    """
+
+
 class StagingAccessDeniedError(StagingObjectStoreError):
     """The configured identity is not permitted to perform the requested operation.
 

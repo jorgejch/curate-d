@@ -3,27 +3,29 @@
 Coordination is PostgreSQL transaction advisory locks, so every guarantee here survives a
 pod dying mid-operation: the lock dies with the backend that held it and an uncommitted
 transaction leaves nothing behind, which is what makes every operation in this module
-safe to simply repeat. A global writer lock serializes admission, publication and
+safe to simply repeat. A global writer lock serializes admission, registration and
 eviction; per-entry shared locks protect downloads from the eviction that would otherwise
 delete bytes a reader is still streaming.
+
+The writer lock does not span an upload. An admitted upload is recorded as a row in
+`staging_reservations`, claiming its headroom until it is consumed by the registration
+that publishes it, forgotten when the upload registers nothing, or expired by the database
+clock, so every pod counts headroom spent by uploads still in flight without anyone
+holding the lock across them.
 
 Registration is immutable. Two writers racing one staging key both upload — to distinct
 attempt names — and exactly one row is written; the loser's bytes are an orphan for
 reconciliation to collect, never an overwrite of the published winner. An upload landing
 after its writer lost the database is the same case, arriving later.
 
-The two lock classes are coupled, deliberately and widely: an entry's exclusive lock is
-transaction-scoped, and the writer transaction outlives everything a caller does inside
-`writer_lock()` — including the upload `occupancy.reserve()` admits. A reader whose key
-reclamation merely touched therefore waits on `hold_for_download`'s shared lock until
-that transaction ends, and the four-byte entry lock space means a key that only collides
-with a reclaimed one waits with it. The wait is bounded by the holder's transfer timeout
-rather than by a `lock_timeout`, which would turn a bounded stall into a failed download.
-Narrowing it does not need a narrower writer lock: reclamation can commit in a writer-lock
-holding of its own before the admitting one starts, so its entry locks end at that commit
-rather than after the upload. That change is deferred with the rest of the decision
-recorded in `occupancy`'s module docstring, until the measurement there shows the lock
-binding (#1, #4).
+The two lock classes are coupled: an entry's exclusive lock is transaction-scoped, so it
+lasts for the writer-lock holding that took it. A reader whose key reclamation touched
+therefore waits on `hold_for_download`'s shared lock until that holding commits, and the
+four-byte entry lock space means a key that only collides with a reclaimed one waits with
+it. Reclamation runs in admission's own holding, which ends before the upload starts, so
+the wait is bounded by one reclamation (a listing and its orphan deletes), never by a
+transfer, and needs no `lock_timeout`, which would turn a bounded stall into a failed
+download.
 """
 
 import asyncio
@@ -32,15 +34,27 @@ import time
 from collections.abc import AsyncGenerator, Awaitable, Callable, Collection, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
+from datetime import timedelta
 from typing import Final
+from uuid import UUID
 
-from sqlalchemy import BigInteger, cast, delete, func, select, text
+from sqlalchemy import (
+    BigInteger,
+    ColumnElement,
+    Interval,
+    cast,
+    delete,
+    func,
+    literal,
+    select,
+    text,
+)
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from curate_d.ledger import mapping
-from curate_d.ledger.tables import staged_objects
+from curate_d.ledger.tables import staged_objects, staging_reservations
 from curate_d.observability import get_logger
 from curate_d.staging.errors import StagingObjectStoreError
 from curate_d.staging.keys import StagingKey
@@ -133,13 +147,14 @@ def registration_values(obj: StagedObject) -> mapping.ColumnValues:
 
 
 async def delete_orphans(
-    store: StagingObjectStore, registered: Collection[str], *, claim: EntryClaim
+    store: StagingObjectStore, protected: Collection[str], *, claim: EntryClaim
 ) -> int:
-    """Delete completed objects no registration refers to, returning how many went.
+    """Delete completed objects nothing protects, returning how many went.
 
     Args:
         store: Object store to list and delete through.
-        registered: Remote object keys that are currently registered. Never deleted.
+        protected: Remote object keys that are registered or named by a live
+            reservation. Never deleted.
         claim: Takes an entry's exclusive lock, returning False when a download holds it.
             A released entry can still be under an active read, and that read is the one
             case the writer lock does not already cover.
@@ -158,7 +173,7 @@ async def delete_orphans(
     deleted = 0
     async with store.batch():
         async for candidate in store.list_objects():
-            if candidate.object_key in registered:
+            if candidate.object_key in protected:
                 continue
             if not await claim(staging_key_of(candidate.object_key)):
                 continue
@@ -180,6 +195,35 @@ async def _registered_object_keys(connection: AsyncConnection) -> set[str]:
     """Read every published object's remote name, for cleanup to diff a listing against."""
     result = await connection.execute(
         select(staged_objects.c.staging_key, staged_objects.c.attempt_id)
+    )
+    return {
+        f"{mapping.text(row, 'staging_key')}/{mapping.identifier(row, 'attempt_id').hex}"
+        for row in result.mappings()
+    }
+
+
+def _live_reservation() -> ColumnElement[bool]:
+    """Return the predicate selecting reservations the database clock has not expired."""
+    return staging_reservations.c.expires_at > func.now()
+
+
+async def _expire_reservations(connection: AsyncConnection) -> None:
+    """Delete every reservation the database clock has expired.
+
+    The upload such a row admitted either died with its pod or will find its reservation
+    gone at registration and publish nothing, so its completed object is an orphan.
+    """
+    await connection.execute(
+        delete(staging_reservations).where(staging_reservations.c.expires_at <= func.now())
+    )
+
+
+async def _reserved_object_keys(connection: AsyncConnection) -> set[str]:
+    """Read the remote names live reservations will publish under, for cleanup to spare."""
+    result = await connection.execute(
+        select(staging_reservations.c.staging_key, staging_reservations.c.attempt_id).where(
+            _live_reservation()
+        )
     )
     return {
         f"{mapping.text(row, 'staging_key')}/{mapping.identifier(row, 'attempt_id').hex}"
@@ -308,11 +352,12 @@ class PostgresStagingCacheIndex:
 
         The block holds a pooled connection and an open transaction for as long as the
         caller keeps it, and can wait on the shared lock for as long as a reclaiming
-        writer's transaction lasts: the writer need only have claimed `key`, to evict it
-        or to delete an orphan attempt under it, or a key whose entry lock collides with
-        it. A key it evicted yields None once the wait ends. Callers keep the block to
-        the remote read: work on bytes that already landed locally needs no protection
-        from eviction and must not be done inside it.
+        writer's holding lasts: the writer need only have claimed `key`, to evict it or to
+        delete an orphan attempt under it, or a key whose entry lock collides with it. No
+        holding spans an upload, so the wait is one reclamation at most. A key it evicted
+        yields None once the wait ends. Callers keep the block to the remote read: work on
+        bytes that already landed locally needs no protection from eviction and must not
+        be done inside it.
 
         Raises:
             StagingObjectStoreError: The lock or the read did not complete.
@@ -342,6 +387,11 @@ class PostgresStagingCacheIndex:
         its work superseded and its bytes left for cleanup rather than displacing what
         readers are already using.
 
+        This is the unreserved registration, for tests and the `stage` helper. Production
+        registration goes through `occupancy.reserve()`'s reservation, which consumes the
+        attempt's reservation in the same holding: an upload registered here without one
+        was never protected from `reconcile`, which may already have collected its bytes.
+
         Raises:
             StagingObjectStoreError: The registration could not be committed. Nothing was
                 written, so the call can be repeated once the cause clears.
@@ -354,6 +404,69 @@ class PostgresStagingCacheIndex:
                 await connection.execute(
                     statement.on_conflict_do_nothing(index_elements=["staging_key"])
                 )
+
+    async def reserve(
+        self, key: StagingKey, attempt_id: UUID, reserved_bytes: int, ttl: timedelta
+    ) -> None:
+        """Record `attempt_id`'s claim on `reserved_bytes` of headroom until `ttl` passes.
+
+        Written on the writer connection, so the reservation commits with the admission
+        decision that counted the headroom it claims; a fresh `index.reserve` holding is
+        taken when the caller holds none. The expiry is the database's `clock_timestamp()`
+        at the insert plus `ttl`, and every read compares it against the database's
+        `now()`, so pods with skewed clocks agree on it. Not `now()` at the insert: that
+        is the transaction's start, before the writer-lock wait and the reclamation, so
+        a slow admission would commit a reservation already expired and its upload
+        would fail at registration. A zero `ttl` is therefore live in the transaction
+        that wrote it and expired in every later one.
+
+        Args:
+            key: Staging key the attempt uploads under.
+            attempt_id: Attempt the reservation belongs to; its object is
+                `<key>/<attempt_id hex>`, which `reconcile` spares while the row is live.
+            reserved_bytes: Declared maximum the attempt may upload.
+            ttl: How long the reservation counts. It has to outlast the upload, or a live
+                upload finds its reservation gone at registration.
+
+        Raises:
+            StagingObjectStoreError: The reservation could not be written, including for an
+                attempt that already holds one. Nothing was reserved.
+        """
+        async with self.writer_lock("index.reserve") as connection:
+            with _failures_translated(f"reserve staging key {key} for attempt {attempt_id}"):
+                await connection.execute(
+                    insert(staging_reservations).values(
+                        attempt_id=attempt_id,
+                        staging_key=str(key),
+                        reserved_bytes=reserved_bytes,
+                        reserved_at=func.clock_timestamp(),
+                        expires_at=func.clock_timestamp() + literal(ttl, Interval()),
+                    )
+                )
+
+    async def consume_reservation(self, attempt_id: UUID) -> bool:
+        """Remove `attempt_id`'s live reservation, returning whether one was there.
+
+        Runs on the writer connection, so the removal commits with the registration the
+        caller writes in the same holding, and `reconcile` on another pod sees either the
+        reservation or the registration, never neither; a fresh `index.consume_reservation`
+        holding is taken when the caller holds none.
+
+        Returns:
+            False for an expired or absent reservation. Its bytes are then unprotected, and
+            may already be gone, so the caller must register nothing.
+
+        Raises:
+            StagingObjectStoreError: The removal did not complete.
+        """
+        async with self.writer_lock("index.consume_reservation") as connection:
+            with _failures_translated(f"consume the reservation of attempt {attempt_id}"):
+                result = await connection.execute(
+                    delete(staging_reservations)
+                    .where(staging_reservations.c.attempt_id == attempt_id, _live_reservation())
+                    .returning(staging_reservations.c.attempt_id)
+                )
+                return result.one_or_none() is not None
 
     async def lookup(self, key: StagingKey) -> StagedObject | None:
         """Return the currently published object for `key`, or None if nothing is registered.
@@ -384,6 +497,26 @@ class PostgresStagingCacheIndex:
                     delete(staged_objects).where(staged_objects.c.staging_key == key)
                 )
 
+    async def forget_reservation(self, attempt_id: UUID) -> None:
+        """Remove `attempt_id`'s reservation whether or not it has expired.
+
+        For an upload that will register nothing: its headroom returns now rather than at
+        expiry, and its object, if one landed, becomes an orphan for `reconcile`. Takes a
+        fresh `occupancy.abandon` holding when the caller holds none. Safe to repeat:
+        forgetting an absent reservation is a no-op.
+
+        Raises:
+            StagingObjectStoreError: The removal did not complete; the row is left for
+                expiry.
+        """
+        async with self.writer_lock("occupancy.abandon") as connection:
+            with _failures_translated(f"forget the reservation of attempt {attempt_id}"):
+                await connection.execute(
+                    delete(staging_reservations).where(
+                        staging_reservations.c.attempt_id == attempt_id
+                    )
+                )
+
     async def total_registered_bytes(self) -> int:
         """Return the exact byte total across every registered winner.
 
@@ -399,6 +532,25 @@ class PostgresStagingCacheIndex:
         with _failures_translated("total the registered staging bytes"):
             async with self._current_connection() as connection:
                 result = await connection.execute(select(total.label("total")))
+                return mapping.number(result.mappings().one(), "total")
+
+    async def total_reserved_bytes(self) -> int:
+        """Return the bytes live reservations claim, by the database clock.
+
+        Admission counts this beside the listing, so headroom an upload in flight on any
+        pod has claimed is spent before its bytes land. Read on the writer connection when
+        the caller holds the writer lock, so a total taken in an admission holding sees
+        that holding's own writes.
+
+        Raises:
+            StagingObjectStoreError: The total could not be read.
+        """
+        total = cast(func.coalesce(func.sum(staging_reservations.c.reserved_bytes), 0), BigInteger)
+        with _failures_translated("total the reserved staging bytes"):
+            async with self._current_connection() as connection:
+                result = await connection.execute(
+                    select(total.label("total")).where(_live_reservation())
+                )
                 return mapping.number(result.mappings().one(), "total")
 
     async def evict(self, key: StagingKey) -> StagedObject | None:
@@ -424,30 +576,35 @@ class PostgresStagingCacheIndex:
                 return registration
 
     async def reconcile(self, store: StagingObjectStore) -> int:
-        """Delete every completed remote object with no registration, returning the count.
+        """Delete every completed object neither registered nor reserved, returning the count.
 
-        Runs under the writer lock, so no admission or publication is in flight and a
-        listed object without a row is settled rather than in progress: a losing writer's
-        attempt, or an upload that landed after its writer lost the database.
+        Runs under the writer lock. Every in-flight upload is reserved, and the
+        registration that consumes a reservation runs under this lock, so a listed object
+        is either registered, named by a live reservation, or settled: a losing writer's
+        attempt, an upload that registered nothing, or one whose reservation expired. The
+        last is an orphan even if its writer is still running, because that writer's
+        registration will find the reservation gone and publish nothing, so no row ever
+        names bytes this removed. Expired reservations are deleted first, in the same
+        holding, so the headroom they claimed returns with the cleanup.
 
-        That premise holds only while every upload happens inside `occupancy.reserve()`'s
-        holding of the same lock. `register()` takes the lock for the row alone, so an
-        upload performed outside a reservation leaves a completed object with no row for
-        the duration of the gap, and a sweep on another pod is entitled to collect it —
-        after which the writer commits a row naming bytes that no longer exist, which
-        nothing repairs. The rule is a contract on the caller today; the caller that
-        performs uploads should be given the reservation rather than asked to remember it.
+        That premise holds only for uploads made under a reservation. `register()` takes
+        the lock for the row alone, so an upload registered through it was never
+        protected, and a sweep on another pod is entitled to collect its object before the
+        row lands.
 
         Raises:
             StagingObjectStoreError: Listing, locking or deleting failed part way. What
                 was already deleted stays deleted; the sweep is safe to run again.
         """
         async with self.writer_lock("index.reconcile") as connection:
-            with _failures_translated("list the registered staging objects"):
-                registered = await _registered_object_keys(connection)
+            with _failures_translated("expire the staging reservations"):
+                await _expire_reservations(connection)
+            with _failures_translated("list the registered and reserved staging objects"):
+                protected = await _registered_object_keys(connection)
+                protected |= await _reserved_object_keys(connection)
 
             async def claim(key: StagingKey) -> bool:
                 with _failures_translated(f"claim staging key {key} for cleanup"):
                     return await self._claim(connection, key)
 
-            return await delete_orphans(store, registered, claim=claim)
+            return await delete_orphans(store, protected, claim=claim)

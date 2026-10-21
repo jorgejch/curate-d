@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import io
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import BinaryIO
@@ -13,11 +13,13 @@ from uuid import uuid4
 import pytest
 from structlog.testing import capture_logs
 
+from curate_d.staging import occupancy as occupancy_module
 from curate_d.staging import publish as publish_module
 from curate_d.staging.errors import (
     StagingCapacityExhaustedError,
     StagingIntegrityError,
     StagingObjectStoreError,
+    StagingReservationLostError,
 )
 from curate_d.staging.keys import StagingKey
 from curate_d.staging.objects import StagedObject
@@ -73,13 +75,18 @@ async def test_a_new_version_replaces_the_registered_one(staging: MemoryStaging)
     assert len(staging.store.objects) == 1
 
 
-async def test_publishing_takes_the_writer_lock_as_a_release_then_a_reservation(
+async def test_publishing_takes_the_writer_lock_to_release_admit_and_register(
     staging: MemoryStaging,
 ) -> None:
-    """These two holdings are what a publish adds to the writer-lock timings."""
+    """These three holdings are what a publish adds to the writer-lock timings."""
     await publish(staging.writer, _KEY, io.BytesIO(b"abc"), size_bytes=3)
 
-    assert staging.index.lock_callers == ["occupancy.release", "occupancy.reserve"]
+    assert staging.index.lock_callers == [
+        "occupancy.release",
+        "occupancy.reserve",
+        "occupancy.register",
+    ]
+    assert staging.index.reservations == {}
 
 
 async def test_a_short_source_is_not_published(staging: MemoryStaging) -> None:
@@ -143,7 +150,10 @@ async def test_a_slow_upload_shows_in_its_phase(
 ) -> None:
     """The upload is the phase a transfer timeout bounds, so it is timed on its own."""
     now = [100.0]
-    monkeypatch.setattr(publish_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    clock = SimpleNamespace(monotonic=lambda: now[0])
+    # The registration mark is taken inside the reservation, so both modules read it.
+    monkeypatch.setattr(publish_module, "time", clock)
+    monkeypatch.setattr(occupancy_module, "time", clock)
     upload = staging.store.upload
 
     async def slow_upload(
@@ -271,3 +281,33 @@ async def test_losing_the_key_after_commit_is_reported_as_registered(
         await publish(staging.writer, _KEY, io.BytesIO(b"ours!!"), size_bytes=6)
 
     assert [e["outcome"] for e in phase_events(events)] == ["registered"]
+
+
+async def test_a_lost_reservation_publishes_nothing_and_reports_a_failure(
+    staging: MemoryStaging, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An upload that outlived its reservation fails retryably and leaves no object behind."""
+    upload = staging.store.upload
+
+    async def outliving_upload(
+        target: StagedObject, source: BinaryIO, *, declared_max_bytes: int
+    ) -> StagedObject:
+        """Upload, with the database clock passing the reservation's expiry meanwhile."""
+        staged = await upload(target, source, declared_max_bytes=declared_max_bytes)
+        later = datetime.now(UTC) + timedelta(hours=1)
+        staging.index.clock = lambda: later
+        return staged
+
+    monkeypatch.setattr(staging.store, "upload", outliving_upload)
+
+    with capture_logs() as events, pytest.raises(StagingReservationLostError):
+        await publish(staging.writer, _KEY, io.BytesIO(b"abc"), size_bytes=3)
+
+    assert staging.content(_KEY) is None
+    assert staging.store.objects == {}
+    assert staging.index.reservations == {}
+    [event] = phase_events(events)
+    assert (event["outcome"], event["error"]) == ("failed", "StagingReservationLostError")
+    assert event["upload_seconds"] >= 0
+    assert event["registration_seconds"] >= 0
+    assert event["commit_seconds"] is None
