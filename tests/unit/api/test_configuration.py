@@ -5,12 +5,20 @@ from dataclasses import dataclass, field, replace
 from typing import cast
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncEngine
+from structlog.testing import capture_logs
 
-from curate_d.api.configuration import OPERATOR_HEADER, check_submission, report_orphans
+from curate_d.api import configuration as module
+from curate_d.api.configuration import (
+    OPERATOR_HEADER,
+    LedgerConfiguration,
+    check_submission,
+    report_orphans,
+)
 from curate_d.api.errors import RejectedError
 from curate_d.configuration.consistency import OrphanedCondition
 from curate_d.configuration.documents import parse_policy
-from curate_d.configuration.store import ConfigurationRepository
+from curate_d.configuration.store import ConfigurationRepository, DocumentValidator, check_document
 from curate_d.domain import SEED_TAXONOMY, ConfigurationKind, Taxonomy, TaxonomyField
 from curate_d.rendering.templates import SEED_TEMPLATES, parse_templates
 from tests.unit.api.fakes import FakeConfiguration, backends, client
@@ -266,3 +274,141 @@ async def test_a_taxonomy_change_is_refused_while_the_policy_in_force_does_not_r
     message = str(rejected.value)
     assert message.startswith("the policy configuration in force does not read")
     assert "invalid policy configuration: destinations.0.profile" in message
+
+
+class _Engine:
+    """Hands out a connection the fake repository ignores."""
+
+    def begin(self) -> "_Engine":
+        """Return itself, as a context manager."""
+        return self
+
+    async def __aenter__(self) -> object:
+        """Return a connection."""
+        return object()
+
+    async def __aexit__(self, *_exc: object) -> None:
+        """Release nothing."""
+
+
+@dataclass
+class _Ledger:
+    """What a fake repository saw: the shared locks taken and the documents activated."""
+
+    locked: list[ConfigurationKind] = field(default_factory=list)
+    activated: list[ConfigurationKind] = field(default_factory=list)
+
+
+@pytest.fixture
+def ledger(monkeypatch: pytest.MonkeyPatch) -> _Ledger:
+    """Back `LedgerConfiguration` with a repository that checks and records activations."""
+    seen = _Ledger()
+
+    class Repository:
+        def __init__(self, _connection: object) -> None:
+            """Bind nothing."""
+
+        async def lock_shared(self, kind: ConfigurationKind) -> None:
+            """Record the shared lock."""
+            seen.locked.append(kind)
+
+        async def activate(
+            self,
+            kind: ConfigurationKind,
+            document: Mapping[str, object],
+            validator: DocumentValidator,
+            *,
+            created_by: str,
+        ) -> int:
+            """Check the document as the store does, and store it as version 4."""
+            check_document(kind, document, validator)
+            seen.activated.append(kind)
+            return 4
+
+    async def in_force(_configurations: object) -> Taxonomy:
+        """Return the seed taxonomy."""
+        return SEED_TAXONOMY
+
+    monkeypatch.setattr(module, "ConfigurationRepository", Repository)
+    monkeypatch.setattr(module, "taxonomy_in_force", in_force)
+    return seen
+
+
+async def test_a_policy_is_checked_against_the_taxonomy_under_its_shared_lock(
+    ledger: _Ledger,
+) -> None:
+    """A category the taxonomy in force does not list refuses the policy, and nothing is stored."""
+    backend = LedgerConfiguration(cast(AsyncEngine, _Engine()))
+
+    with pytest.raises(RejectedError, match="category 'Receipts'"):
+        await backend.activate(ConfigurationKind.POLICY, _RECEIPTS_POLICY, by="tester")
+
+    assert ledger.locked == [ConfigurationKind.TAXONOMY]
+    assert ledger.activated == []
+
+
+async def test_a_template_set_the_taxonomy_lists_is_activated(ledger: _Ledger) -> None:
+    """A valid set is stored after the shared lock, and orphans nothing."""
+    backend = LedgerConfiguration(cast(AsyncEngine, _Engine()))
+
+    activated = await backend.activate(ConfigurationKind.TEMPLATES, SEED_TEMPLATES, by="tester")
+
+    assert (activated.version, activated.orphaned) == (4, ())
+    assert (ledger.locked, ledger.activated) == (
+        [ConfigurationKind.TAXONOMY],
+        [ConfigurationKind.TEMPLATES],
+    )
+
+
+async def test_a_taxonomy_orphaning_conditions_logs_them_and_reclassifies(
+    ledger: _Ledger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The orphans are answered and logged; the new version is sent to reclassification."""
+    orphan = OrphanedCondition(
+        kind=ConfigurationKind.POLICY,
+        owner="placement rule 'r'",
+        field=TaxonomyField.CATEGORY,
+        value="Receipts",
+    )
+
+    async def orphaning(_configurations: object, _taxonomy: Taxonomy) -> list[OrphanedCondition]:
+        """Report one orphaned condition."""
+        return [orphan]
+
+    reclassified: list[int] = []
+
+    async def reclassify(version: int) -> None:
+        """Record the version sent to reclassification."""
+        reclassified.append(version)
+
+    monkeypatch.setattr(module, "report_orphans", orphaning)
+    backend = LedgerConfiguration(cast(AsyncEngine, _Engine()), reclassify=reclassify)
+
+    with capture_logs() as events:
+        activated = await backend.activate(ConfigurationKind.TAXONOMY, SEED_TAXONOMY, by="tester")
+
+    assert activated.orphaned == (orphan,)
+    assert ledger.locked == []
+    assert reclassified == [4]
+    [logged] = [e for e in events if e["event"] == "configuration.orphaned_conditions"]
+    assert (logged["taxonomy_version"], logged["count"]) == (4, 1)
+    assert logged["conditions"] == ["policy: placement rule 'r' category='Receipts'"]
+
+
+async def test_a_taxonomy_orphaning_nothing_logs_nothing(
+    ledger: _Ledger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No orphans, no warning."""
+
+    async def none(_configurations: object, _taxonomy: Taxonomy) -> list[OrphanedCondition]:
+        """Report nothing."""
+        return []
+
+    monkeypatch.setattr(module, "report_orphans", none)
+    backend = LedgerConfiguration(cast(AsyncEngine, _Engine()))
+
+    with capture_logs() as events:
+        activated = await backend.activate(ConfigurationKind.TAXONOMY, SEED_TAXONOMY, by="tester")
+
+    assert activated.orphaned == ()
+    assert not [e for e in events if e["event"] == "configuration.orphaned_conditions"]

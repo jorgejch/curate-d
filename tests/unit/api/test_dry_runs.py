@@ -602,6 +602,13 @@ async def test_a_run_waiting_to_start_is_queued(no_headers: None) -> None:
     assert (status.state, status.started_at) == (RunState.QUEUED, None)
 
 
+async def test_a_run_without_a_header_has_no_drafts(no_headers: None) -> None:
+    """Nothing recorded, nothing to export."""
+    backend = LedgerDryRuns(cast(AsyncEngine, _Engine()), cast(DBOSClient, _Workflows()))
+    drafts = await backend.drafts(uuid4())
+    assert (drafts.policy, drafts.templates) == (None, None)
+
+
 async def test_a_run_that_was_never_started_is_not_found(no_headers: None) -> None:
     """Neither a header nor a workflow."""
     backend = LedgerDryRuns(cast(AsyncEngine, _Engine()), cast(DBOSClient, _Workflows()))
