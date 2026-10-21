@@ -105,6 +105,38 @@ through it. `compose.yaml` connects directly, with server-side `tcp_keepalives_*
 For capacity, count one extra short-lived pooler client per I/O replica per reconciliation
 interval, on top of each worker's two long-lived lease sessions.
 
+## Before deploying
+
+A build reads every stored configuration version as strictly as a submission, except for the
+taxonomy check and retired fields. A version in force that it cannot read, such as a policy
+naming a profile it dropped or a template set conditioned on an unknown `media_kind`, fails
+every read of its kind: reconciliation and dry runs fail with a `ConfigurationError`,
+`GET /configuration/<kind>` fails, and `PUT /configuration/taxonomy` is refused. Check the
+stored versions first:
+
+```bash
+kubectl -n <namespace> exec statefulset/curate-d-worker-io -- python -m curate_d.configuration.verify
+```
+
+- **When:** before the rollout, from the image about to be deployed, against the target
+  database. Run from the current build, it checks nothing the new build changed.
+- **What it checks:** it parses every stored version of every kind with the read parsers,
+  on one read-only connection, and writes nothing. Each version that fails is logged as
+  `configuration_verify.unreadable` with its kind, version, whether it is in force, and its
+  problems: an ERROR for a version in force, a WARNING for an older one. A database with no
+  stored versions passes.
+
+  | Exit | Meaning |
+  | --- | --- |
+  | `0` | Every version in force reads. Older versions that fail are listed but don't change the code. |
+  | `1` | A version in force does not read. Don't roll out. |
+  | `2` | The database could not be read (`configuration_verify.database_unreadable`), or invalid arguments; nothing was checked. |
+- **Recovery:** `PUT` a corrected document for each failing kind through the current build's
+  control plane, one the new build also reads, which makes it the version in force; then run
+  the check again until it exits `0`. Policy and template activation never read the version
+  in force, so their `PUT` succeeds while it is unreadable. A taxonomy `PUT` is refused while a
+  policy or template set in force does not read, so correct those first.
+
 ## Rollback and roll-forward
 
 DBOS registers a version again without retiming it. A build deployed a second time, by
