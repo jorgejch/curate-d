@@ -117,6 +117,13 @@ async def test_writer_backend_owns_and_disposes_created_engine(
     engine.dispose.assert_awaited_once()
 
 
+def test_a_reservation_outlives_two_transfer_deadlines() -> None:
+    """The TTL derives from the transfer timeout, so raising one raises the other."""
+    settings = settings_for().model_copy(update={"staging_transfer_timeout_seconds": 45.0})
+    backend = factories.build_writer_backend(settings, engine=Mock(spec=AsyncEngine))
+    assert backend.occupancy.reservation_ttl == timedelta(seconds=90)
+
+
 async def test_reader_has_only_download_and_hold_surfaces() -> None:
     """Keep mutation methods structurally absent from the CPU reader's dependencies."""
     engine = create_async_engine(str(settings_for().ledger_database_url))

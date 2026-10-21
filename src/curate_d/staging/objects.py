@@ -163,6 +163,9 @@ class StagingCacheIndex(Protocol):
 
         Called only after a verified upload. Registering a key that already has a winner
         leaves the existing registration untouched, so a late writer cannot displace it.
+        This is the unreserved registration, for tests and fixtures: production
+        publication registers through `occupancy.Reservation.register()`, which consumes
+        the upload's reservation in the same transaction.
 
         Raises:
             StagingObjectStoreError: The registration could not be committed.

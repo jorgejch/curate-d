@@ -10,14 +10,9 @@ into a protected branch, and when and from where a container image is published.
 ### Requirement: Pull requests into protected branches are the merge gate
 A pull request into `dev` or `main` MUST pass the checks job (lint, the in-workflow
 database-access audit, type check, the unit suite with its 80% line-coverage floor) and
-the integration job (the whole
-`tests/integration` suite, see below) before it can merge. Both are
-required status checks, and the pull request MUST be up to date with its base when the
-checks run. The integration job MAY pass without running the suite only when the pull
-request changes none of the paths the integration suite depends on (see "The integration
-job runs the suite only for changes it can observe"). Further ruleset rules
-(code-scanning results from CodeQL or SonarQube) MAY gate the merge without changing this
-requirement.
+the integration job (the whole `tests/integration` suite, see below) before it can merge.
+Both are required status checks, and the pull request MUST be up to date with its base
+when the checks run.
 
 #### Scenario: Every check green
 - **WHEN** a pull request into `dev` reports the checks job and the integration job as
@@ -36,11 +31,21 @@ requirement.
 - **WHEN** a commit lands on the base branch after the pull request's checks ran
 - **THEN** the pull request cannot merge until it is updated and the checks run again
 
+### Requirement: Further gates leave the two required jobs in place
+The integration job MAY pass without running the suite only when the pull request changes
+none of the paths the integration suite depends on (see "The integration job runs the
+suite only for changes it can observe"). Further ruleset rules (code-scanning results from
+CodeQL or SonarQube) MAY gate the merge, and MUST NOT loosen the merge gate above.
+
 #### Scenario: Documentation-only pull request
 - **WHEN** a pull request into `dev` changes only files outside the integration suite's
   declared paths, such as `docs/` and `README.md`, and the checks job is successful
 - **THEN** the integration job passes without running the suite and the pull request can
   merge
+
+#### Scenario: Code scanning added to the ruleset
+- **WHEN** a code-scanning rule is added to the protected branch's ruleset
+- **THEN** the checks job and the integration job remain required status checks
 
 ### Requirement: Feature-branch pushes run the checks without gating
 A push to any branch other than `dev` or `main` MUST run lint, the in-workflow
@@ -89,34 +94,47 @@ integration run MUST NOT write a coverage report that an upload could pick up.
 The integration job MUST run every test under `tests/integration` against a stack
 holding PostgreSQL with the applied migrations, RustFS with the staging provisioning and
 the rclone daemon, with Tesseract available to the test process, and with RustFS as the
-only selected staging backend. The API and both worker profiles, built from this commit,
-MUST start on the same database only after the suite has finished: a worker writes the
-persisted schedules on launch, and their ticks would otherwise run in the test process on
-the suite's application version. The job MUST then wait until each is ready: the API until
-its readiness route answers, and each worker until it logs `worker.ready`, the event its
-startup ends on. Since a worker logs it even when it left its schedules to another
-version, the job MUST then check that the image's version is DBOS's latest and that the
-stored schedules are exactly the declared ones, each under its declared cron. The job MUST fail if a job-wide lifecycle
-observation budget is set.
+only selected staging backend. The job MUST fail if a job-wide lifecycle observation
+budget is set.
 
 #### Scenario: Suite runs on a pull request
 - **WHEN** the integration job runs
 - **THEN** no test file under `tests/integration` is deselected, and the lifecycle rows 30
   and 31 skip citing their recorded RustFS observation
 
+#### Scenario: Stack fails to come up
+- **WHEN** PostgreSQL, RustFS or rclone does not reach healthy within the wait
+- **THEN** the job fails before any test runs, and its logs name the service
+
+#### Scenario: Observation budget set in CI
+- **WHEN** `CURATE_D_TEST_STAGING_LIFECYCLE_TIMEOUT_SECONDS` is set in the job environment
+- **THEN** the job fails with an error naming the variable, before the suite runs
+
+### Requirement: Application boots after the suite, on the same database
+The API and both worker profiles, built from this commit, MUST start on the same database
+only after the suite has finished: a worker writes the persisted schedules on launch, and
+their ticks would otherwise run in the test process on the suite's application version.
+The job MUST then wait until each is ready: the API until its readiness route answers, and
+each worker until it logs `worker.ready`, the event its startup ends on.
+
 #### Scenario: No scheduled tick during the suite
 - **WHEN** the suite runs
 - **THEN** no API or worker container is running, so none of the application's declared
   schedules is persisted to tick on the suite's version
 
-#### Scenario: Stack fails to come up
-- **WHEN** PostgreSQL, RustFS or rclone does not reach healthy within the wait
-- **THEN** the job fails before any test runs, and its logs name the service
-
 #### Scenario: Application image fails to boot
 - **WHEN** the API or a worker built from this commit exits after the suite, the API's
   health check never passes, or a worker does not log `worker.ready` within the wait
 - **THEN** the job fails, and its logs name the service
+
+#### Scenario: Worker hangs in startup
+- **WHEN** a worker's container keeps running but its startup never finishes
+- **THEN** the job fails once the readiness wait expires, naming the worker
+
+### Requirement: Booted workers hold the declared schedules
+Since a worker logs `worker.ready` even when it left its schedules to another version,
+the job MUST then check that the image's version is DBOS's latest and that the stored
+schedules are exactly the declared ones, each under its declared cron.
 
 #### Scenario: Workers leave their schedules unapplied
 - **WHEN** the workers are ready but the image's version is not DBOS's latest, a declared
@@ -124,21 +142,12 @@ observation budget is set.
   declared one
 - **THEN** the job fails, naming the latest version or the schedules that differ
 
-#### Scenario: Worker hangs in startup
-- **WHEN** a worker's container keeps running but its startup never finishes
-- **THEN** the job fails once the readiness wait expires, naming the worker
-
-#### Scenario: Observation budget set in CI
-- **WHEN** `CURATE_D_TEST_STAGING_LIFECYCLE_TIMEOUT_SECONDS` is set in the job environment
-- **THEN** the job fails with an error naming the variable, before the suite runs
-
 ### Requirement: The integration job runs the suite only for changes it can observe
 The integration job MUST itself determine the pull request's changed files, as a step
 before any tool is installed or any service started, and run the suite and the
 application boot only when at least one changed file is under a declared path. When none
 is, the job MUST run no later step but the detection guard, the skip summary and the stack
-teardown, MUST record in that summary that the suite was not run and why, and MUST pass. The
-job MUST fail when the changed files cannot be determined or may be incomplete.
+teardown, MUST record in that summary that the suite was not run and why, and MUST pass.
 
 #### Scenario: Application code changes
 - **WHEN** a pull request changes a file under `src/`
@@ -165,18 +174,6 @@ job MUST fail when the changed files cannot be determined or may be incomplete.
   `migrations/`, or `.github/workflows/integration.yml`
 - **THEN** the integration job runs the whole suite
 
-#### Scenario: Change detection fails
-- **WHEN** the step that lists the pull request's changed files fails, or reports a
-  value other than a match or no match
-- **THEN** the integration job fails before any later step, naming the detection, and
-  the pull request cannot merge
-
-#### Scenario: Changed-file list may be truncated
-- **WHEN** the detection finds no declared path and the pull request changes 3,000 files
-  or more
-- **THEN** the integration job fails before any later step, and the pull request cannot
-  merge
-
 #### Scenario: Gate shape changes
 - **WHEN** the detection step is moved out of the integration job, a step after it loses
   its condition on the detection's result, or the stack teardown stops running on every
@@ -190,6 +187,21 @@ job MUST fail when the changed files cannot be determined or may be incomplete.
   `.env`, a `.gitattributes` at the root or in `tests/`, `infrastructure/` or `docker/`, or
   `docker/Dockerfile.dockerignore`
 - **THEN** the integration job runs the whole suite
+
+### Requirement: Uncertain change detection fails the integration job
+The job MUST fail when the changed files cannot be determined or may be incomplete.
+
+#### Scenario: Change detection fails
+- **WHEN** the step that lists the pull request's changed files fails, or reports a
+  value other than a match or no match
+- **THEN** the integration job fails before any later step, naming the detection, and
+  the pull request cannot merge
+
+#### Scenario: Changed-file list may be truncated
+- **WHEN** the detection finds no declared path and the pull request changes 3,000 files
+  or more
+- **THEN** the integration job fails before any later step, and the pull request cannot
+  merge
 
 #### Scenario: A packaging file is removed
 - **WHEN** the detection finds no declared path and `README.md`, `LICENSE` or `NOTICE` is

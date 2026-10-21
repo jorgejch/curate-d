@@ -30,15 +30,22 @@ inaccessible bucket MUST fail readiness explicitly.
 - **THEN** it is replaced by an actively maintained engine that meets the same compatibility bar, and it is kept only as the interim local engine until that replacement passes
 
 ### Requirement: Reader authority limited to staged media
-CPU workers SHALL read staged objects using an environment-specific reader identity whose object access is GetObject on the staged-content prefix only. Where the backend cannot otherwise distinguish a missing object from a denial, the reader MAY also hold ListBucket on its own environment's staging bucket; that grant covers the whole bucket. Where the backend evaluates the prefix's readiness marker against its key without the trailing slash, the reader MAY also hold GetObject on that one slash-less key; that grant SHALL be documented. They MUST NOT receive source-provider, backup, writer, or bucket-management credentials. Workers SHOULD have network egress limited to what they need. Disallowed access MUST be denied.
+CPU workers SHALL read staged objects using an environment-specific reader identity whose object access is GetObject on the staged-content prefix only. They MUST NOT receive source-provider, backup, writer, or bucket-management credentials. Workers SHOULD have network egress limited to what they need. Disallowed access MUST be denied.
 
 #### Scenario: Reader access matrix
 - **WHEN** the CPU identity reads staged media and attempts writes, deletion, or access to another environment or backup bucket
 - **THEN** its staged-media read succeeds and every disallowed operation fails
 
+### Requirement: Reader grants beyond the staged-content prefix are backend-specific
+Where the backend cannot otherwise distinguish a missing object from a denial, the reader MAY also hold ListBucket on its own environment's staging bucket; that grant covers the whole bucket. Where the backend evaluates the prefix's readiness marker against its key without the trailing slash, the reader MAY also hold GetObject on that one slash-less key; that grant SHALL be documented.
+
 #### Scenario: Reader bucket listing
 - **WHEN** the CPU identity lists its own environment's staging bucket
 - **THEN** the listing succeeds only on a backend where the reader holds the ListBucket grant, and is denied everywhere else
+
+#### Scenario: Slash-less readiness marker key
+- **WHEN** the backend evaluates the readiness marker against the prefix key without its trailing slash
+- **THEN** the reader's GetObject on that one key is granted and documented, and no other key outside the staged-content prefix becomes readable
 
 ### Requirement: Immutable atomic publication
 Staged content SHALL be keyed by a validated source-derived identifier and SHALL become readable only after a complete verified upload is registered. Repeating a completed stage MUST preserve the registered bytes. A failed or stale writer MUST NOT replace a published winner.
@@ -76,10 +83,9 @@ Completed objects SHALL be deleted promptly when no download uses them. Periodic
 For every S3 behavior introduced or changed, including SDK upgrades and changes of local
 engine, the project MUST check authoritative documentation for the pinned local engine and
 for OVH, and execute the affected shared contract tests on both the pinned local release
-and the target OVH endpoint. Evidence SHALL identify the engine, its pinned version or
-digest, the endpoint, date, results and documented differences. Passing only one backend
-MUST NOT establish compatibility. Failed or unavailable required checks SHALL block
-acceptance and activation of that behavior.
+and the target OVH endpoint. Passing only one backend MUST NOT establish compatibility.
+Failed or unavailable required checks SHALL block acceptance and activation of that
+behavior.
 
 #### Scenario: Local engine supports an operation that OVH does not
 - **WHEN** an operation or request option succeeds on the local engine but is unsupported or fails on OVH
@@ -92,6 +98,10 @@ acceptance and activation of that behavior.
 #### Scenario: SDK or server changes
 - **WHEN** a pinned local release or SDK version changes, or a provider capability used by staging changes
 - **THEN** affected signatures, headers, checksums, multipart behavior, permissions and error handling are reverified on both backends before release
+
+### Requirement: Compatibility evidence is attributable
+Evidence SHALL identify the engine, its pinned version or digest, the endpoint, date,
+results and documented differences.
 
 #### Scenario: The local engine is replaced
 - **WHEN** a different local S3 engine is adopted

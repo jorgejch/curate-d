@@ -1,9 +1,11 @@
 """Publishing one source object's bytes into staging.
 
 The writer-side operation the rest of the pipeline calls. Admission, upload and
-registration happen inside one `occupancy.reserve()`, which holds the writer lock: the
-cache index requires every upload to happen inside a reservation, or a sweep on another
-pod may collect the object before its row commits.
+registration happen inside one `occupancy.reserve()`: admission records a reservation in a
+short writer-lock holding, the upload runs under that reservation with no lock held, and
+the reservation's `register()` consumes it and writes the row in a second holding. Every
+upload has to happen inside a reservation, or a sweep on another pod may collect the
+object before its row commits.
 
 SHA-1 is computed in the same read pass in which the object store computes SHA-256. pCloud
 reports SHA-1 in both regions (SHA-256 only in the EU), so the SHA-1 is what binds the
@@ -13,9 +15,8 @@ A registration is immutable, so staging a new version of a file first releases t
 one. Otherwise the new upload would lose the registration race to its own predecessor and
 readers would go on receiving the old bytes under a key that now means the new ones.
 
-Each reservation logs one `staging.reservation_phases` event splitting its writer-lock
-hold into admission, upload, registration and commit, the measurement #1's deferred
-narrowing of that lock waits on (see `docs/staging.md`).
+Each reservation logs one `staging.reservation_phases` event splitting its lifetime into
+admission, upload, registration and commit (see `docs/staging.md`).
 """
 
 import asyncio
@@ -31,7 +32,7 @@ from curate_d.staging.errors import StagingCapacityExhaustedError, StagingIntegr
 from curate_d.staging.factories import StagingWriterBackend
 from curate_d.staging.keys import StagingKey
 from curate_d.staging.objects import StagedObject
-from curate_d.staging.occupancy import AdmissionReport
+from curate_d.staging.occupancy import Reservation
 
 type ReservationOutcome = Literal["registered", "refused", "cancelled", "failed"]
 
@@ -65,20 +66,22 @@ class _ReservationPhases:
 
     A mark is None until its phase ends. A phase that a failure or a cancellation cut
     short runs to the moment the reservation ended, rollback included, so the phases of
-    any reservation that was admitted add up to its hold.
+    any reservation that was admitted add up to its lifetime after the wait for the
+    admission holding. Registration runs from the upload's end to the row's insert, the
+    wait for the registration holding included; commit from the insert to that holding's
+    end. The insert's mark is the reservation's own, taken inside the holding.
     """
 
     key: StagingKey
     declared_bytes: int
-    admission: AdmissionReport | None = None
+    reservation: Reservation | None = None
     entered: float | None = None
     uploaded: float | None = None
-    registered: float | None = None
     committed: float | None = None
 
-    def admit(self, admission: AdmissionReport) -> None:
-        """Record the admission the reservation yielded and start the upload phase."""
-        self.admission = admission
+    def admit(self, reservation: Reservation) -> None:
+        """Record the reservation admission yielded and start the upload phase."""
+        self.reservation = reservation
         self.entered = time.monotonic()
 
     def report(self, outcome: ReservationOutcome, error: BaseException | None = None) -> None:
@@ -89,19 +92,19 @@ class _ReservationPhases:
             """Return a phase's duration, None when it never started."""
             return None if start is None else (ended if end is None else end) - start
 
-        reclaimed = None if self.admission is None else self.admission.reclaimed
+        admission = None if self.reservation is None else self.reservation.admission
+        registered = None if self.reservation is None else self.reservation.registered_at
+        reclaimed = None if admission is None else admission.reclaimed
         logger.info(
             "staging.reservation_phases",
             staging_key=str(self.key),
             declared_bytes=self.declared_bytes,
             outcome=outcome,
             error=None if error is None else type(error).__name__,
-            admission_seconds=(
-                None if self.admission is None else self.admission.admission_seconds
-            ),
+            admission_seconds=None if admission is None else admission.admission_seconds,
             upload_seconds=span(self.entered, self.uploaded),
-            registration_seconds=span(self.uploaded, self.registered),
-            commit_seconds=span(self.registered, self.committed),
+            registration_seconds=span(self.uploaded, registered),
+            commit_seconds=span(registered, self.committed),
             evicted=None if reclaimed is None else len(reclaimed.evicted),
             protected=None if reclaimed is None else len(reclaimed.protected),
             orphans_deleted=None if reclaimed is None else reclaimed.orphans_deleted,
@@ -134,6 +137,8 @@ async def publish(
         StagingCapacityExhaustedError: staging cannot admit the object.
         StagingIntegrityError: the source did not deliver `size_bytes`, what landed does
             not match what was sent, or a concurrent writer published this key first.
+        StagingReservationLostError: the upload outlived its reservation, so nothing
+            was published; a later attempt re-uploads under a fresh one.
         StagingObjectStoreError: the upload, registration or release failed.
     """
     await backend.occupancy.release(key)
@@ -147,16 +152,15 @@ async def publish(
     )
     phases = _ReservationPhases(key=key, declared_bytes=size_bytes)
     try:
-        async with backend.occupancy.reserve(size_bytes) as admission:
-            phases.admit(admission)
+        async with backend.occupancy.reserve(key, target.attempt_id, size_bytes) as reservation:
+            phases.admit(reservation)
             staged = await backend.store.upload(
                 target,
                 reader,  # type: ignore[arg-type]  # only read() is used, which Sha1Reader has
                 declared_max_bytes=size_bytes,
             )
             phases.uploaded = time.monotonic()
-            await backend.index.register(staged)
-            phases.registered = time.monotonic()
+            await reservation.register(staged)
         phases.committed = time.monotonic()
     except BaseException as error:
         phases.report(_outcome_of(error, admitted=phases.entered is not None), error)
