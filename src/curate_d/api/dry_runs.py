@@ -3,9 +3,9 @@
 A run is enqueued on the workers' `maintenance` queue under its own identity and
 evaluates every content object; nothing reaches a destination. It evaluates with the
 policy and template set in force, or with drafts submitted with it: a draft is parsed as
-`PUT /configuration/{kind}` parses it, refused with 422 before anything is enqueued, and
-never stored as a configuration version, so a policy can be tried before it is
-activated.
+`PUT /configuration/{kind}` checks it, against the taxonomy in force, refused with 422
+before anything is enqueued, and never stored as a configuration version, so a policy can
+be tried before it is activated.
 
 Its export lists each object with the facts derived for it, the locator proposed at each
 destination and the rules that selected it, and, for what could not be resolved, the
@@ -24,9 +24,13 @@ from fastapi import APIRouter, Depends, Request, status
 from pydantic import AwareDatetime, BaseModel, BeforeValidator, model_validator
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from curate_d.api.errors import NOT_FOUND, REJECTED, NotFoundError, problems
+from curate_d.api.configuration import check_submission
+from curate_d.api.errors import NOT_FOUND, REJECTED, NotFoundError, RejectedError, problems
+from curate_d.configuration.consistency import taxonomy_in_force
 from curate_d.configuration.documents import parse_policy
+from curate_d.configuration.store import ConfigurationError, ConfigurationRepository
 from curate_d.domain import (
+    ConfigurationKind,
     ContentObjectId,
     DestinationConfig,
     DryRunOutcome,
@@ -337,7 +341,19 @@ class LedgerDryRuns:
         self._workflows = workflows
 
     async def start(self, request: DryRunRequest) -> str:
-        """Enqueue the run under its own identity, so a repeat collapses."""
+        """Validate any drafts, then enqueue the run under its own identity.
+
+        A draft passes the checks activating it would, against the taxonomy in force read
+        under the taxonomy's shared lock. The lock is released before the enqueue: nothing
+        is stored, and the run records the taxonomy version it evaluates with. A repeat
+        under the same run id collapses onto the first.
+
+        Raises:
+            RejectedError: a draft is invalid, or the taxonomy in force does not read;
+                nothing was enqueued.
+        """
+        if request.policy is not None or request.templates is not None:
+            await self._check_drafts(request)
         workflow_id = dry_run_workflow_id(str(request.run_id))
         options: EnqueueOptions = {
             "workflow_name": WORKFLOW_NAME,
@@ -346,6 +362,24 @@ class LedgerDryRuns:
         }
         await self._workflows.enqueue_async(options, request)
         return workflow_id
+
+    async def _check_drafts(self, request: DryRunRequest) -> None:
+        """Refuse a draft that `PUT /configuration/{kind}` would refuse.
+
+        Raises:
+            RejectedError: a draft is invalid, or the taxonomy in force does not read.
+        """
+        try:
+            async with self._engine.begin() as connection:
+                configurations = ConfigurationRepository(connection)
+                await configurations.lock_shared(ConfigurationKind.TAXONOMY)
+                taxonomy = await taxonomy_in_force(configurations)
+        except ConfigurationError as error:
+            raise RejectedError(str(error)) from None
+        if request.policy is not None:
+            check_submission(ConfigurationKind.POLICY, request.policy, taxonomy=taxonomy)
+        if request.templates is not None:
+            check_submission(ConfigurationKind.TEMPLATES, request.templates, taxonomy=taxonomy)
 
     async def status(self, run_id: UUID) -> DryRunStatus:
         """The run's header and its workflow's state, combined."""

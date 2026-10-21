@@ -22,13 +22,17 @@ from curate_d.api.dry_runs import (
 )
 from curate_d.api.errors import NotFoundError, RejectedError
 from curate_d.configuration.documents import parse_policy
+from curate_d.configuration.store import ConfigurationError
 from curate_d.domain import (
+    SEED_TAXONOMY,
+    ConfigurationKind,
     ContentObjectId,
     DryRunOutcome,
     Facts,
     MediaKind,
     PolicySource,
     RejectedValue,
+    Taxonomy,
     TaxonomyField,
     VerificationLevel,
 )
@@ -452,7 +456,11 @@ class _Engine:
     """Hands out a connection the fakes ignore."""
 
     def connect(self) -> "_Engine":
-        """Itself, as a context manager."""
+        """Return itself, as a context manager."""
+        return self
+
+    def begin(self) -> "_Engine":
+        """Return itself, as a context manager."""
         return self
 
     async def __aenter__(self) -> object:
@@ -491,6 +499,85 @@ async def test_a_run_is_enqueued_on_maintenance_under_its_own_identity() -> None
         "workflow_id": workflow_id,
     }
     assert enqueued is request
+
+
+@pytest.fixture(autouse=True)
+def taxonomy(monkeypatch: pytest.MonkeyPatch) -> list[ConfigurationKind]:
+    """Serve the seed taxonomy as the one in force, recording the shared locks taken."""
+    locked: list[ConfigurationKind] = []
+
+    class Repository:
+        def __init__(self, _connection: object) -> None:
+            """Nothing to bind."""
+
+        async def lock_shared(self, kind: ConfigurationKind) -> None:
+            """Record the lock."""
+            locked.append(kind)
+
+    async def in_force(_configurations: object) -> Taxonomy:
+        """Return the seed."""
+        return SEED_TAXONOMY
+
+    monkeypatch.setattr(module, "ConfigurationRepository", Repository)
+    monkeypatch.setattr(module, "taxonomy_in_force", in_force)
+    return locked
+
+
+async def test_a_run_without_drafts_reads_no_taxonomy(taxonomy: list[ConfigurationKind]) -> None:
+    """Only drafts are checked against the taxonomy in force."""
+    backend = LedgerDryRuns(cast(AsyncEngine, _Engine()), cast(DBOSClient, _Workflows()))
+    await backend.start(DryRunRequest(run_id=uuid4()))
+    assert taxonomy == []
+
+
+async def test_a_draft_is_checked_under_the_taxonomy_lock(
+    taxonomy: list[ConfigurationKind],
+) -> None:
+    """The taxonomy in force is read under its shared lock before the enqueue."""
+    workflows = _Workflows()
+    backend = LedgerDryRuns(cast(AsyncEngine, _Engine()), cast(DBOSClient, workflows))
+    await backend.start(DryRunRequest(run_id=uuid4(), templates=SEED_TEMPLATES))
+    assert taxonomy == [ConfigurationKind.TAXONOMY]
+    assert len(workflows.enqueued) == 1
+
+
+@pytest.mark.parametrize(
+    ("when", "message"),
+    [
+        ({"category": "Fotos"}, "category 'Fotos'"),
+        ({"category": "Documents", "subcategory": "Camera"}, "subcategory 'Camera'"),
+    ],
+)
+async def test_a_draft_outside_the_taxonomy_is_refused_before_the_enqueue(
+    when: dict[str, str], message: str
+) -> None:
+    """A category or subcategory the taxonomy in force does not list is never enqueued."""
+    workflows = _Workflows()
+    backend = LedgerDryRuns(cast(AsyncEngine, _Engine()), cast(DBOSClient, workflows))
+    rule = {"name": "x", "when": when, "destinations": ["library"]}
+    policy = parse_policy(_DRAFT_POLICY | {"rules": [rule]})
+    request = DryRunRequest(run_id=uuid4(), policy=policy)
+    with pytest.raises(RejectedError, match=message):
+        await backend.start(request)
+    assert workflows.enqueued == []
+
+
+async def test_an_unreadable_taxonomy_in_force_refuses_a_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A draft cannot be checked against a taxonomy that does not read, so none starts."""
+
+    async def unreadable(_configurations: object) -> Taxonomy:
+        """Fail as a stored taxonomy that no longer reads."""
+        raise ConfigurationError(ConfigurationKind.TAXONOMY, ["categories: Field required"])
+
+    monkeypatch.setattr(module, "taxonomy_in_force", unreadable)
+    workflows = _Workflows()
+    backend = LedgerDryRuns(cast(AsyncEngine, _Engine()), cast(DBOSClient, workflows))
+    request = DryRunRequest(run_id=uuid4(), templates=SEED_TEMPLATES)
+    with pytest.raises(RejectedError, match="categories"):
+        await backend.start(request)
+    assert workflows.enqueued == []
 
 
 async def test_valid_drafts_are_enqueued_with_the_request() -> None:
