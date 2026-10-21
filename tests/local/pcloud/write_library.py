@@ -7,6 +7,7 @@ expected locator (null for what stays unresolved under the seed taxonomy).
 
 import hashlib
 import json
+import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,8 +17,9 @@ from tests.integration.fixture_library import library
 
 def main(directory: Path, tag: str) -> Path:
     """Write every fixture under `directory` and return the manifest's path."""
-    # Resolved, so that "." or "dir/.." has a name to build the manifest's name from.
-    directory = directory.resolve()
+    # Made absolute, so that "." or "dir/.." has a name to build the manifest's name from;
+    # normalized without following symlinks, so a linked DIR keeps the manifest beside it.
+    directory = Path(os.path.normpath(directory.absolute()))
     manifest = []
     for fixture in library(tag).fixtures:
         target = directory / fixture.path.lstrip("/")
