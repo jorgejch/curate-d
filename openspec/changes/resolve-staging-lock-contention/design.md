@@ -179,15 +179,15 @@ not-yet-registered object (in the listing and in reservations) is conservative a
 until holding 2.
 
 **D7. Phases and callers keep their names; the docs state the new sums.**
-`staging.reservation_phases` keeps `admission_seconds` (holding 1 from acquisition to the
-decision, as today), `upload_seconds` (upload outside the lock), `registration_seconds`
+`staging.reservation_phases` keeps `admission_seconds` (holding 1 from acquisition
+through the decision and the reservation insert), `upload_seconds` (upload outside the lock), `registration_seconds`
 (from upload end to the registration insert, now including the wait for holding 2) and
 `commit_seconds` (insert to holding 2's end). For any admitted reservation, the
 phases that started add up to its lifetime after the admission lock wait, no longer to one
 `held_seconds`: a phase that never started is null, and one cut short by a failure or
 cancellation runs to the reservation's end, so it absorbs the `occupancy.abandon` holding.
-The admission holding's reservation insert and commit and, after an eviction, the deletion
-of the evicted bytes fall between the decision and the upload and are in no phase. `staging.writer_lock_held`
+The admission holding's commit and, after an eviction, the deletion of the evicted bytes
+fall between the insert and the upload and are in no phase. `staging.writer_lock_held`
 keeps `occupancy.reserve` for holding 1, so the "Revisit threshold" queries and the
 duty-cycle query keep working with their meaning sharpened (the duty cycle no longer
 includes transfers); it gains `occupancy.register` and `occupancy.abandon`. No field is

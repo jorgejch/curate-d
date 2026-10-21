@@ -221,14 +221,14 @@ those two cases, the coupling #1 tracked, and ends with the writer's transaction
 admission or a sweep, bounded by its listing pages and orphan deletes, never by an upload.
 
 `staging.reservation_phases` splits a reservation's lifetime. `admission_seconds` runs
-from acquiring the lock to the admission decision (measuring, reclaiming and evicting),
-inside the `occupancy.reserve` holding. `upload_seconds` is the upload, outside any lock.
+from acquiring the lock through the admission decision (measuring, reclaiming and
+evicting) and the reservation insert, inside the `occupancy.reserve` holding. `upload_seconds` is the upload, outside any lock.
 `registration_seconds` runs from the upload's end to the registration insert, so it
 includes the wait for the `occupancy.register` holding. `commit_seconds` runs from the
 insert to that holding's end, which is mostly its commit. The four add up to the
 reservation's lifetime after the admission lock wait, give or take the admission
-holding's reservation insert and commit and, after an eviction, the deletion of the
-evicted bytes, which fall between the decision and the upload. They no longer add up to
+holding's commit and, after an eviction, the deletion of the evicted bytes, which fall
+between the insert and the upload. They no longer add up to
 one holding's `held_seconds`: the upload is in no holding. The admission lock wait is not
 a phase: it is the `occupancy.reserve` holding's `wait_seconds`. `outcome` is one of:
 
