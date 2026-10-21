@@ -12,8 +12,8 @@ Runs recorded before this revision keep a null policy_source and empty rules.
 The downgrade fails while an `unselected` item exists, since the narrower check cannot be
 restored over it; it names the DELETE to run first rather than deleting review data itself.
 
-Revision ID: 0021_dry_run_drafts
-Revises: 0020_lease_versions
+Revision ID: 0022_dry_run_drafts
+Revises: 0021_staging_reservations
 Create Date: 2026-10-19
 """
 
@@ -23,8 +23,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0021_dry_run_drafts"
-down_revision: str | None = "0020_lease_versions"
+revision: str = "0022_dry_run_drafts"
+down_revision: str | None = "0021_staging_reservations"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

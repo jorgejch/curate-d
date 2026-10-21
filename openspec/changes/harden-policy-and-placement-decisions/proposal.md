@@ -117,7 +117,7 @@ None.
   - The status and export of `GET /dry-runs/{id}` gain policy and draft fields, `rules`,
     `rule_counts` and the `unselected` outcome.
 - **Schema:** one migration on `dry_runs` and `dry_run_items`, taking the next free head
-  after `0020_lease_versions` (or `0002_*` if #7's baseline lands first).
+  after `0021_staging_reservations` (or `0002_*` if #7's baseline lands first).
   `test_migrations.py` gains a single-head assertion.
 - **Workflows:** `verify_placement` gains an optional `attempt` argument. Verifications
   enqueued without it still run, checking only that the placement is VERIFYING.

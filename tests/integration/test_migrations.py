@@ -123,9 +123,9 @@ def test_the_chain_has_a_single_head() -> None:
     assert len(ScriptDirectory.from_config(config).get_heads()) == 1
 
 
-# 0021 adds what a dry run evaluated with and the unselected outcome.
-BEFORE_DRY_RUN_DRAFTS = "0020_lease_versions"
-DRY_RUN_DRAFTS = "0021_dry_run_drafts"
+# 0022 adds what a dry run evaluated with and the unselected outcome.
+BEFORE_DRY_RUN_DRAFTS = "0021_staging_reservations"
+DRY_RUN_DRAFTS = "0022_dry_run_drafts"
 _DRY_RUN_COLUMNS = {
     "policy_source",
     "policy_version",

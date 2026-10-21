@@ -234,7 +234,7 @@ everything.
 
 ### D9. One migration, the next free head, with a single-head assertion
 
-`migrations/versions/0021_dry_run_drafts.py`, with `down_revision="0020_lease_versions"`:
+`migrations/versions/0022_dry_run_drafts.py`, with `down_revision="0021_staging_reservations"` (dev took 0021 while the change was in flight):
 
 - adds the six `dry_runs` columns with `ck_dry_runs_policy_source_known`;
 - adds `dry_run_items.rules`;
@@ -323,7 +323,7 @@ After S0, seven streams start at once, on disjoint files:
 | S2 rendering | #14 | `rendering/{templates.py (PROFILES only), planning.py}`, `tests/unit/rendering/{test_templates.py (profile test only), test_planning.py}` |
 | S3 configuration API | #14 | `configuration/{store.py, consistency.py (new)}`, `api/configuration.py`, `classification/taxonomy.py`, `tests/unit/api/{fakes.py, test_configuration.py}`, `tests/unit/configuration/test_consistency.py` (new), `tests/unit/classification/test_taxonomy.py`, `tests/integration/{test_api_configuration.py, test_configuration_store.py, test_end_to_end.py}` |
 | S4 stored check | #14 | `configuration/verify.py` (new), `tests/unit/configuration/test_verify.py` (new), `docs/recovery.md` |
-| S5 dry runs | #13 | `migrations/versions/0021_dry_run_drafts.py` (new), `ledger/tables.py`, `api/dry_runs.py`, `placement/dry_run.py`, `workflows/dry_run.py`, `tests/unit/api/{test_dry_runs.py, dry_run_fakes.py}`, `tests/unit/placement/test_dry_run_rows.py`, `tests/integration/{test_api_dry_runs.py, test_dry_run_workflow.py, test_migrations.py}` |
+| S5 dry runs | #13 | `migrations/versions/0022_dry_run_drafts.py` (new), `ledger/tables.py`, `api/dry_runs.py`, `placement/dry_run.py`, `workflows/dry_run.py`, `tests/unit/api/{test_dry_runs.py, dry_run_fakes.py}`, `tests/unit/placement/test_dry_run_rows.py`, `tests/integration/{test_api_dry_runs.py, test_dry_run_workflow.py, test_migrations.py}` |
 | S6 placement guards | #2 | `placement/pipeline.py`, `workflows/{placement.py, reconcile.py}`, `tests/unit/placement/{test_recorded_attempt.py, test_audit_details.py}` (new), `tests/integration/{test_placement_workflow.py, test_dbos_runtime.py, test_reconcile_audit.py (new)}` |
 | S7 docs | #12, #2 | `README.md`, `docs/rewind.md` (new), `CLAUDE.md` |
 
