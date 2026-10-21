@@ -14,12 +14,14 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from curate_d.api.app import create_app
 from curate_d.api.audit import History
 from curate_d.api.backends import Backends
+from curate_d.api.configuration import Activated
 from curate_d.api.connections import StartedAuthorization
 from curate_d.api.errors import NotFoundError, RejectedError
 from curate_d.api.jobs import FailedUnit, Jobs, Progress, Spend
 from curate_d.api.review import Entry, Promoted
 from curate_d.api.throughput import LimitsChange, StageLimits, apply_change
 from curate_d.config import Settings
+from curate_d.configuration.consistency import OrphanedCondition
 from curate_d.configuration.store import ConfigurationVersion
 from curate_d.domain import (
     SEED_POLICY,
@@ -99,17 +101,19 @@ class FakeConfiguration:
         default_factory=lambda: {kind: [(seed, "seed")] for kind, seed in _SEEDS.items()}
     )
     rejection: str | None = None
+    orphaned: tuple[OrphanedCondition, ...] = ()
 
     async def active(self, kind: ConfigurationKind) -> tuple[int, BaseModel]:
-        """The newest version."""
+        """Return the newest version."""
         return len(self.versions[kind]), self.versions[kind][-1][0]
 
-    async def activate(self, kind: ConfigurationKind, document: BaseModel, *, by: str) -> int:
-        """Append a version, unless told to refuse."""
+    async def activate(self, kind: ConfigurationKind, document: BaseModel, *, by: str) -> Activated:
+        """Append a version, unless told to refuse; a taxonomy reports the canned orphans."""
         if self.rejection is not None:
             raise RejectedError(self.rejection)
         self.versions[kind].append((document, by))
-        return len(self.versions[kind])
+        orphaned = self.orphaned if kind is ConfigurationKind.TAXONOMY else ()
+        return Activated(version=len(self.versions[kind]), orphaned=orphaned)
 
     async def history(self, kind: ConfigurationKind) -> Sequence[ConfigurationVersion]:
         """Newest first."""
