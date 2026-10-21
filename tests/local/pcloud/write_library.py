@@ -7,6 +7,7 @@ expected locator (null for what stays unresolved under the seed taxonomy).
 
 import hashlib
 import json
+import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,6 +17,9 @@ from tests.integration.fixture_library import library
 
 def main(directory: Path, tag: str) -> Path:
     """Write every fixture under `directory` and return the manifest's path."""
+    # Made absolute, so that "." or "dir/.." has a name to build the manifest's name from;
+    # normalized without following symlinks, so a linked DIR keeps the manifest beside it.
+    directory = Path(os.path.normpath(directory.absolute()))
     manifest = []
     for fixture in library(tag).fixtures:
         target = directory / fixture.path.lstrip("/")
@@ -35,5 +39,7 @@ def main(directory: Path, tag: str) -> Path:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) not in (2, 3):
+        sys.exit("usage: python -m tests.local.pcloud.write_library DIR [TAG]")
     default_tag = f"dev-{datetime.now(UTC):%Y%m%d%H%M%S}"
     print(main(Path(sys.argv[1]), sys.argv[2] if len(sys.argv) > 2 else default_tag))
