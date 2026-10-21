@@ -85,9 +85,9 @@ Owns `README.md`, `docs/rewind.md` (new) and `CLAUDE.md`.
 
 ## 8. Integration of the merged streams
 
-- [ ] 8.1 Merge groups 1 to 7 into the change branch (5 with or after 3). Verify with `make check` passing.
-- [ ] 8.2 Run the targeted integration files on the merged branch: `test_reconcile_workflow.py`, `test_reconcile_audit.py`, `test_api_configuration.py`, `test_configuration_store.py`, `test_end_to_end.py`, `test_api_dry_runs.py`, `test_dry_run_workflow.py`, `test_placement_workflow.py`, `test_dbos_runtime.py`, `test_migrations.py` and `test_ledger_schema.py`. Verify with `make test-stack`, then the integration command on those files, all passing.
-- [ ] 8.3 Run `openspec validate harden-policy-and-placement-decisions --strict` and verify it reports the change valid.
+- [x] 8.1 Merge groups 1 to 7 into the change branch (5 with or after 3). Verify with `make check` passing.
+- [x] 8.2 Run the targeted integration files on the merged branch: `test_reconcile_workflow.py`, `test_reconcile_audit.py`, `test_api_configuration.py`, `test_configuration_store.py`, `test_end_to_end.py`, `test_api_dry_runs.py`, `test_dry_run_workflow.py`, `test_placement_workflow.py`, `test_dbos_runtime.py`, `test_migrations.py` and `test_ledger_schema.py`. Verify with `make test-stack`, then the integration command on those files, all passing.
+- [x] 8.3 Run `openspec validate harden-policy-and-placement-decisions --strict` and verify it reports the change valid.
 
 ## Workflow follow-up
 

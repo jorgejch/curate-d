@@ -118,8 +118,9 @@ async def test_a_full_downgrade_round_trips(empty_database: str) -> None:
 
 def test_the_chain_has_a_single_head() -> None:
     """Every revision descends from the one before: no two migrations share a parent."""
-    scripts = ScriptDirectory.from_config(Config(str(REPOSITORY_ROOT / "alembic.ini")))
-    assert len(scripts.get_heads()) == 1
+    config = Config(str(REPOSITORY_ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(REPOSITORY_ROOT / "migrations"))
+    assert len(ScriptDirectory.from_config(config).get_heads()) == 1
 
 
 # 0021 adds what a dry run evaluated with and the unselected outcome.
