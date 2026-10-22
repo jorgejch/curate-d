@@ -13,7 +13,9 @@ only the attempt it belongs to, and only while that attempt is still verifying. 
 verification run again by a rewind or a fork after a newer attempt has started therefore
 changes nothing, and cannot register the old copy's evidence at the new locator. An old
 copy run again records neither its evidence nor its failure once its attempt is no
-longer the one copying.
+longer the one copying. Each check reads the placement row locked for the rest of its
+transaction, so a start and a conclusion racing on one placement serialize and the
+second checks against what the first wrote.
 
 A copy reserves its locator in the transaction that records it starting. Reconciliation
 resolves collisions against what the ledger held when it evaluated, which says nothing
@@ -278,8 +280,9 @@ async def start(
     started over it, as by a rewind, records the next attempt, so its copy is verified
     under an identity of its own. The locator recorded is `locator` unless other
     content already holds it; see `reserve`. The previous copy's evidence is discarded,
-    so a verification of that copy run again finds nothing to assess. `context` joins
-    the audit entry's details; see `started_details`.
+    so a verification of that copy run again finds nothing to assess. An existing row is
+    locked for the transaction before it is read. `context` joins the audit entry's
+    details; see `started_details`.
 
     Returns:
         The placement, and whether a copy should start: False when it is already
@@ -299,7 +302,7 @@ async def start(
         locator=reserved,
         template_version=template_version,
     )
-    existing = await placements_repo.get(built.id)
+    existing = await placements_repo.get(built.id, for_update=True)
     if (
         existing is not None
         and existing.state is PlacementState.PRESENT
@@ -375,13 +378,13 @@ async def fail(
 
     When `attempt` is given, only a placement still copying that attempt is failed, so
     an old attempt run again by a rewind or a fork cannot fail a newer attempt or a
-    registered copy.
+    registered copy. The row is locked for the transaction before it is checked.
 
     Returns:
         The placement as recorded, or None when there was nothing to fail.
     """
     placements_repo = PlacementRepository(connection)
-    placement = await placements_repo.get(placement_id)
+    placement = await placements_repo.get(placement_id, for_update=True)
     if placement is None or (
         attempt is not None
         and (placement.state is not PlacementState.COPYING or placement.attempts != attempt)
@@ -411,14 +414,14 @@ async def mark_absent(
 ) -> Placement | None:
     """Record that a registered copy is missing from its destination.
 
-    Only a placement still registered as present is changed; the next attempt to
-    re-establish it is a new workflow identity.
+    Only a placement still registered as present is changed, checked on the row locked
+    for the transaction; the next attempt to re-establish it is a new workflow identity.
 
     Returns:
         The placement as recorded, or None when it was not present any more.
     """
     placements_repo = PlacementRepository(connection)
-    placement = await placements_repo.get(placement_id)
+    placement = await placements_repo.get(placement_id, for_update=True)
     if placement is None or placement.state is not PlacementState.PRESENT:
         return None
     absent = await placements_repo.upsert(
@@ -453,8 +456,8 @@ async def conclude(
     """Register, distrust or fail a placement from its assessment.
 
     Only a placement still verifying `attempt` is concluded. The check runs in the
-    writing transaction, so a verification run again after a newer attempt started
-    changes nothing and writes no audit entry.
+    writing transaction on the row locked for it, so a verification run again after a
+    newer attempt started changes nothing and writes no audit entry.
 
     Args:
         connection: The connection of the writing transaction.
@@ -469,7 +472,7 @@ async def conclude(
         and the source when it was sent back to be fingerprinted.
     """
     placements_repo = PlacementRepository(connection)
-    placement = await placements_repo.get(placement_id)
+    placement = await placements_repo.get(placement_id, for_update=True)
     if (
         placement is None
         or placement.state is not PlacementState.VERIFYING
