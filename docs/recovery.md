@@ -110,9 +110,9 @@ interval, on top of each worker's two long-lived lease sessions.
 A build reads every stored configuration version as strictly as a submission, except for the
 taxonomy check and retired fields. A version in force that it cannot read, such as a policy
 naming a profile it dropped or a template set conditioned on an unknown `media_kind`, fails
-every read of its kind: reconciliation and dry runs fail with a `ConfigurationError`,
-`GET /configuration/<kind>` fails, and `PUT /configuration/taxonomy` is refused. Check the
-stored versions first:
+every read of its kind: reconciliation, classification, review resolution and dry runs fail
+with a `ConfigurationError`, `GET /configuration/<kind>` fails, and
+`PUT /configuration/taxonomy` is refused. Check the stored versions first:
 
 ```bash
 kubectl -n <namespace> exec statefulset/curate-d-worker-io -- python -m curate_d.configuration.verify
@@ -135,7 +135,9 @@ kubectl -n <namespace> exec statefulset/curate-d-worker-io -- python -m curate_d
   control plane, one the new build also reads, which makes it the version in force; then run
   the check again until it exits `0`. Policy and template activation never read the version
   in force, so their `PUT` succeeds while it is unreadable. A taxonomy `PUT` is refused while a
-  policy or template set in force does not read, so correct those first.
+  policy or template set in force does not read, so correct those first. A policy or template
+  `PUT` is checked against the taxonomy in force, so it is refused while that taxonomy does not
+  read.
 
 **Pickled rows across a deploy.** DBOS pickles workflow inputs and step outputs, so a row
 written by the build being replaced reaches the new one whenever the recovery sweep forks it
