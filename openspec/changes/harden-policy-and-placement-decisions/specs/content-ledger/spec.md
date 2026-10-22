@@ -11,6 +11,12 @@ The system SHALL record an append-only audit entry for every classification deci
 - **THEN** an audit entry records the decision, the inputs it was based on, and which tier or rule produced it
 - **AND** a retention decision records the version of the placement policy it applied, and the destinations whose copies counted, were too weak, or were not checked
 
+#### Scenario: Policy version change records the retention decision again
+- **GIVEN** a recorded retention decision applied under one placement policy version
+- **WHEN** reconciliation evaluates the content under a new policy version and reaches the same outcome and reason
+- **THEN** a new retention audit entry records the decision under the new policy version, so the latest entry names the version that governs
+- **AND** evaluating again under the same version, outcome and reason records nothing
+
 #### Scenario: Placement entries carry their evidence
 - **WHEN** a copy starts, or its verification concludes
 - **THEN** the entry records the attempt and the source's version marker at copy time

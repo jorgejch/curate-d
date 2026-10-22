@@ -172,7 +172,11 @@ async def _reconcile_batch_step(
             ids = await content_page(connection, after=after, limit=size)
         evaluations = [
             await evaluate(
-                connection, content_id, templates=context.templates, policy=context.policy
+                connection,
+                content_id,
+                templates=context.templates,
+                policy=context.policy,
+                policy_version=context.policy_version,
             )
             for content_id in ids
         ]

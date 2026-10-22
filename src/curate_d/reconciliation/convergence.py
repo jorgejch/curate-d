@@ -11,7 +11,7 @@ Content awaiting a person — other than for a render failure, which a template 
 resolve — is left alone, and content a person excluded is never placed. The retention
 decision is re-derived from the placements as they stand, counting only those at
 destinations the policy defines (the ones the destination checks still verify), and is
-reported only when it differs from the last one recorded.
+reported only when it, or the policy version it applied, differs from the last one recorded.
 """
 
 from collections.abc import Sequence
@@ -34,7 +34,7 @@ from curate_d.domain import (
 )
 from curate_d.ledger import ContentObjectRepository, PlacementRepository, SourceObjectRepository
 from curate_d.reconciliation.retention import RetentionDecision, decide_retention
-from curate_d.reconciliation.store import ReconciliationStore
+from curate_d.reconciliation.store import ReconciliationStore, RecordedRetention
 from curate_d.rendering.planning import RenderFailure, plan_at
 from curate_d.rendering.templates import TemplateSet
 
@@ -61,7 +61,9 @@ class ContentEvaluation(DomainModel):
     targets: tuple[Target, ...] = ()
     render_failures: tuple[RenderFailure, ...] = ()
     retention: RetentionDecision | None = Field(
-        default=None, description="Set only when it differs from the last decision recorded."
+        default=None,
+        description="Set only when it, or its policy version, differs from the last decision "
+        "recorded.",
     )
 
 
@@ -87,14 +89,35 @@ def decide(target: Target, *, running: bool) -> Action:
     return Action.PLACE
 
 
+def retention_changed(
+    last: RecordedRetention | None, decision: RetentionDecision, *, policy_version: int | None
+) -> bool:
+    """Return whether `decision` under `policy_version` is not the last one recorded.
+
+    A new policy version counts as a change even when the outcome and reason are the same,
+    so the latest entry names the version that governs. An entry written by a build that did
+    not record the version reads as `None`: equal to an unknown current version, but not to
+    a known one, so the first pass under a build that records it writes the decision once
+    more.
+    """
+    if last is None:
+        return True
+    return (last.outcome, last.reason, last.policy_version) != (
+        decision.outcome.value,
+        decision.reason,
+        policy_version,
+    )
+
+
 async def evaluate(
     connection: AsyncConnection,
     content_object_id: ContentObjectId,
     *,
     templates: TemplateSet,
     policy: PlacementPolicy,
+    policy_version: int | None = None,
 ) -> ContentEvaluation:
-    """Evaluate one content object against the templates and the policy."""
+    """Evaluate one content object against the templates and the policy at `policy_version`."""
     nothing = ContentEvaluation(content_object_id=content_object_id)
     reviews = ReviewRepository(connection)
     review = await reviews.open_for(content_object_id)
@@ -118,7 +141,7 @@ async def evaluate(
         destinations=policy.destination_names(),
     )
     last = await ReconciliationStore(connection).last_retention(content_object_id)
-    changed = last != (retention.outcome.value, retention.reason)
+    changed = retention_changed(last, retention, policy_version=policy_version)
     evaluation = nothing.model_copy(update={"retention": retention if changed else None})
     if not any(s.state is SourceObjectState.FINGERPRINTED for s in sources):
         return evaluation

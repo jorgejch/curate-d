@@ -14,7 +14,9 @@ from curate_d.domain import (
     Provider,
     StrongFingerprint,
 )
-from curate_d.reconciliation.convergence import Action, Target, decide
+from curate_d.reconciliation.convergence import Action, Target, decide, retention_changed
+from curate_d.reconciliation.retention import decide_retention
+from curate_d.reconciliation.store import RecordedRetention
 from curate_d.runtime.profiles import WorkerProfile
 from curate_d.workflows import reconcile
 from curate_d.workflows.registry import schedules_for
@@ -79,6 +81,26 @@ def test_an_attempt_in_flight_is_left_alone_while_it_runs(state: PlacementState)
 def test_a_failed_untrusted_or_lost_copy_is_placed_again(state: PlacementState) -> None:
     """A new attempt."""
     assert decide(_target(state), running=False) is Action.PLACE
+
+
+def test_a_new_policy_version_records_an_unchanged_retention_decision_again() -> None:
+    """Same outcome and reason under a new version is recorded; under the same one it is not."""
+    decision = decide_retention(None, [], destinations={"lib"})
+    last = RecordedRetention.from_details(decision.audit_details(policy_version=3))
+
+    assert retention_changed(last, decision, policy_version=4)
+    assert not retention_changed(last, decision, policy_version=3)
+
+
+def test_an_entry_without_a_policy_version_matches_only_an_unknown_one() -> None:
+    """An entry from a build that did not record the version is recorded once more."""
+    decision = decide_retention(None, [], destinations={"lib"})
+    details = {k: v for k, v in decision.audit_details().items() if k != "policy_version"}
+    last = RecordedRetention.from_details(details)
+
+    assert not retention_changed(last, decision, policy_version=None)
+    assert retention_changed(last, decision, policy_version=3)
+    assert retention_changed(None, decision, policy_version=3)
 
 
 def test_the_sweep_and_the_checks_run_on_their_configured_schedules() -> None:

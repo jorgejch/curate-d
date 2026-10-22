@@ -1,6 +1,6 @@
 """What reconciliation reads and records beside the ledger's repositories."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Final
 
 from pydantic import AwareDatetime, Field
@@ -31,6 +31,28 @@ class DestinationCheck(DomainModel):
     absent: int = Field(default=0, ge=0)
 
 
+class RecordedRetention(DomainModel):
+    """The latest retention decision recorded for a content object."""
+
+    outcome: str
+    reason: str
+    policy_version: int | None = Field(
+        default=None, description="Null when unknown, or written by a build that did not record it."
+    )
+
+    @classmethod
+    def from_details(cls, details: Mapping[str, object]) -> "RecordedRetention":
+        """Read the decision from a `retention_decided` entry's details."""
+        version = details.get("policy_version")
+        return cls(
+            outcome=str(details.get("outcome")),
+            reason=str(details.get("reason")),
+            policy_version=version
+            if isinstance(version, int) and not isinstance(version, bool)
+            else None,
+        )
+
+
 class ReconciliationStore:
     """Retention decisions already recorded, present placements, destination checks."""
 
@@ -38,8 +60,8 @@ class ReconciliationStore:
         """Wrap a caller-owned connection."""
         self._connection = connection
 
-    async def last_retention(self, content_object_id: ContentObjectId) -> tuple[str, str] | None:
-        """The outcome and reason of the latest retention decision recorded, if any."""
+    async def last_retention(self, content_object_id: ContentObjectId) -> RecordedRetention | None:
+        """Return the latest retention decision recorded, if any."""
         row = (
             (
                 await self._connection.execute(
@@ -57,7 +79,7 @@ class ReconciliationStore:
         )
         if row is None or not isinstance(row["details"], dict):
             return None
-        return str(row["details"].get("outcome")), str(row["details"].get("reason"))
+        return RecordedRetention.from_details(row["details"])
 
     async def present_at(
         self, destination_name: str, *, after: PlacementId | None, limit: int
