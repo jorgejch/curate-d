@@ -281,6 +281,30 @@ async def _conclude_tx(
     return (False, None) if concluded is None else (True, concluded[1])
 
 
+# Checkpoints a build before the attempt guard wrote.
+
+
+def _recorded(result: bool | None) -> bool:
+    """Return whether a guarded write's checkpoint says it was recorded.
+
+    The defer, fail and evidence transactions returned None before they took the attempt,
+    and DBOS replays that checkpoint to a workflow resumed under this build. Those writes
+    were unguarded and always landed, so only an explicit False means superseded.
+    """
+    return result is not False
+
+
+def _conclusion(
+    result: tuple[bool, SourceObject | None] | SourceObject | None,
+) -> tuple[bool, SourceObject | None]:
+    """Return a conclude checkpoint as whether it concluded and the source sent back.
+
+    The conclude transaction returned the source alone, or None, before it took the
+    attempt; that unguarded write always concluded.
+    """
+    return result if isinstance(result, tuple) else (True, result)
+
+
 # Workflows.
 
 
@@ -311,9 +335,7 @@ async def place_content(request: PlacementRequest) -> PlaceOutcome:
             deferred = await datasource.run_tx_step_async(
                 {"name": "defer_placement"}, _defer_tx, placement.id, failure, placement.attempts
             )
-            # A build before this one checkpointed None here: its deferral was recorded,
-            # and only an explicit False means the attempt was superseded.
-            if deferred is False:
+            if not _recorded(deferred):
                 logger.info(
                     "placement.superseded",
                     placement_id=str(placement.id),
@@ -339,7 +361,7 @@ async def place_content(request: PlacementRequest) -> PlaceOutcome:
             placement.attempts,
             await _placement_now_step(),
         )
-        if not failed:
+        if not _recorded(failed):
             logger.info(
                 "placement.superseded", placement_id=str(placement.id), attempt=placement.attempts
             )
@@ -348,7 +370,7 @@ async def place_content(request: PlacementRequest) -> PlaceOutcome:
     recorded = await datasource.run_tx_step_async(
         {"name": "record_evidence"}, _evidence_tx, placement.id, evidence, placement.attempts
     )
-    if not recorded:
+    if not _recorded(recorded):
         logger.info(
             "placement.superseded", placement_id=str(placement.id), attempt=placement.attempts
         )
@@ -389,14 +411,16 @@ async def verify_placement(placement_id: PlacementId, attempt: int | None = None
         if source is not None
         else None
     ) or assess(evidence)
-    concluded, reset = await current().datasource.run_tx_step_async(
-        {"name": "conclude_placement"},
-        _conclude_tx,
-        placement_id,
-        assessment,
-        placement.attempts,
-        evidence.source_version_marker,
-        await _placement_now_step(),
+    concluded, reset = _conclusion(
+        await current().datasource.run_tx_step_async(
+            {"name": "conclude_placement"},
+            _conclude_tx,
+            placement_id,
+            assessment,
+            placement.attempts,
+            evidence.source_version_marker,
+            await _placement_now_step(),
+        )
     )
     if not concluded:
         return SUPERSEDED
