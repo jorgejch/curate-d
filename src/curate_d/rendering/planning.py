@@ -17,6 +17,7 @@ from curate_d.domain import (
     AuditEntry,
     AuditEntryType,
     AuditValue,
+    CapabilityProfileName,
     ConfigurationKind,
     ContentObjectId,
     DestinationConfig,
@@ -146,7 +147,7 @@ async def plan_at(
     destination: DestinationConfig,
 ) -> PlacementPlan | RenderFailure:
     """Plan one placement at `destination`, resolved against what the ledger has there."""
-    profile = PROFILES[destination.profile]
+    profile = PROFILES[CapabilityProfileName(destination.profile)]
 
     def attempt(occupants: Mapping[str, Placement]) -> PlacementPlan | RenderFailure:
         """Plan against `occupants`."""

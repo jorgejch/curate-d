@@ -119,12 +119,19 @@ each placement's account and root, so it is deferred to #3.
   pass `context={"taxonomy": taxonomy}`. Reads pass none, so a later taxonomy change can
   never make a stored document unreadable.
 - `CapabilityProfileName(StrEnum)` lives in `domain/policy.py`, so the domain never imports
-  rendering. `DestinationConfig.profile` is typed with it.
+  rendering. `DestinationConfig.profile` stays declared a `str`, as on `dev`, and a field
+  validator refuses a value no member holds with the same `enum` error, message and
+  location the enum-typed field would give.
   - `rendering/templates.py`'s `PROFILES` is keyed by the enum.
   - A unit test asserts `set(PROFILES) == set(CapabilityProfileName)`.
-  - `plan_at` drops its unknown-profile branch and indexes `PROFILES` directly.
-- A checkpointed `DestinationConfig` pickled with `profile="pcloud"` as a plain `str` still
-  indexes `PROFILES`, because a `StrEnum` member hashes and compares equal to its value.
+  - `plan_at` drops its unknown-profile branch and indexes `PROFILES` with
+    `CapabilityProfileName(destination.profile)`: the one reader converts at use.
+- The field is not retyped because `DestinationConfig` is checkpointed in `PlacementRequest`
+  and the `check_destination` input, and `DomainModel.__setstate__` restores a pickle's
+  fields without validating them: a checkpoint written before this change holds the plain
+  string, and a retyped field is a breaking deploy (CLAUDE.md, DBOS). Declaring `str` keeps
+  the old pickle inside the declared type with no drain; a `StrEnum` hashing like its value
+  would have hidden the mismatch, not removed it.
 
 ### D5. #14: taxonomy values are checked at activation, under the taxonomy's lock
 

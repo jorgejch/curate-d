@@ -7,16 +7,21 @@ then only once the required number of strongly verified copies exist besides the
 at destinations the policy defines.
 
 Every value a policy names is checked when it is parsed: a condition's `media_kind` must
-be a `MediaKind`, and a destination's `profile` a `CapabilityProfileName`. Category and
-subcategory conditions are checked against the taxonomy only when a validation context
-carries one, which activation does (`domain.conditions`).
+be a `MediaKind`, and a destination's `profile` the value of a `CapabilityProfileName`.
+Category and subcategory conditions are checked against the taxonomy only when a validation
+context carries one, which activation does (`domain.conditions`).
+
+A destination's `profile` stays declared a `str`: `DestinationConfig` is checkpointed in
+workflow inputs, a checkpoint holds the plain string older builds wrote, and unpickling does
+not validate it. A reader that needs the member converts at use.
 """
 
 from collections.abc import Mapping
 from enum import StrEnum
-from typing import Self
+from typing import Final, Self
 
-from pydantic import Field, ValidationInfo, model_validator
+from pydantic import Field, ValidationInfo, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 
 from curate_d.domain.base import DomainModel
 from curate_d.domain.conditions import check_conditions, matches, taxonomy_in
@@ -36,6 +41,14 @@ class CapabilityProfileName(StrEnum):
     PORTABLE = "portable"
 
 
+_PROFILE_NAMES: Final = tuple(member.value for member in CapabilityProfileName)
+# Pydantic's own wording for an enum mismatch, so a refusal reads as it did when the field
+# was typed by the enum.
+_PROFILES_EXPECTED: Final = (
+    ", ".join(map(repr, _PROFILE_NAMES[:-1])) + " or " + repr(_PROFILE_NAMES[-1])
+)
+
+
 class DestinationConfig(DomainModel):
     """A named target content can be placed at."""
 
@@ -43,9 +56,25 @@ class DestinationConfig(DomainModel):
     provider: Provider
     account: str = Field(min_length=1)
     root_path: str = Field(min_length=1, pattern=r"^/")
-    profile: CapabilityProfileName = Field(
-        default=CapabilityProfileName.PCLOUD, description="Capability profile name."
+    profile: str = Field(
+        default=CapabilityProfileName.PCLOUD.value,
+        description="Capability profile name: the value of a `CapabilityProfileName`.",
     )
+
+    @field_validator("profile")
+    @classmethod
+    def _check_profile(cls, value: str) -> str:
+        """Reject a profile no `CapabilityProfileName` names.
+
+        Raises:
+            PydanticCustomError: `value` names no profile. Its type is `enum` and its
+                message the one the field typed by the enum gave.
+        """
+        if value not in _PROFILE_NAMES:
+            raise PydanticCustomError(
+                "enum", "Input should be {expected}", {"expected": _PROFILES_EXPECTED}
+            )
+        return value
 
 
 class PlacementRule(DomainModel):

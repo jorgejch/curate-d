@@ -10,13 +10,16 @@ from curate_d.domain import (
     SEED_POLICY,
     SEED_TAXONOMY,
     CapabilityProfileName,
+    DestinationConfig,
     Facts,
     MediaKind,
     PlacementPolicy,
+    Provider,
     RetentionRule,
     VerificationLevel,
 )
 from curate_d.reconciliation.retention import RetentionDecision, RetentionOutcome
+from curate_d.rendering.templates import PORTABLE_PROFILE, PROFILES
 
 _POLICY = {
     "destinations": [
@@ -186,14 +189,62 @@ def test_a_policy_with_the_portable_profile_round_trips() -> None:
         "rules": [],
     }
     policy = parse_policy(document)
-    assert policy.destinations[0].profile is CapabilityProfileName.PORTABLE
+    assert policy.destinations[0].profile == CapabilityProfileName.PORTABLE
+    assert type(policy.destinations[0].profile) is str
     assert policy.model_dump(mode="json")["destinations"][0]["profile"] == "portable"
     assert parse_policy(policy.model_dump(mode="json")) == policy
 
 
 def test_a_destination_defaults_to_the_pcloud_profile() -> None:
     """A destination naming no profile gets pCloud's."""
-    assert _policy().destinations[0].profile is CapabilityProfileName.PCLOUD
+    assert _policy().destinations[0].profile == CapabilityProfileName.PCLOUD
+    assert type(_policy().destinations[0].profile) is str
+
+
+def test_an_unknown_profile_is_refused_as_an_enum_mismatch() -> None:
+    """The refusal locates the profile and lists the names, as the enum-typed field did."""
+    destination = {
+        "name": "archive",
+        "provider": "pcloud",
+        "account": "1",
+        "root_path": "/",
+        "profile": "dropbox",
+    }
+    document = _POLICY | {"destinations": [destination], "rules": []}
+    with pytest.raises(ValidationError) as refused:
+        parse_policy(document)
+    [error] = refused.value.errors()
+    assert error["loc"] == ("destinations", 0, "profile")
+    assert error["type"] == "enum"
+    assert error["msg"] == "Input should be 'pcloud' or 'portable'"
+
+
+def test_a_profile_given_as_the_member_is_held_as_its_plain_name() -> None:
+    """A new checkpoint pickles the string, never the enum, as older builds did."""
+    destination = DestinationConfig(
+        name="archive",
+        provider=Provider.PCLOUD,
+        account="1",
+        root_path="/",
+        profile=CapabilityProfileName.PORTABLE,
+    )
+    assert type(destination.profile) is str
+    assert type(pickle.loads(pickle.dumps(destination)).profile) is str
+
+
+def test_a_destination_checkpointed_with_a_plain_profile_reads_and_plans() -> None:
+    """A pickle holding the string profile satisfies the field and indexes `PROFILES`."""
+    current = DestinationConfig(
+        name="archive", provider=Provider.PCLOUD, account="1", root_path="/"
+    )
+    state = current.__getstate__()
+    state["__dict__"] = state["__dict__"] | {"profile": "portable"}
+    restored = DestinationConfig.__new__(DestinationConfig)
+    restored.__setstate__(state)
+    unpickled = pickle.loads(pickle.dumps(restored))
+    assert isinstance(unpickled, DestinationConfig)
+    assert unpickled.profile == CapabilityProfileName.PORTABLE
+    assert PROFILES[CapabilityProfileName(unpickled.profile)] is PORTABLE_PROFILE
 
 
 def _rule(when: dict[str, str]) -> dict[str, object]:
