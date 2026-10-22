@@ -21,6 +21,11 @@ A copy reserves its locator in the transaction that records it starting. Reconci
 resolves collisions against what the ledger held when it evaluated, which says nothing
 about content evaluated beside it; so the start locks the path, looks again, and resolves
 a collision with other content the same way rendering does before claiming the path.
+
+A row lock holds nothing while the row does not exist, and two first starts rendered to
+different locators lock different paths. So a start first locks the placement itself,
+by content and destination, then its paths: two starts of one placement serialize
+whether or not its row exists yet, and the second finds the first's.
 """
 
 from collections.abc import Awaitable, Callable, Mapping
@@ -42,6 +47,7 @@ from curate_d.domain import (
     SourceObject,
     SourceObjectState,
     StrongFingerprint,
+    derive_placement_id,
 )
 from curate_d.ledger import AuditRepository, PlacementRepository, SourceObjectRepository
 from curate_d.ledger.tables import placements
@@ -222,6 +228,28 @@ async def claim(
     raise LocatorConflictError(f"no free locator for content {content_object_id} from {locator}")
 
 
+def path_lock_name(destination_name: str, locator: str) -> str:
+    """Return the advisory-lock name of one path at a destination.
+
+    Unchanged across builds, so starts of mixed builds still exclude each other.
+    """
+    return f"{destination_name}\n{locator}"
+
+
+def placement_lock_name(placement_id: PlacementId) -> str:
+    """Return the advisory-lock name of one placement.
+
+    No path's name equals it: a destination name holds only lowercase letters, digits
+    and hyphens, so a path's name has a newline before any colon.
+    """
+    return f"placement:{placement_id}"
+
+
+async def hold(connection: AsyncConnection, name: str) -> None:
+    """Take the advisory lock on `name` until the transaction ends, waiting for it."""
+    await connection.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(name, 0))))
+
+
 async def reserve(
     connection: AsyncConnection,
     *,
@@ -239,8 +267,7 @@ async def reserve(
 
     async def holder(candidate: str) -> Placement | None:
         """Lock `candidate`, then read what holds it."""
-        key = func.hashtextextended(f"{destination_name}\n{candidate}", 0)
-        await connection.execute(select(func.pg_advisory_xact_lock(key)))
+        await hold(connection, path_lock_name(destination_name, candidate))
         return await placements_repo.find_at_locator(
             destination_name=destination_name, locator=candidate
         )
@@ -280,15 +307,19 @@ async def start(
     started over it, as by a rewind, records the next attempt, so its copy is verified
     under an identity of its own. The locator recorded is `locator` unless other
     content already holds it; see `reserve`. The previous copy's evidence is discarded,
-    so a verification of that copy run again finds nothing to assess. An existing row is
-    locked for the transaction before it is read. `context` joins the audit entry's
-    details; see `started_details`.
+    so a verification of that copy run again finds nothing to assess. The placement is
+    locked for the transaction before its paths, and its row is read locked, so a start
+    racing another of the same placement, with or without a row yet, waits and then
+    sees the other's. `context` joins the audit entry's details; see `started_details`.
 
     Returns:
         The placement, and whether a copy should start: False when it is already
         registered as present at the reserved locator, which is left exactly as it was.
     """
     placements_repo = PlacementRepository(connection)
+    await hold(
+        connection, placement_lock_name(derive_placement_id(content_object_id, destination_name))
+    )
     reserved, displaced_by = await reserve(
         connection,
         content_object_id=content_object_id,

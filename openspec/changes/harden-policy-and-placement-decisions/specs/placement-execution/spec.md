@@ -16,6 +16,11 @@ Each copy SHALL be verified by a verification of the attempt the placement recor
 - **THEN** the copy records the attempt after the placement's latest
 - **AND** it is verified by a verification of that attempt, not the finished one of the attempt it replaced
 
+#### Scenario: Two first copies of one placement start at the same time
+- **WHEN** two copies of the same content to the same destination start concurrently before the placement has a record, rendered to different locators
+- **THEN** one start waits until the other has recorded the placement, then records the attempt after it at its own locator
+- **AND** the first copy's evidence is never recorded against the second's locator
+
 #### Scenario: A new copy discards the previous copy's evidence
 - **WHEN** a copy starts
 - **THEN** the evidence of any previous copy is discarded in the same transaction that records the start
