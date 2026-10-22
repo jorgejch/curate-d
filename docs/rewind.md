@@ -133,10 +133,10 @@ If a `dry_run` workflow is rewound anyway, rewind it from step 1:
   (a draft comes from the request, as before), writes the header again with them, and
   discards every item the earlier execution recorded. Every page is then evaluated under
   that header, and the export never pairs one policy's header with another's items.
-- A rewind from a later step replays the original header and re-evaluates only the pages
-  from that step. The header reads finished until the run closes again, items of the
-  re-run pages that the re-run no longer produces stay, and locators the earlier execution
-  proposed for later content count as taken. Don't.
+- Don't rewind a dry run from a later step. That rewind replays the original header and
+  re-evaluates only the pages from that step. The header reads finished until the run
+  closes again, items of the re-run pages that the re-run no longer produces stay, and
+  locators the earlier execution proposed for later content count as taken.
 
 ## The audit trail
 
