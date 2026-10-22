@@ -107,7 +107,7 @@ The control plane SHALL allow a user to inspect the recorded history for a given
 
 ### Requirement: Dry-run result export
 
-The control plane SHALL expose the results of a dry run in a form suitable for reviewing proposed organization in bulk. The export SHALL include the facts derived for each content object, the proposed locator, and any items that failed classification or rendering. When the run evaluated a policy's rules, each proposed destination SHALL name the rules that selected it, each by its position in the policy and its name. Every rule of the evaluated policy SHALL be counted, apart from any other rule of the same name, and classified content that no rule selects SHALL be reported.
+The control plane SHALL expose a dry run's results for bulk review of the proposed organization: each content object's derived facts, its proposed locator, and the items that failed classification or rendering. When the run evaluated a policy's rules, each proposed destination SHALL name the rules that selected it, by position in the policy and by name. Every rule of the policy SHALL be counted, apart from any other rule of the same name, and classified content no rule selects SHALL be reported.
 
 #### Scenario: Dry-run results exported
 - **WHEN** a user requests the results of a completed dry run

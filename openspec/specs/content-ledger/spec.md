@@ -57,7 +57,7 @@ The system SHALL record, for every placement, its destination, rendered locator,
 
 ### Requirement: Immutable audit trail
 
-The system SHALL record an append-only audit entry for every classification decision, placement action, verification outcome, and retention decision. Audit entries SHALL NOT be modified or deleted by normal operation. An entry type the system no longer writes SHALL stay valid in the ledger, so entries already recorded under it remain readable: `workflow_command_issued` and `workflow_command_completed`, recorded by a Conductor command path that has since been removed, are such types. An entry SHALL carry the evidence that explains it without the workflow history, which is pruned.
+The system SHALL record an append-only audit entry for every classification decision, placement action, verification outcome and retention decision. Normal operation SHALL NOT modify or delete an entry. An entry type the system no longer writes SHALL stay valid in the ledger, so entries already recorded under it remain readable. An entry SHALL carry the evidence that explains it without the workflow history, which is pruned.
 
 #### Scenario: Decision recorded with provenance
 - **WHEN** a classification or retention decision is made
