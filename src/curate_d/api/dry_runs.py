@@ -24,7 +24,6 @@ from fastapi import APIRouter, Depends, Request, status
 from pydantic import AwareDatetime, BaseModel, BeforeValidator, model_validator
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from curate_d.api.configuration import check_submission
 from curate_d.api.errors import NOT_FOUND, REJECTED, NotFoundError, RejectedError, problems
 from curate_d.configuration.consistency import taxonomy_in_force
 from curate_d.configuration.documents import parse_policy
@@ -43,7 +42,7 @@ from curate_d.placement.dry_run import DryRun, DryRunItem, DryRunRequest, DryRun
 from curate_d.rendering.templates import TemplateSet, parse_templates
 from curate_d.runtime.queues import QueueName
 from curate_d.runtime.workflow_ids import dry_run_workflow_id
-from curate_d.workflows.dry_run import WORKFLOW_NAME
+from curate_d.workflows.dry_run import WORKFLOW_NAME, check_drafts
 
 
 def _lax_destination(value: object) -> object:
@@ -397,12 +396,9 @@ class LedgerDryRuns:
                 configurations = ConfigurationRepository(connection)
                 await configurations.lock_shared(ConfigurationKind.TAXONOMY)
                 taxonomy = await taxonomy_in_force(configurations)
+            check_drafts(request, taxonomy)
         except ConfigurationError as error:
             raise RejectedError(str(error)) from None
-        if request.policy is not None:
-            check_submission(ConfigurationKind.POLICY, request.policy, taxonomy=taxonomy)
-        if request.templates is not None:
-            check_submission(ConfigurationKind.TEMPLATES, request.templates, taxonomy=taxonomy)
 
     async def status(self, run_id: UUID) -> DryRunStatus:
         """The run's header and its workflow's state, combined."""

@@ -41,7 +41,7 @@ from curate_d.placement.policy import active_policy
 from curate_d.rendering.collision import disambiguate
 from curate_d.rendering.planning import active_templates
 from curate_d.rendering.templates import parse_templates
-from curate_d.workflows.dry_run import start_dry_run
+from curate_d.workflows.dry_run import DraftRefusedError, start_dry_run
 from curate_d.workflows.scan import scan_root
 from tests.integration.pipeline_harness import Pipeline, running_pipeline
 from tests.stubs import media
@@ -454,6 +454,37 @@ async def test_a_dry_run_rewound_from_its_start_starts_over(
     assert (run.policy_source, run.policy_rules) == (PolicySource.DESTINATIONS, ())
     [item] = items
     assert (item.destination_name, item.outcome) == (destination.name, DryRunOutcome.PROPOSED)
+
+
+async def test_a_draft_the_taxonomy_refuses_at_open_fails_the_run(
+    settings: Settings, ledger_engine: AsyncEngine, tmp_path: Path, run_id: UUID
+) -> None:
+    """The run ends in error naming the problem, and records no header and no items.
+
+    Enqueued without the API's check, the draft stands for one accepted under a taxonomy
+    that a later activation replaced before the run opened.
+    """
+    async with running_pipeline(settings, ledger_engine, tmp_path) as pipeline:
+        draft = parse_policy(
+            {
+                "destinations": [
+                    {"name": "drafted", "provider": "pcloud", "account": "1", "root_path": "/D"}
+                ],
+                "rules": [
+                    {"name": "x", "when": {"category": "Fotos"}, "destinations": ["drafted"]}
+                ],
+            }
+        )
+        workflow_id = await start_dry_run(DryRunRequest(run_id=run_id, policy=draft))
+        await pipeline.settle()
+        handle: WorkflowHandleAsync[int] = await DBOS.retrieve_workflow_async(workflow_id)
+        with pytest.raises(DraftRefusedError, match="category 'Fotos'"):
+            await handle.get_result()
+        assert [status for _, status in await pipeline.workflows(workflow_id)] == ["ERROR"]
+        async with ledger_engine.connect() as connection:
+            store = DryRunStore(connection)
+            assert await store.get(run_id) is None
+            assert await store.items(run_id) == []
 
 
 async def test_an_unknown_run_has_no_results(ledger_engine: AsyncEngine) -> None:

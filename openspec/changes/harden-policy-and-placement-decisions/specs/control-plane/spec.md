@@ -84,7 +84,7 @@ The control plane SHALL expose the results of a dry run in a form suitable for r
 
 ### Requirement: Dry run against a draft configuration
 
-A dry run SHALL accept a whole draft placement policy and, optionally, a draft template set, and SHALL evaluate with them instead of the versions in force. A draft SHALL pass the same validation as activating it, including the taxonomy check. A draft SHALL NOT be stored as a configuration version. A run's status SHALL record what it evaluated with: the policy version in force, a draft, or named destinations, and whether the templates were a draft.
+A dry run SHALL accept a whole draft placement policy and, optionally, a draft template set, and SHALL evaluate with them instead of the versions in force. A draft SHALL pass the validation activating it would, taxonomy check included, when the run is requested and again when it opens. A draft SHALL NOT be stored as a configuration version. A run's status SHALL record what it evaluated with: the policy version in force, a draft, or named destinations, and whether the templates were a draft.
 
 #### Scenario: Draft policy evaluated
 - **WHEN** a user starts a dry run with a draft policy
@@ -100,6 +100,11 @@ A dry run SHALL accept a whole draft placement policy and, optionally, a draft t
 - **WHEN** a user starts a dry run with a draft that activating it would refuse, including a category or subcategory the taxonomy in force does not list
 - **THEN** the control plane refuses the request with 422 and each problem located
 - **AND** no run starts and nothing is recorded
+
+#### Scenario: Taxonomy changed before the run opens
+- **WHEN** a draft accepted for a dry run names a category or subcategory that a taxonomy activated before the run opens no longer lists
+- **THEN** the run fails with each problem located, and its status reports it as failed
+- **AND** it records no header and no items, so no export claims a taxonomy version the draft was not checked against
 
 #### Scenario: Draft policy combined with named destinations
 - **WHEN** a user starts a dry run with both a draft policy and named destinations
