@@ -7,7 +7,7 @@ the row as it was before the first and overwrite the first's write.
 
 Two first starts open on no placement row, which no row lock can hold. They render to
 different locators, so they lock different paths; the placement's own lock is what makes
-the second wait and then find the first's row.
+the second wait and then find the first's row, and leave the attempt to it.
 """
 
 import asyncio
@@ -201,12 +201,12 @@ async def _recorded_at(engine: AsyncEngine, placement: Placement) -> Placement |
         return await PlacementRepository(connection).get(placement.id)
 
 
-async def _entries(engine: AsyncEngine, verifying: _Verifying) -> list[str]:
-    """Return the entry types audited for the fixture's placement, oldest first."""
+async def _entries(engine: AsyncEngine, placement: Placement) -> list[str]:
+    """Return the entry types audited for `placement`, oldest first."""
     async with engine.connect() as connection:
         rows = await connection.execute(
             select(audit_entries.c.entry_type)
-            .where(audit_entries.c.placement_id == verifying.placement.id)
+            .where(audit_entries.c.placement_id == placement.id)
             .order_by(audit_entries.c.id)
         )
         return list(rows.scalars())
@@ -235,7 +235,9 @@ async def test_a_conclusion_waits_for_a_newer_start_and_then_concludes_nothing(
     recorded = await _recorded(ledger_engine, verifying)
     assert recorded is not None
     assert (recorded.state, recorded.attempts) == (PlacementState.COPYING, 2)
-    assert await _entries(ledger_engine, verifying) == [AuditEntryType.PLACEMENT_STARTED.value]
+    assert await _entries(ledger_engine, verifying.placement) == [
+        AuditEntryType.PLACEMENT_STARTED.value
+    ]
 
 
 async def test_a_start_waits_for_a_conclusion_and_then_sees_the_registration(
@@ -263,16 +265,16 @@ async def test_a_start_waits_for_a_conclusion_and_then_sees_the_registration(
     recorded = await _recorded(ledger_engine, verifying)
     assert recorded is not None
     assert (recorded.state, recorded.attempts) == (PlacementState.PRESENT, 1)
-    assert await _entries(ledger_engine, verifying) == [
+    assert await _entries(ledger_engine, verifying.placement) == [
         AuditEntryType.VERIFICATION_SUCCEEDED.value,
         AuditEntryType.PLACEMENT_REGISTERED.value,
     ]
 
 
-async def test_two_first_starts_at_different_locators_serialize_on_the_placement(
+async def test_two_first_starts_at_different_locators_leave_the_attempt_to_the_first(
     ledger_engine: AsyncEngine, unplaced: _Unplaced
 ) -> None:
-    """A first start waits for another of the placement in flight, then records the next attempt."""
+    """A first start waits for another of the placement in flight, then copies nothing."""
     async with ledger_engine.connect() as first, ledger_engine.connect() as second:
         await first.begin()
         started, copy = await _first_start(first, unplaced, locator=_LOCATOR)
@@ -285,19 +287,26 @@ async def test_two_first_starts_at_different_locators_serialize_on_the_placement
         assert not waiting.done()
 
         await first.commit()
-        restarted, copy = await asyncio.wait_for(waiting, _FINISH_WITHIN)
+        left, copy = await asyncio.wait_for(waiting, _FINISH_WITHIN)
         await second.commit()
 
-    assert copy
-    assert (restarted.id, restarted.state) == (started.id, PlacementState.COPYING)
-    assert (restarted.locator, restarted.attempts) == (_OTHER_LOCATOR, 1)
+    assert not copy
+    assert (left.id, left.state, left.locator, left.attempts) == (
+        started.id,
+        PlacementState.COPYING,
+        _LOCATOR,
+        0,
+    )
+    assert await _entries(ledger_engine, started) == [AuditEntryType.PLACEMENT_STARTED.value]
+    # The row still names the first start's locator and attempt, which are what its
+    # workflow's identity and reconciliation's lookup of it are derived from.
     evidence = TransferEvidence(source=SideEvidence(size_bytes=10), destination=SideEvidence())
     async with ledger_engine.begin() as connection:
-        assert not await PlacementStore(connection).set_evidence(started.id, evidence, attempt=0)
+        assert await PlacementStore(connection).set_evidence(started.id, evidence, attempt=0)
     recorded = await _recorded_at(ledger_engine, started)
     assert recorded is not None
     assert (recorded.state, recorded.locator, recorded.attempts) == (
-        PlacementState.COPYING,
-        _OTHER_LOCATOR,
-        1,
+        PlacementState.VERIFYING,
+        _LOCATOR,
+        0,
     )

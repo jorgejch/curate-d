@@ -18,7 +18,8 @@ Each copy SHALL be verified by a verification of the attempt the placement recor
 
 #### Scenario: Two first copies of one placement start at the same time
 - **WHEN** two copies of the same content to the same destination start concurrently before the placement has a record, rendered to different locators
-- **THEN** one start waits until the other has recorded the placement, then records the attempt after it at its own locator
+- **THEN** one start waits until the other has recorded the placement, then copies nothing, records nothing and ends as superseded
+- **AND** the placement keeps the first start's locator and attempt, so reconciliation finds the first copy's workflow running and does not record its attempt as ended
 - **AND** the first copy's evidence is never recorded against the second's locator
 
 #### Scenario: A new copy discards the previous copy's evidence

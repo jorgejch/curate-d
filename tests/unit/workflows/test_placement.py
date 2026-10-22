@@ -6,7 +6,15 @@ from uuid import uuid4
 
 import pytest
 
-from curate_d.domain import PlacementId, Provider, SourceObject, derive_source_object_id
+from curate_d.domain import (
+    ContentObjectId,
+    Placement,
+    PlacementId,
+    PlacementState,
+    Provider,
+    SourceObject,
+    derive_source_object_id,
+)
 from curate_d.workflows import placement
 
 _SOURCE = SourceObject(
@@ -26,6 +34,27 @@ def test_a_pre_deploy_none_checkpoint_counts_as_recorded(
 ) -> None:
     """A replayed defer, fail or evidence None was an unguarded write that landed."""
     assert placement._recorded(checkpoint) is recorded
+
+
+@pytest.mark.parametrize(
+    ("state", "outcome"),
+    [
+        (PlacementState.PRESENT, placement.PlaceOutcome.ALREADY_PRESENT),
+        (PlacementState.COPYING, placement.PlaceOutcome.SUPERSEDED),
+        (PlacementState.VERIFYING, placement.PlaceOutcome.SUPERSEDED),
+    ],
+)
+def test_a_start_that_copies_nothing_ends_by_the_state_it_left(
+    state: PlacementState, outcome: placement.PlaceOutcome
+) -> None:
+    """A registered placement ends already present; an attempt under way elsewhere, superseded."""
+    left = Placement.build(
+        content_object_id=ContentObjectId(uuid4()),
+        destination_name="library",
+        locator="/Photos/2026/img.heic",
+        template_version="seed-1",
+    ).model_copy(update={"state": state})
+    assert placement._unstarted(left) is outcome
 
 
 @pytest.mark.parametrize(

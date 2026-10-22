@@ -33,6 +33,7 @@ from curate_d.placement.verification import Assessment, Verdict
 
 _NOW = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
 _LOCATOR = "/Photos/2026/IMG_0001.JPG"
+_OTHER_LOCATOR = "/Photos/2026-07/IMG_0001.JPG"
 _POSTGRESQL = make_url("postgresql+psycopg://").get_dialect()()
 
 
@@ -266,6 +267,78 @@ async def test_a_first_start_locks_the_placement_before_its_path_and_row(
         "statement",
         f"audit {AuditEntryType.PLACEMENT_STARTED.value}",
     ]
+
+
+def _held(
+    content_object_id: ContentObjectId, *, state: PlacementState, attempts: int, locator: str
+) -> Placement:
+    """Return a placement of the content at `library` in `state`, recorded as `attempts`."""
+    return Placement.build(
+        content_object_id=content_object_id,
+        destination_name="library",
+        locator=locator,
+        template_version="seed-1",
+    ).model_copy(update={"state": state, "attempts": attempts})
+
+
+async def _start_at_locator(
+    ledger: type[_Ledger], content_object_id: ContentObjectId, *, attempt: int
+) -> tuple[Placement, bool]:
+    """Start a copy of the content at `library`, rendered to `_LOCATOR`, as `attempt`."""
+    return await pipeline.start(
+        _journaling(ledger),
+        content_object_id=content_object_id,
+        fingerprint=StrongFingerprint(algorithm=HashAlgorithm.SHA256, digest="a" * 64),
+        destination_name="library",
+        locator=_LOCATOR,
+        template_version="seed-1",
+        source=_source(),
+        transformations={},
+        attempt=attempt,
+        now=_NOW,
+    )
+
+
+@pytest.mark.parametrize("state", [PlacementState.COPYING, PlacementState.VERIFYING])
+async def test_a_start_leaves_its_attempt_to_one_under_way_at_another_locator(
+    ledger: type[_Ledger], monkeypatch: pytest.MonkeyPatch, state: PlacementState
+) -> None:
+    """A start of the attempt already under way elsewhere copies nothing and writes nothing."""
+    content_object_id = ContentObjectId(uuid4())
+    held = _held(content_object_id, state=state, attempts=0, locator=_OTHER_LOCATOR)
+    monkeypatch.setattr(ledger, "held", held)
+    started = await _start_at_locator(ledger, content_object_id, attempt=0)
+    assert started == (held, False)
+    assert ledger.journal == [
+        f"lock placement:{held.id}",
+        f"lock library\n{_LOCATOR}",
+        "find",
+        "read locked",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("locator", "attempts", "attempt"),
+    [(_LOCATOR, 0, 0), (_OTHER_LOCATOR, 2, 1)],
+    ids=["same attempt run again at its locator", "older attempt at another locator"],
+)
+async def test_a_start_over_an_attempt_under_way_records_the_next_one(
+    ledger: type[_Ledger],
+    monkeypatch: pytest.MonkeyPatch,
+    locator: str,
+    attempts: int,
+    attempt: int,
+) -> None:
+    """A rewound start, or an older attempt's, still records the attempt after the latest."""
+    content_object_id = ContentObjectId(uuid4())
+    held = _held(
+        content_object_id, state=PlacementState.COPYING, attempts=attempts, locator=locator
+    )
+    monkeypatch.setattr(ledger, "held", held)
+    placement, copy = await _start_at_locator(ledger, content_object_id, attempt=attempt)
+    assert copy
+    assert (placement.locator, placement.attempts) == (_LOCATOR, attempts + 1)
+    assert "upsert" in ledger.journal
 
 
 def test_a_path_lock_keeps_the_name_older_builds_take() -> None:

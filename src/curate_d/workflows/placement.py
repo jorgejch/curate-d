@@ -112,7 +112,8 @@ class PlaceOutcome(StrEnum):
     NO_SOURCE = "no_source"
     SUPERSEDED = "superseded"
     """A newer attempt started, or the placement concluded, while this one copied: its
-    evidence or failure was not recorded."""
+    evidence or failure was not recorded. Or, when it started, the same attempt was
+    already copying or verifying at another locator, and it copied nothing."""
 
 
 def placement_workflow_for(request: PlacementRequest) -> str:
@@ -294,6 +295,19 @@ def _recorded(result: bool | None) -> bool:
     return result is not False
 
 
+def _unstarted(placement: Placement) -> PlaceOutcome:
+    """Return how a workflow whose start copied nothing ends.
+
+    The start leaves a placement registered at its locator, or the same attempt under
+    way at another locator; a checkpoint written before the second case existed always
+    holds a registered placement.
+    """
+    if placement.state is PlacementState.PRESENT:
+        return PlaceOutcome.ALREADY_PRESENT
+    logger.info("placement.superseded", placement_id=str(placement.id), attempt=placement.attempts)
+    return PlaceOutcome.SUPERSEDED
+
+
 def _conclusion(
     result: tuple[bool, SourceObject | None] | SourceObject | None,
 ) -> tuple[bool, SourceObject | None]:
@@ -320,7 +334,7 @@ async def place_content(request: PlacementRequest) -> PlaceOutcome:
         {"name": "start_placement"}, _start_tx, request, source, await _placement_now_step()
     )
     if not starting:
-        return PlaceOutcome.ALREADY_PRESENT
+        return _unstarted(placement)
     first_wait = settings.transfer_retry_seconds
     wait = first_wait
     evidence: TransferEvidence | None = None

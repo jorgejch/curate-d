@@ -106,7 +106,9 @@ The other scheduled workflows that start work (`scan_all`, `full_rescan_all`,
   attempt records the next attempt when it starts again, and one started over a placement
   still copying, verifying or registered at another locator records the attempt after the
   latest, so its copy gets a verification of its own. There is no collapsed verification
-  to rewind.
+  to rewind. A start that finds its own attempt copying or verifying at another locator
+  is a second workflow of that attempt, from overlapping reconciliations: it copies
+  nothing and ends `superseded`.
 - Rewinding a placement registered at its locator copies nothing: the start finds it
   present and the workflow ends `already_present`.
 - A rewound `place_content` keeps the workflow ID of the attempt it originally ran as,

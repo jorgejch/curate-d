@@ -25,7 +25,9 @@ a collision with other content the same way rendering does before claiming the p
 A row lock holds nothing while the row does not exist, and two first starts rendered to
 different locators lock different paths. So a start first locks the placement itself,
 by content and destination, then its paths: two starts of one placement serialize
-whether or not its row exists yet, and the second finds the first's.
+whether or not its row exists yet, and the second finds the first's. When both start
+the same attempt at different locators, the second records nothing and leaves the
+attempt to the first, whose workflow is the one reconciliation looks for.
 """
 
 from collections.abc import Awaitable, Callable, Mapping
@@ -63,6 +65,9 @@ _RESERVE_TRIES: Final = 4
 _RESTARTED: Final = frozenset(
     {PlacementState.COPYING, PlacementState.VERIFYING, PlacementState.PRESENT}
 )
+# States in which the attempt recorded is still the workflow that started it, or its
+# verification: a start of that same attempt elsewhere leaves it to them.
+_UNDER_WAY: Final = frozenset({PlacementState.COPYING, PlacementState.VERIFYING})
 
 
 class LocatorConflictError(RuntimeError):
@@ -277,6 +282,22 @@ async def reserve(
     )
 
 
+def taken_elsewhere(existing: Placement, *, attempt: int, locator: str) -> bool:
+    """Return whether another start of `attempt` is copying or verifying at another locator.
+
+    An attempt's workflow is identified by its rendered locator and its attempt, so two
+    starts of one attempt at one locator are one workflow run again, as by a rewind. At
+    different locators they are separate workflows, from reconciliations that overlapped
+    and rendered differently: the one that started first owns the attempt, and its
+    workflow is the one reconciliation looks for.
+    """
+    return (
+        existing.state in _UNDER_WAY
+        and existing.attempts == attempt
+        and existing.locator != locator
+    )
+
+
 def recorded_attempt(existing: Placement | None, attempt: int) -> int:
     """Return the attempt a copy starting as `attempt` records; see `start`."""
     if existing is None:
@@ -310,11 +331,15 @@ async def start(
     so a verification of that copy run again finds nothing to assess. The placement is
     locked for the transaction before its paths, and its row is read locked, so a start
     racing another of the same placement, with or without a row yet, waits and then
-    sees the other's. `context` joins the audit entry's details; see `started_details`.
+    sees the other's. A start that then finds the same attempt copying or verifying at
+    another locator records nothing; see `taken_elsewhere`. `context` joins the audit
+    entry's details; see `started_details`.
 
     Returns:
-        The placement, and whether a copy should start: False when it is already
-        registered as present at the reserved locator, which is left exactly as it was.
+        The placement, and whether a copy should start. False, with the placement left
+        exactly as it was, when it is already registered as present at the reserved
+        locator, or when another start of this attempt is copying or verifying it at
+        another locator; the placement's state tells the two apart.
     """
     placements_repo = PlacementRepository(connection)
     await hold(
@@ -334,10 +359,9 @@ async def start(
         template_version=template_version,
     )
     existing = await placements_repo.get(built.id, for_update=True)
-    if (
-        existing is not None
-        and existing.state is PlacementState.PRESENT
-        and existing.locator == reserved
+    if existing is not None and (
+        (existing.state is PlacementState.PRESENT and existing.locator == reserved)
+        or taken_elsewhere(existing, attempt=attempt, locator=reserved)
     ):
         return existing, False
     placement = built.model_copy(
