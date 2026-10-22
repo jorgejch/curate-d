@@ -237,10 +237,14 @@ async def _evidence_tx(placement_id: PlacementId, evidence: TransferEvidence, at
     return await PlacementStore(connection).set_evidence(placement_id, evidence, attempt=attempt)
 
 
-async def _defer_tx(placement_id: PlacementId, reason: str, attempt: int) -> None:
-    """Record the resource error a copy is waiting out, while `attempt` is still copying."""
+async def _defer_tx(placement_id: PlacementId, reason: str, attempt: int) -> bool:
+    """Record the resource error a copy is waiting out, while `attempt` is still copying.
+
+    Returns:
+        Whether the reason was recorded.
+    """
     connection = await current().datasource.sql_session().connection()
-    await defer(connection, placement_id, reason, attempt=attempt)
+    return await defer(connection, placement_id, reason, attempt=attempt)
 
 
 async def _fail_tx(placement_id: PlacementId, reason: str, attempt: int, now: datetime) -> bool:
@@ -304,9 +308,16 @@ async def place_content(request: PlacementRequest) -> PlaceOutcome:
         except (AdmissionDeferredError, ScratchExhaustedError) as waiting:
             failure = str(waiting)
             logger.info("placement.waiting", placement_id=str(placement.id), reason=failure)
-            await datasource.run_tx_step_async(
+            deferred = await datasource.run_tx_step_async(
                 {"name": "defer_placement"}, _defer_tx, placement.id, failure, placement.attempts
             )
+            if not deferred:
+                logger.info(
+                    "placement.superseded",
+                    placement_id=str(placement.id),
+                    attempt=placement.attempts,
+                )
+                return PlaceOutcome.SUPERSEDED
             await DBOS.sleep_async(wait)
             wait = min(wait * 2, first_wait * _MAX_WAIT_FACTOR)
         except (

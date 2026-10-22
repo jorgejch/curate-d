@@ -668,6 +668,54 @@ async def test_an_old_copy_that_completes_after_a_newer_attempt_started_records_
             assert await PlacementStore(connection).evidence(copying.id) is None
 
 
+async def test_an_old_copy_deferred_after_a_newer_attempt_started_stops_without_copying_again(
+    settings: Settings,
+    ledger_engine: AsyncEngine,
+    tmp_path: Path,
+    daemon: tuple[RcloneClient, str],
+) -> None:
+    """Rewound from its copy into a scratch wait, the old attempt ends superseded at once."""
+    access = ScriptedAccess()
+    access.corrupt = _CORRUPT
+    content = media.photo(seed=int(uuid4().int % 97))
+    async with _pipeline(settings, ledger_engine, tmp_path, daemon[1], access) as pipeline:
+        source, stored = await _ingested(pipeline, daemon, content, at_source=content)
+        request = _request(stored, _destination())
+        assert await _place(pipeline, request) is PlaceOutcome.COPIED
+        untrusted = await _placement(ledger_engine, stored)
+        async with ledger_engine.begin() as connection:
+            await start(
+                connection,
+                content_object_id=stored.id,
+                fingerprint=stored.fingerprint,
+                destination_name=request.destination.name,
+                locator=_LOCATOR,
+                template_version="seed-1",
+                source=source,
+                transformations={},
+                attempt=untrusted.attempts,
+                now=datetime.now(UTC),
+            )
+        copying = await _placement(ledger_engine, stored)
+        assert (copying.state, copying.attempts) == (PlacementState.COPYING, 1)
+        trail = await _audit(ledger_engine, copying)
+        verifications = await pipeline.workflows(f"verify:{copying.id}:")
+
+        access.corrupt = None
+        access.out_of_space = 1_000
+        workflow_id = placement_workflow_for(request)
+        rewound = await DBOS.rewind_workflow_async(
+            workflow_id, start_step=await _copy_step(workflow_id)
+        )
+        assert PlaceOutcome(await rewound.get_result()) is PlaceOutcome.SUPERSEDED
+        await pipeline.settle()
+
+        assert access.copies == 2
+        assert await _placement(ledger_engine, stored) == copying
+        assert await _audit(ledger_engine, copying) == trail
+        assert await pipeline.workflows(f"verify:{copying.id}:") == verifications
+
+
 async def test_an_old_copy_that_fails_after_the_placement_registered_leaves_it_registered(
     settings: Settings,
     ledger_engine: AsyncEngine,

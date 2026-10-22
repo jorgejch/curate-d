@@ -46,6 +46,10 @@ An attempt's evidence, its wait for resources and its failure SHALL be recorded 
 - **WHEN** an attempt that must wait for resources is no longer the placement's latest
 - **THEN** its wait reason is not recorded over the newer attempt's state
 
+#### Scenario: An old attempt is superseded while waiting for resources
+- **WHEN** a copy is deferred for admission or scratch and a newer attempt has started
+- **THEN** the deferral is not recorded, the old attempt copies nothing more and ends as superseded
+
 #### Scenario: A registered placement rewound
 - **WHEN** a placement already registered at its locator is executed again by a rewind
 - **THEN** no copy is performed and the placement record is unchanged
