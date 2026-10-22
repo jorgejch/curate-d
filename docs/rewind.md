@@ -30,8 +30,8 @@ acted on what the parent decided before the rewind.
 
 ## Steps
 
-1. Record the children the parent started from `start_step` on. The rewind deletes these
-   steps, so list them first:
+1. Record the children a workflow started from `start_step` on. Its rewind deletes these
+   steps, so list them before each rewind, the parent's and every child's below:
 
    ```python
    async def children(workflow_id: str, start_step: int) -> list[str]:
@@ -41,25 +41,28 @@ acted on what the parent decided before the rewind.
            for step in steps
            if step["function_id"] >= start_step and (child := step["child_workflow_id"]) is not None
        ]
-
-
-   before = await children(parent_id, start_step)
    ```
 
-2. Rewind the parent and wait for it to finish:
-
-   ```python
-   await (await DBOS.rewind_workflow_async(parent_id, start_step=start_step)).get_result()
-   ```
+2. Rewind the parent and wait for it to finish, its `before` list taken first.
 
 3. List the parent's children again. A child in both lists collapsed: the re-run asked for
-   it under the same ID and got the old one back. Rewind each of them from step 1, wait for
-   it, and repeat these steps for its own children:
+   it under the same ID and got the old one back. For each of them, record the children it
+   started from its first step on, then rewind it from step 1, wait for it, and repeat this
+   step for it. Its
+   rewind deletes the records of the children it started, so a list taken after it can no
+   longer tell a collapsed grandchild from a new one. Each workflow is rewound after its
+   parent, and listed just before its own rewind:
 
    ```python
-   after = await children(parent_id, start_step)
-   for child_id in (c for c in before if c in after):
-       await (await DBOS.rewind_workflow_async(child_id, start_step=1)).get_result()
+   async def rewind(workflow_id: str, start_step: int) -> None:
+       before = await children(workflow_id, start_step)
+       await (await DBOS.rewind_workflow_async(workflow_id, start_step=start_step)).get_result()
+       after = await children(workflow_id, start_step)
+       for child_id in (c for c in before if c in after):
+           await rewind(child_id, start_step=1)
+
+
+   await rewind(parent_id, start_step)
    ```
 
    A child only in `before` was not asked for again: the re-run took another path, and what
