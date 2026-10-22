@@ -51,8 +51,9 @@ class DomainModel(BaseModel):
         was written would otherwise raise `AttributeError` when read. A defaulted field
         gets its declared default, a fresh one from a default factory, without the
         validation construction runs on it. A key no longer declared as a field is a
-        retired field and is ignored, as `parse_stored_policy` ignores one in a stored
-        document.
+        retired field and is dropped from `__dict__`, so the restored model neither exposes
+        it nor compares unequal to one built from its declared fields, as
+        `parse_stored_policy` ignores one in a stored document.
 
         Raises:
             StaleCheckpointError: A required field is missing from the pickle. Defaulted
@@ -60,6 +61,9 @@ class DomainModel(BaseModel):
         """
         super().__setstate__(state)
         cls = type(self)
+        for key in list(self.__dict__):
+            if key not in cls.model_fields:
+                del self.__dict__[key]
         missing: list[str] = []
         for name, field in cls.model_fields.items():
             if name in self.__dict__:

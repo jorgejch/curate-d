@@ -82,10 +82,11 @@ def test_missing_required_field_raises_stale_checkpoint() -> None:
 
 
 def test_retired_key_is_ignored() -> None:
-    """A key no longer declared as a field neither raises nor hides the real fields."""
+    """A key no longer declared as a field is dropped and the model equals a fresh one."""
     restored = _restore(Checkpoint, _stale_state(Checkpoint(a=1, b=5), retired="old"))
     assert isinstance(restored, Checkpoint)
-    assert (restored.a, restored.b) == (1, 5)
+    assert not hasattr(restored, "retired")
+    assert restored == Checkpoint(a=1, b=5)
 
 
 def test_placement_request_pickled_before_policy_version_reads_none() -> None:
