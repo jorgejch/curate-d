@@ -42,6 +42,7 @@ from curate_d.placement.dry_run import (
     _to_run,
     selections,
 )
+from curate_d.placement.pipeline import LocatorConflictError
 from curate_d.placement.remotes import RcloneAccess, remote_name
 from curate_d.rendering.planning import RenderFailure
 from curate_d.rendering.templates import SEED_TEMPLATES
@@ -283,6 +284,40 @@ async def test_rules_sharing_a_name_are_recorded_apart() -> None:
         SelectingRule(index=0, name="coverage"),
         SelectingRule(index=2, name="coverage"),
     )
+
+
+_ARCHIVE = DestinationConfig(name="archive", provider=Provider.PCLOUD, account="1", root_path="/A")
+
+
+async def _archive_fails_lib_raises(
+    *args: object, destination: DestinationConfig, **kwargs: object
+) -> object:
+    """Fail the render at archive, and raise at lib as a claim with no free locator does."""
+    if destination.name == "lib":
+        raise LocatorConflictError("no free locator")
+    return await _render_failed(*args, destination=destination, **kwargs)
+
+
+@pytest.mark.usefixtures("ledger")
+async def test_a_destination_that_raises_fails_alone_and_keeps_its_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The earlier destination's item stands, and the raising one names the rule that chose it."""
+    monkeypatch.setattr(dry_run, "plan_at", _archive_fails_lib_raises)
+    policy = PlacementPolicy(
+        destinations=(_ARCHIVE, _LIBRARY),
+        rules=(
+            PlacementRule(name="keep", when={"media_kind": "photo"}, destinations=("archive",)),
+            PlacementRule(name="show", when={"category": "Photos"}, destinations=("lib",)),
+        ),
+    )
+    archive, lib = await _evaluator(policy).evaluate(_Ledger.content.id)
+    assert (archive.destination_name, archive.reason) == ("archive", "no")
+    assert archive.rules == (SelectingRule(index=0, name="keep"),)
+    assert (lib.destination_name, lib.outcome) == ("lib", DryRunOutcome.RENDER_FAILED)
+    assert lib.rules == (SelectingRule(index=1, name="show"),)
+    assert lib.reason == "evaluation failed: LocatorConflictError: no free locator"
+    assert lib.facts == _FACTS
 
 
 @pytest.mark.parametrize(

@@ -359,6 +359,11 @@ def selections(policy: PlacementPolicy, facts: Facts) -> dict[str, tuple[Selecti
     return {name: tuple(selected[name]) for name in sorted(selected)}
 
 
+def _failure(error: Exception) -> str:
+    """Return the reason recorded for an evaluation that raised `error`."""
+    return f"evaluation failed: {type(error).__name__}: {error}"
+
+
 async def content_page(
     connection: AsyncConnection, *, after: ContentObjectId | None, limit: int = PAGE_SIZE
 ) -> list[ContentObjectId]:
@@ -393,7 +398,11 @@ class Evaluator:
         self._proposed: dict[str, dict[str, ContentObjectId]] = {}
 
     async def evaluate(self, content_object_id: ContentObjectId) -> list[DryRunItem]:
-        """Items for one content object; a failure is reported as an item, never raised."""
+        """Return the items for one content object; a failure is an item, never raised.
+
+        A failure at one selected destination fails that destination's item only, which
+        keeps the rules that selected it; one before selection is a single item.
+        """
         try:
             return await self._evaluate(content_object_id)
         except Exception as error:
@@ -402,7 +411,7 @@ class Evaluator:
                     run_id=self._run_id,
                     content_object_id=content_object_id,
                     outcome=DryRunOutcome.RENDER_FAILED,
-                    reason=f"evaluation failed: {type(error).__name__}: {error}",
+                    reason=_failure(error),
                 )
             ]
 
@@ -460,15 +469,6 @@ class Evaluator:
         copied = next((s for s in sources if s.state is SourceObjectState.FINGERPRINTED), None)
         items: list[DryRunItem] = []
         for destination, rules in selected:
-            outcome = await plan_at(
-                self._connection,
-                self._templates,
-                facts,
-                content_object_id=content_object_id,
-                fingerprint=content.fingerprint,
-                paths=paths,
-                destination=destination,
-            )
             base = DryRunItem(
                 run_id=self._run_id,
                 content_object_id=content_object_id,
@@ -478,22 +478,40 @@ class Evaluator:
                 facts=facts,
                 rules=rules,
             )
-            if isinstance(outcome, RenderFailure):
-                items.append(base.model_copy(update={"reason": outcome.reason}))
-                continue
-            locator, present = await self._claim(outcome, content)
-            items.append(
-                base.model_copy(
-                    update={
-                        "outcome": (
-                            DryRunOutcome.ALREADY_PRESENT if present else DryRunOutcome.PROPOSED
-                        ),
-                        "locator": locator,
-                        "expected_level": await self._expected_level(copied, destination),
-                    }
-                )
-            )
+            try:
+                items.append(await self._evaluate_at(base, destination, facts, content, copied))
+            except Exception as error:
+                items.append(base.model_copy(update={"reason": _failure(error)}))
         return items
+
+    async def _evaluate_at(
+        self,
+        base: DryRunItem,
+        destination: DestinationConfig,
+        facts: Facts,
+        content: ContentObject,
+        copied: SourceObject | None,
+    ) -> DryRunItem:
+        """Return `base` completed with what placing the content at `destination` would do."""
+        outcome = await plan_at(
+            self._connection,
+            self._templates,
+            facts,
+            content_object_id=content.id,
+            fingerprint=content.fingerprint,
+            paths=base.paths,
+            destination=destination,
+        )
+        if isinstance(outcome, RenderFailure):
+            return base.model_copy(update={"reason": outcome.reason})
+        locator, present = await self._claim(outcome, content)
+        return base.model_copy(
+            update={
+                "outcome": DryRunOutcome.ALREADY_PRESENT if present else DryRunOutcome.PROPOSED,
+                "locator": locator,
+                "expected_level": await self._expected_level(copied, destination),
+            }
+        )
 
     async def _claim(self, planned: PlacementPlan, content: ContentObject) -> tuple[str, bool]:
         """The locator a copy would claim, given what this run proposed; and if it is there.
