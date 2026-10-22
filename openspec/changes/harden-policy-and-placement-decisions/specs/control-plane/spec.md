@@ -110,6 +110,11 @@ A dry run SHALL accept a whole draft placement policy and, optionally, a draft t
 - **WHEN** a user exports a dry run that evaluated a draft
 - **THEN** the export includes the draft documents as evaluated, after the workflow's own history has been pruned
 
+#### Scenario: Run rewound from its start
+- **WHEN** an operator rewinds a dry run's workflow from its first step after the policy in force changed
+- **THEN** its status records the policy it now evaluates with, and that it is unfinished until the re-run closes it
+- **AND** its export holds only items the re-run evaluated
+
 ### Requirement: Stored configuration stays readable or fails loudly
 
 A stored version SHALL be read with the checks a submission passes, except that values only the taxonomy constrains are not checked. A field retired from the document is dropped on read. A version in force that no longer reads SHALL NOT be evaluated in part. The failure SHALL name the kind and each problem, and a valid submission SHALL replace it. Operators SHALL be able to check every stored version before deploying a build.

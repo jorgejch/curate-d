@@ -171,10 +171,18 @@ class DryRunStore:
         self._connection = connection
 
     async def create(self, run: DryRun) -> None:
-        """Record that a run started; a repeat of the same run changes nothing."""
-        existing = await self.get(run.id)
-        if existing is None:
-            await self._connection.execute(dry_runs.insert().values(**_run_values(run)))
+        """Record that a run started, discarding what an earlier execution recorded for it.
+
+        The workflow opens a run in a datasource transaction, which re-executes only once
+        its checkpoint is gone, as after a rewind from before it. The run then starts over
+        with the configuration read now, so the header and items written under the
+        earlier one are replaced, never kept beside items evaluated under this one.
+        """
+        await self._connection.execute(
+            dry_run_items.delete().where(dry_run_items.c.run_id == run.id)
+        )
+        await self._connection.execute(dry_runs.delete().where(dry_runs.c.id == run.id))
+        await self._connection.execute(dry_runs.insert().values(**_run_values(run)))
 
     async def finish(self, run_id: UUID, now: AwareDatetime) -> None:
         """Record that a run finished."""

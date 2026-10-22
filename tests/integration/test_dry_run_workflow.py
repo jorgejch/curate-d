@@ -409,6 +409,53 @@ async def test_a_run_without_drafts_records_the_policy_version_in_force(
     assert (run.templates_draft, run.policy_document) == (False, None)
 
 
+async def test_a_dry_run_rewound_from_its_start_starts_over(
+    settings: Settings, ledger_engine: AsyncEngine, tmp_path: Path, run_id: UUID
+) -> None:
+    """The header is written again and items the earlier execution recorded are discarded."""
+    async with running_pipeline(settings, ledger_engine, tmp_path) as pipeline:
+        _, content_id = await _dated_photo(pipeline, "IMG_0005.JPG")
+        destination = DestinationConfig(
+            name=f"dry-{uuid4().hex[:8]}",
+            provider=Provider.PCLOUD,
+            account=pipeline.account,
+            root_path="/Organized",
+        )
+        workflow_id = await start_dry_run(DryRunRequest(run_id=run_id, destinations=(destination,)))
+        await pipeline.settle()
+        handle: WorkflowHandleAsync[int] = await DBOS.retrieve_workflow_async(workflow_id)
+        await handle.get_result()
+        # Stand in for what an earlier policy recorded: other rules, another destination.
+        stale = DryRunItem(
+            run_id=run_id,
+            content_object_id=content_id,
+            destination_name="retired",
+            outcome=DryRunOutcome.PROPOSED,
+            locator="/retired/IMG_0005.JPG",
+            rules=(SelectingRule(index=0, name="retired"),),
+        )
+        async with ledger_engine.begin() as connection:
+            await connection.execute(
+                dry_runs.update()
+                .where(dry_runs.c.id == run_id)
+                .values(policy_source=PolicySource.ACTIVE.value, policy_rules=["retired"])
+            )
+            await DryRunStore(connection).add([stale])
+
+        rewound = await DBOS.rewind_workflow_async(workflow_id, start_step=1)
+        await rewound.get_result()
+
+        async with ledger_engine.connect() as connection:
+            store = DryRunStore(connection)
+            run = await store.get(run_id)
+            items = [i for i in await store.items(run_id) if i.content_object_id == content_id]
+    assert run is not None
+    assert run.finished_at is not None
+    assert (run.policy_source, run.policy_rules) == (PolicySource.DESTINATIONS, ())
+    [item] = items
+    assert (item.destination_name, item.outcome) == (destination.name, DryRunOutcome.PROPOSED)
+
+
 async def test_an_unknown_run_has_no_results(ledger_engine: AsyncEngine) -> None:
     """Asking about a run that never happened is an answer, not an error."""
     async with ledger_engine.connect() as connection:

@@ -5,7 +5,9 @@ set, taxonomy and policy it evaluates with: the versions in force, or the drafts
 request carries, which are recorded on the header and never stored as configuration
 versions. Then content is evaluated a page at a time, each page read in a step and its
 items written in one transaction, and the header is closed. A page that fails midway is
-evaluated again on recovery and its items replaced. Nothing outside dry_runs and
+evaluated again on recovery and its items replaced. A rewind from before the header starts
+the run over: the header is written again with what is in force then, and the items
+recorded before are discarded (`docs/rewind.md`). Nothing outside dry_runs and
 dry_run_items is written.
 """
 
@@ -93,7 +95,9 @@ async def _open_tx(request: DryRunRequest, now: datetime) -> DryRunContext:
     """Record the run's header with the template set, taxonomy and policy it evaluates with.
 
     A draft in the request takes the place of the version in force and is recorded on the
-    header; the versions in force are only read.
+    header; the versions in force are only read. Re-executed after a rewind, it replaces
+    the header and discards the run's items, so the export never pairs one policy's
+    header with another's items.
     """
     connection = await current().datasource.sql_session().connection()
     configurations = ConfigurationRepository(connection)

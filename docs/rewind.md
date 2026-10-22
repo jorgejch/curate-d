@@ -124,6 +124,20 @@ The other scheduled workflows that start work (`scan_all`, `full_rescan_all`,
 - A verification enqueued by an earlier build carries no attempt. It concludes the
   placement only if the placement is verifying, whatever its attempt.
 
+## Dry runs
+
+A dry run writes only its own results, so starting a new run is always the cheaper repair.
+If a `dry_run` workflow is rewound anyway, rewind it from step 1:
+
+- Its opening transaction re-executes. It reads the policy and template set in force now
+  (a draft comes from the request, as before), writes the header again with them, and
+  discards every item the earlier execution recorded. Every page is then evaluated under
+  that header, and the export never pairs one policy's header with another's items.
+- A rewind from a later step replays the original header and re-evaluates only the pages
+  from that step. The header reads finished until the run closes again, items of the
+  re-run pages that the re-run no longer produces stay, and locators the earlier execution
+  proposed for later content count as taken. Don't.
+
 ## The audit trail
 
 - Re-executed steps append the decisions they reach, beside the original entries.
