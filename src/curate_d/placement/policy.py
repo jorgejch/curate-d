@@ -25,11 +25,13 @@ async def active_policy(configurations: ConfigurationRepository) -> ActivePolicy
         ConfigurationError: the stored policy in force does not read; it names the kind and
             each problem.
     """
-    version = await configurations.ensure(
+    await configurations.ensure(
         ConfigurationKind.POLICY, SEED_POLICY, parse_policy, created_by=SEEDED_BY
     )
+    # Take the version and the document from one read so a concurrent activation cannot split them.
     stored = await configurations.active(ConfigurationKind.POLICY)
     assert stored is not None
-    policy = check_document(ConfigurationKind.POLICY, stored[1], parse_stored_policy)
+    version, document = stored
+    policy = check_document(ConfigurationKind.POLICY, document, parse_stored_policy)
     assert isinstance(policy, PlacementPolicy)
     return ActivePolicy(version=version, policy=policy)

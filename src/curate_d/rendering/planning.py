@@ -54,12 +54,14 @@ async def active_templates(configurations: ConfigurationRepository) -> ActiveTem
         ConfigurationError: the stored template set in force does not read; it names the
             kind and each problem.
     """
-    version = await configurations.ensure(
+    await configurations.ensure(
         ConfigurationKind.TEMPLATES, SEED_TEMPLATES, parse_templates, created_by="seed"
     )
+    # Take the version and the document from one read so a concurrent activation cannot split them.
     stored = await configurations.active(ConfigurationKind.TEMPLATES)
     assert stored is not None
-    templates = check_document(ConfigurationKind.TEMPLATES, stored[1], parse_templates)
+    version, document = stored
+    templates = check_document(ConfigurationKind.TEMPLATES, document, parse_templates)
     assert isinstance(templates, TemplateSet)
     return ActiveTemplates(configuration_version=version, templates=templates)
 
