@@ -13,7 +13,8 @@ A run evaluates with the policy in force, with a draft policy submitted with it,
 against destinations it names, ignoring rules; and with the template set in force or a
 draft one. A draft is carried in the request and recorded on the run's header, never
 stored as a configuration version. Each item names the rules that selected its
-destination, and classified content no rule selects is reported as one `unselected`
+destination, each by its position in the policy and its name, since a policy may hold two
+rules of one name; classified content no rule selects is reported as one `unselected`
 item with no destination.
 
 A locator the run has already proposed for other content counts as taken, as it would be
@@ -47,6 +48,7 @@ from curate_d.domain import (
     SourceObject,
     SourceObjectState,
     VerificationLevel,
+    matches,
 )
 from curate_d.ledger import ContentObjectRepository, PlacementRepository, SourceObjectRepository
 from curate_d.ledger.mapping import (
@@ -111,9 +113,10 @@ class DryRunRequest(DomainModel):
 class DryRun(DomainModel):
     """A dry run's header: when it ran, and what it evaluated with.
 
-    `policy_source` is None for a run recorded before the source was. The draft
-    documents are kept as the JSON they were evaluated as, so a run stays readable
-    whatever later versions of the parser accept.
+    `policy_source` is None for a run recorded before the source was. `policy_rules`
+    names the rules evaluated in policy order, so a rule's index is its position there.
+    The draft documents are kept as the JSON they were evaluated as, so a run stays
+    readable whatever later versions of the parser accept.
     """
 
     id: UUID
@@ -131,6 +134,17 @@ class DryRun(DomainModel):
     templates_document: Mapping[str, object] | None = None
 
 
+class SelectingRule(DomainModel):
+    """A placement rule that selected a destination: its position in the policy, and its name.
+
+    The position tells apart rules that share a name, which a policy may hold; a policy
+    version never changes, so the position stays the rule's for the whole run.
+    """
+
+    index: int = Field(ge=0)
+    name: str
+
+
 class DryRunItem(DomainModel):
     """What the dry run concluded for one content object at one destination."""
 
@@ -144,7 +158,7 @@ class DryRunItem(DomainModel):
     expected_level: VerificationLevel | None = None
     reason: str | None = None
     rejected_values: tuple[RejectedValue, ...] = ()
-    rules: tuple[str, ...] = Field(
+    rules: tuple[SelectingRule, ...] = Field(
         default=(), description="The policy rules that selected the destination, in order."
     )
 
@@ -249,6 +263,15 @@ def _names(row: Row, column: str) -> tuple[str, ...]:
     return tuple(str(name) for name in value) if isinstance(value, list) else ()
 
 
+def _selecting_rules(row: Row) -> tuple[SelectingRule, ...]:
+    """Return an item's JSON list of selecting rules as a tuple."""
+    value = row["rules"]
+    return tuple(
+        SelectingRule.model_validate(rule, strict=False)
+        for rule in (value if isinstance(value, list) else [])
+    )
+
+
 def _to_run(row: Row) -> DryRun:
     """Return a header from its dry_runs row."""
     source = opt_text(row, "policy_source")
@@ -280,7 +303,7 @@ def _item_values(item: DryRunItem) -> dict[str, object]:
         "expected_level": None if item.expected_level is None else int(item.expected_level),
         "reason": item.reason,
         "rejected_values": [value.model_dump(mode="json") for value in item.rejected_values],
-        "rules": list(item.rules),
+        "rules": [rule.model_dump(mode="json") for rule in item.rules],
     }
 
 
@@ -304,8 +327,28 @@ def _to_item(row: Row) -> DryRunItem:
             RejectedValue.model_validate(value, strict=False)
             for value in (values if isinstance(values, list) else [])
         ),
-        rules=_names(row, "rules"),
+        rules=_selecting_rules(row),
     )
+
+
+def selections(policy: PlacementPolicy, facts: Facts) -> dict[str, tuple[SelectingRule, ...]]:
+    """Return each destination a matching rule asks for, with every rule that does.
+
+    `PlacementPolicy.selections` with each rule named by its position too, so two rules
+    of one name stay apart.
+
+    Returns:
+        Destination names in sorted order, each mapped to the matching rules that target
+        it, in policy order.
+    """
+    selected: dict[str, list[SelectingRule]] = {}
+    for index, rule in enumerate(policy.rules):
+        if matches(rule.when, facts):
+            for name in rule.destinations:
+                rules = selected.setdefault(name, [])
+                if not rules or rules[-1].index != index:
+                    rules.append(SelectingRule(index=index, name=rule.name))
+    return {name: tuple(selected[name]) for name in sorted(selected)}
 
 
 async def content_page(
@@ -387,13 +430,13 @@ class Evaluator:
         if content is None:
             return [unresolved.model_copy(update={"reason": "content object is gone"})]
         facts = classification.facts
-        selected: list[tuple[DestinationConfig, tuple[str, ...]]] = [
+        selected: list[tuple[DestinationConfig, tuple[SelectingRule, ...]]] = [
             (destination, ()) for destination in self._destinations
         ]
         if not self._destinations:
             selected = [
                 (destination, rules)
-                for name, rules in self._policy.selections(facts).items()
+                for name, rules in selections(self._policy, facts).items()
                 if (destination := self._policy.destination(name)) is not None
             ]
             if not selected:

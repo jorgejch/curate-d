@@ -111,7 +111,8 @@ class DryRunStatus(BaseModel):
 
     `policy_source` says whether the rules came from the policy in force (whose version
     is `policy_version`), from a draft, or were bypassed by named destinations; it is
-    None until the run starts, and for runs recorded before it was.
+    None until the run starts, and for runs recorded before it was. `policy_rules` names
+    the rules evaluated in policy order: a rule's index is its position there.
     """
 
     run_id: UUID
@@ -135,6 +136,22 @@ class DryRunDrafts(BaseModel):
     templates: dict[str, object] | None = None
 
 
+class ExportedRule(BaseModel):
+    """A rule of the policy evaluated: its index in `policy_rules`, and its name.
+
+    The index tells apart rules that share a name, which a policy may hold.
+    """
+
+    index: int
+    name: str
+
+
+class RuleCount(ExportedRule):
+    """A rule of the policy evaluated, with how many content objects it selected."""
+
+    count: int
+
+
 class ExportedItem(BaseModel):
     """One content object at one destination, as the run evaluated it."""
 
@@ -147,22 +164,23 @@ class ExportedItem(BaseModel):
     expected_verification: str | None = None
     reason: str | None = None
     rejected_values: list[RejectedValue] = []
-    rules: list[str] = []
+    rules: list[ExportedRule] = []
     """The policy rules that selected this destination; empty for named destinations."""
 
 
 class DryRunExport(BaseModel):
     """A run and everything it evaluated.
 
-    `rule_counts` has every rule of the policy evaluated, with how many content objects
-    it selected, so a rule that selects nothing shows as zero. Content no rule selects is
-    counted under the `unselected` outcome.
+    `rule_counts` has one entry per rule of the policy evaluated, in policy order, with
+    how many content objects it selected, so a rule that selects nothing shows as zero and
+    two rules of one name are counted apart. Content no rule selects is counted under the
+    `unselected` outcome.
     """
 
     run: DryRunStatus
     drafts: DryRunDrafts = DryRunDrafts()
     counts: dict[DryRunOutcome, int]
-    rule_counts: dict[str, int] = {}
+    rule_counts: list[RuleCount] = []
     items: list[ExportedItem]
 
 
@@ -229,7 +247,7 @@ def exported(item: DryRunItem) -> ExportedItem:
         else item.expected_level.name.lower(),
         reason=item.reason,
         rejected_values=list(item.rejected_values),
-        rules=list(item.rules),
+        rules=[ExportedRule(index=rule.index, name=rule.name) for rule in item.rules],
     )
 
 
@@ -252,16 +270,21 @@ def export_of(
     destinations it selected for it.
     """
     counts = dict.fromkeys(DryRunOutcome, 0)
-    selected: dict[str, set[ContentObjectId]] = {rule: set() for rule in run.policy_rules}
+    selected: dict[tuple[int, str], set[ContentObjectId]] = {
+        (index, name): set() for index, name in enumerate(run.policy_rules)
+    }
     for item in items:
         counts[item.outcome] += 1
         for rule in item.rules:
-            selected.setdefault(rule, set()).add(item.content_object_id)
+            selected.setdefault((rule.index, rule.name), set()).add(item.content_object_id)
     return DryRunExport(
         run=run,
         drafts=drafts or DryRunDrafts(),
         counts=counts,
-        rule_counts={rule: len(objects) for rule, objects in selected.items()},
+        rule_counts=[
+            RuleCount(index=index, name=name, count=len(selected[index, name]))
+            for index, name in sorted(selected)
+        ],
         items=[exported(item) for item in items],
     )
 

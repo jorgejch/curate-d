@@ -35,10 +35,12 @@ from curate_d.placement.dry_run import (
     DryRunItem,
     DryRunRequest,
     Evaluator,
+    SelectingRule,
     _item_values,
     _run_values,
     _to_item,
     _to_run,
+    selections,
 )
 from curate_d.placement.remotes import RcloneAccess, remote_name
 from curate_d.rendering.planning import RenderFailure
@@ -77,15 +79,18 @@ def test_an_unresolved_item_keeps_its_reason_and_rejected_values() -> None:
 
 
 def test_an_item_keeps_the_rules_that_selected_it() -> None:
-    """Rule names come back in the order they were recorded."""
+    """Each rule comes back with its index and name, in the order they were recorded."""
     item = DryRunItem(
         run_id=uuid4(),
         content_object_id=ContentObjectId(uuid4()),
         destination_name="lib",
         outcome=DryRunOutcome.PROPOSED,
-        rules=("everything", "photos"),
+        rules=(SelectingRule(index=0, name="everything"), SelectingRule(index=2, name="photos")),
     )
-    assert _item_values(item)["rules"] == ["everything", "photos"]
+    assert _item_values(item)["rules"] == [
+        {"index": 0, "name": "everything"},
+        {"index": 2, "name": "photos"},
+    ]
     assert _to_item(_item_values(item)) == item
 
 
@@ -256,8 +261,45 @@ async def test_content_no_rule_selects_is_one_unselected_item() -> None:
 async def test_a_selected_destination_names_its_rules() -> None:
     """Only the matching rule is recorded, and nothing is unselected."""
     [item] = await _evaluator(_PHOTOS_TO_LIBRARY).evaluate(_Ledger.content.id)
-    assert (item.destination_name, item.rules) == ("lib", ("photos",))
+    assert (item.destination_name, item.rules) == ("lib", (SelectingRule(index=1, name="photos"),))
     assert item.outcome is DryRunOutcome.RENDER_FAILED
+
+
+_TWO_COVERAGE_RULES = PlacementPolicy(
+    destinations=(_LIBRARY,),
+    rules=(
+        PlacementRule(name="coverage", when={"media_kind": "photo"}, destinations=("lib",)),
+        PlacementRule(name="coverage", when={"media_kind": "document"}, destinations=("lib",)),
+        PlacementRule(name="coverage", when={"category": "Photos"}, destinations=("lib", "lib")),
+    ),
+)
+
+
+@pytest.mark.usefixtures("ledger")
+async def test_rules_sharing_a_name_are_recorded_apart() -> None:
+    """Each matching rule is named by its index, and one listing a destination twice once."""
+    [item] = await _evaluator(_TWO_COVERAGE_RULES).evaluate(_Ledger.content.id)
+    assert item.rules == (
+        SelectingRule(index=0, name="coverage"),
+        SelectingRule(index=2, name="coverage"),
+    )
+
+
+@pytest.mark.parametrize(
+    "facts",
+    [
+        _FACTS,
+        Facts(media_kind=MediaKind.DOCUMENT, category="Receipts"),
+        Facts(media_kind=MediaKind.VIDEO),
+    ],
+)
+def test_selections_select_the_destinations_the_policy_does(facts: Facts) -> None:
+    """The destinations and rule names agree with the policy's own selections."""
+    for policy in (_PHOTOS_TO_LIBRARY, _TWO_COVERAGE_RULES, PlacementPolicy()):
+        assert {
+            name: tuple(dict.fromkeys(rule.name for rule in rules))
+            for name, rules in selections(policy, facts).items()
+        } == policy.selections(facts)
 
 
 @pytest.mark.usefixtures("ledger")

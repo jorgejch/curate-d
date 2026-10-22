@@ -741,8 +741,8 @@ dry_run_items = Table(
         JSONB,
         nullable=False,
         server_default=text("'[]'::jsonb"),
-        comment="The placement rules that selected this destination; empty when the run "
-        "named its destinations.",
+        comment="The placement rules that selected this destination, each as its index in "
+        "dry_runs.policy_rules and its name; empty when the run named its destinations.",
     ),
     PrimaryKeyConstraint("run_id", "content_object_id", "destination_name"),
     CheckConstraint(

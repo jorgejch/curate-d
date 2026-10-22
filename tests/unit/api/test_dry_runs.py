@@ -14,7 +14,9 @@ from curate_d.api import dry_runs as module
 from curate_d.api.dry_runs import (
     DryRunDrafts,
     DryRunStatus,
+    ExportedRule,
     LedgerDryRuns,
+    RuleCount,
     RunState,
     drafts_of,
     export_of,
@@ -36,7 +38,13 @@ from curate_d.domain import (
     TaxonomyField,
     VerificationLevel,
 )
-from curate_d.placement.dry_run import NO_DESTINATION, DryRun, DryRunItem, DryRunRequest
+from curate_d.placement.dry_run import (
+    NO_DESTINATION,
+    DryRun,
+    DryRunItem,
+    DryRunRequest,
+    SelectingRule,
+)
 from curate_d.rendering.templates import SEED_TEMPLATES
 from tests.unit.api.fakes import FakeDryRuns, backends, client
 
@@ -346,6 +354,10 @@ def test_the_status_says_what_the_run_evaluated_with() -> None:
     )
 
 
+_EVERYTHING = SelectingRule(index=0, name="everything")
+_PHOTOS = SelectingRule(index=1, name="photos")
+
+
 def test_the_export_names_the_selecting_rules_and_counts_every_rule() -> None:
     """Each item carries its rules; a rule that selected nothing is counted as zero."""
     run_id = uuid4()
@@ -356,7 +368,7 @@ def test_the_export_names_the_selecting_rules_and_counts_every_rule() -> None:
             content_object_id=photo,
             destination_name=name,
             outcome=DryRunOutcome.PROPOSED,
-            rules=("everything", "photos"),
+            rules=(_EVERYTHING, _PHOTOS),
         )
         for name in ("backup", "library")
     ] + [
@@ -365,7 +377,7 @@ def test_the_export_names_the_selecting_rules_and_counts_every_rule() -> None:
             content_object_id=other,
             destination_name="library",
             outcome=DryRunOutcome.RENDER_FAILED,
-            rules=("everything",),
+            rules=(_EVERYTHING,),
         )
     ]
     status = _finished(run_id).model_copy(
@@ -380,14 +392,40 @@ def test_the_export_names_the_selecting_rules_and_counts_every_rule() -> None:
     )
     with client(replace(backends(), dry_runs=fake)) as http:
         exported = http.get(f"/dry-runs/{run_id}/export").json()
+    everything, photos = {"index": 0, "name": "everything"}, {"index": 1, "name": "photos"}
     assert [item["rules"] for item in exported["items"]] == [
-        ["everything", "photos"],
-        ["everything", "photos"],
-        ["everything"],
+        [everything, photos],
+        [everything, photos],
+        [everything],
     ]
-    assert exported["rule_counts"] == {"everything": 2, "photos": 1, "receipts": 0}
+    assert exported["rule_counts"] == [
+        everything | {"count": 2},
+        photos | {"count": 1},
+        {"index": 2, "name": "receipts", "count": 0},
+    ]
     assert exported["run"]["policy_source"] == "draft"
     assert exported["drafts"] == {"policy": _DRAFT_POLICY, "templates": None}
+
+
+def test_rules_sharing_a_name_are_counted_apart() -> None:
+    """Two rules named coverage that selected one object and none show both counts."""
+    run_id = uuid4()
+    item = DryRunItem(
+        run_id=run_id,
+        content_object_id=ContentObjectId(uuid4()),
+        destination_name="library",
+        outcome=DryRunOutcome.PROPOSED,
+        rules=(SelectingRule(index=0, name="coverage"),),
+    )
+    status = _finished(run_id).model_copy(
+        update={"policy_source": PolicySource.DRAFT, "policy_rules": ["coverage", "coverage"]}
+    )
+    export = export_of(status, [item])
+    assert export.rule_counts == [
+        RuleCount(index=0, name="coverage", count=1),
+        RuleCount(index=1, name="coverage", count=0),
+    ]
+    assert export.items[0].rules == [ExportedRule(index=0, name="coverage")]
 
 
 def test_unselected_content_is_counted_under_its_outcome_and_by_no_rule() -> None:
@@ -405,7 +443,7 @@ def test_unselected_content_is_counted_under_its_outcome_and_by_no_rule() -> Non
     )
     export = export_of(status, [unselected])
     assert export.counts[DryRunOutcome.UNSELECTED] == 1
-    assert export.rule_counts == {"photos": 0}
+    assert export.rule_counts == [RuleCount(index=0, name="photos", count=0)]
     [item] = export.items
     assert (item.destination, item.rules, item.locator) == (NO_DESTINATION, [], None)
     assert item.facts == unselected.facts
@@ -416,7 +454,7 @@ def test_a_run_with_named_destinations_counts_no_rules() -> None:
     run_id = uuid4()
     status = _finished(run_id).model_copy(update={"policy_source": PolicySource.DESTINATIONS})
     export = export_of(status, _items(run_id))
-    assert export.rule_counts == {}
+    assert export.rule_counts == []
     assert all(item.rules == [] for item in export.items)
     assert export.counts[DryRunOutcome.UNSELECTED] == 0
 

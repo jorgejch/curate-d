@@ -176,9 +176,11 @@ async def test_a_draft_policy_is_dry_run_without_being_activated(
         if i["content_object_id"] == str(content_id) and i["destination"] == name
     ]
     assert item["locator"] == "/Drafted/Photos/2024/2024-05/IMG_0001.JPG"
-    assert item["rules"] == ["photos"]
-    assert exported["rule_counts"]["photos"] >= 1
-    assert exported["rule_counts"]["archived-photos"] == 0
+    assert item["rules"] == [{"index": 0, "name": "photos"}]
+    photos, archived = exported["rule_counts"]
+    assert (photos["index"], photos["name"]) == (0, "photos")
+    assert photos["count"] >= 1
+    assert archived == {"index": 1, "name": "archived-photos", "count": 0}
     assert exported["drafts"]["policy"]["rules"][0]["name"] == "photos"
     assert http.get("/configuration/policy").json() == policy_before
     assert http.get("/configuration/policy/history").json() == history_before

@@ -35,6 +35,7 @@ from curate_d.placement.dry_run import (
     DryRunRequest,
     DryRunStore,
     Evaluator,
+    SelectingRule,
 )
 from curate_d.placement.policy import active_policy
 from curate_d.rendering.collision import disambiguate
@@ -308,7 +309,7 @@ async def test_a_draft_policy_decides_and_the_policy_in_force_is_unchanged(
         assert item.destination_name == name
         assert item.outcome is DryRunOutcome.PROPOSED
         assert item.locator == f"/Drafted/Photos/2024/2024-05/{file_name}"
-        assert item.rules == ("photos",)
+        assert item.rules == (SelectingRule(index=0, name="photos"),)
 
         assert await _policy_state(ledger_engine) == policy_before
         assert await _counts(ledger_engine, {content_id}) == before

@@ -47,7 +47,7 @@ The control plane SHALL allow a user to view and edit the taxonomy, path templat
 
 ### Requirement: Dry-run result export
 
-The control plane SHALL expose the results of a dry run in a form suitable for reviewing proposed organization in bulk. The export SHALL include the facts derived for each content object, the proposed locator, and any items that failed classification or rendering. When the run evaluated a policy's rules, each proposed destination SHALL name the rules that selected it. Every rule of the evaluated policy SHALL be counted, and classified content that no rule selects SHALL be reported.
+The control plane SHALL expose the results of a dry run in a form suitable for reviewing proposed organization in bulk. The export SHALL include the facts derived for each content object, the proposed locator, and any items that failed classification or rendering. When the run evaluated a policy's rules, each proposed destination SHALL name the rules that selected it, each by its position in the policy and its name. Every rule of the evaluated policy SHALL be counted, apart from any other rule of the same name, and classified content that no rule selects SHALL be reported.
 
 #### Scenario: Dry-run results exported
 - **WHEN** a user requests the results of a completed dry run
@@ -64,8 +64,12 @@ The control plane SHALL expose the results of a dry run in a form suitable for r
 
 #### Scenario: Export names the selecting rule
 - **WHEN** a user exports a dry run evaluated with a policy's rules
-- **THEN** each item names the rules that selected its destination, in policy order
-- **AND** every rule of the evaluated policy is counted by the content objects it selected, a rule that selected nothing as zero
+- **THEN** each item names the rules that selected its destination, in policy order, each by its position in the policy and its name
+- **AND** every rule of the evaluated policy is counted by the content objects it selected, in policy order, a rule that selected nothing as zero
+
+#### Scenario: Rules sharing a name counted apart
+- **WHEN** a user exports a dry run whose policy holds two rules of one name, one selecting a content object and the other selecting none
+- **THEN** the rule counts hold one entry for each rule, by position, with counts 1 and 0
 
 #### Scenario: Content no rule selects
 - **WHEN** a dry run evaluated with a policy's rules reaches classified content that no rule selects

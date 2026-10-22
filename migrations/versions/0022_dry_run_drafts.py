@@ -112,8 +112,8 @@ def upgrade() -> None:
             postgresql.JSONB(astext_type=sa.Text()),
             server_default=sa.text("'[]'::jsonb"),
             nullable=False,
-            comment="The placement rules that selected this destination; empty when the run "
-            "named its destinations.",
+            comment="The placement rules that selected this destination, each as its index in "
+            "dry_runs.policy_rules and its name; empty when the run named its destinations.",
         ),
     )
     op.drop_constraint("ck_dry_run_items_outcome_known", "dry_run_items", type_="check")
