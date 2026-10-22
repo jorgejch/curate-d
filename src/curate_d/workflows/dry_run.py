@@ -18,10 +18,12 @@ from uuid import UUID
 
 from dbos import DBOS, SetWorkflowID
 
-from curate_d.classification.taxonomy import active_taxonomy
+from curate_d.classification.taxonomy import SEEDED_BY, active_taxonomy
 from curate_d.configuration.consistency import check_against
+from curate_d.configuration.documents import parse_taxonomy
 from curate_d.configuration.store import ConfigurationError, ConfigurationRepository
 from curate_d.domain import (
+    SEED_TAXONOMY,
     ConfigurationKind,
     ContentObjectId,
     DomainModel,
@@ -135,6 +137,9 @@ async def _open_tx(request: DryRunRequest, now: datetime) -> DryRunContext:
     """
     connection = await current().datasource.sql_session().connection()
     configurations = ConfigurationRepository(connection)
+    await configurations.ensure(
+        ConfigurationKind.TAXONOMY, SEED_TAXONOMY, parse_taxonomy, created_by=SEEDED_BY
+    )
     await configurations.lock_shared(ConfigurationKind.TAXONOMY)
     taxonomy = await active_taxonomy(configurations)
     try:
