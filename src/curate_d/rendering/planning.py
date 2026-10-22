@@ -12,7 +12,7 @@ from typing import Final
 from pydantic import AwareDatetime, Field
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from curate_d.configuration.store import ConfigurationRepository
+from curate_d.configuration.store import ConfigurationRepository, check_document
 from curate_d.domain import (
     AuditEntry,
     AuditEntryType,
@@ -47,13 +47,20 @@ class ActiveTemplates(DomainModel):
 
 
 async def active_templates(configurations: ConfigurationRepository) -> ActiveTemplates:
-    """The active template set, storing the seed as version 1 if none was ever stored."""
+    """Return the active template set, storing the seed as version 1 if none was ever stored.
+
+    Raises:
+        ConfigurationError: the stored template set in force does not read; it names the
+            kind and each problem.
+    """
     version = await configurations.ensure(
         ConfigurationKind.TEMPLATES, SEED_TEMPLATES, parse_templates, created_by="seed"
     )
     stored = await configurations.active(ConfigurationKind.TEMPLATES)
     assert stored is not None
-    return ActiveTemplates(configuration_version=version, templates=parse_templates(stored[1]))
+    templates = check_document(ConfigurationKind.TEMPLATES, stored[1], parse_templates)
+    assert isinstance(templates, TemplateSet)
+    return ActiveTemplates(configuration_version=version, templates=templates)
 
 
 class PlacementPlan(DomainModel):
