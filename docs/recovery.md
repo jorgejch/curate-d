@@ -146,7 +146,9 @@ a budget of 15 minutes: promote the new version (`python -m curate_d.runtime.pro
 Rollback and roll-forward), so schedules and new enqueues move to it within one
 `schedule_reconciliation_interval_seconds`; let the old version's workers drain what they
 hold; stop them after at most 15 minutes. What they leave is forked by the sweep, and that
-fork is the exception, not the deploy path. A drain command and the pipeline gate are #74.
+fork is the exception, not the deploy path. Until #74 caps it, a placement waiting for scratch
+or admission is the exception's main source: its wait loop can run about 90 minutes, longer
+than the drain. The drain command, the wait cap and the pipeline gate are #74.
 
 A forked row is reconstructed by `DomainModel.__setstate__`: a field added since the row was
 pickled reads as its declared default, which must mean what the old build did; a required
