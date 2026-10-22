@@ -46,11 +46,31 @@ def _readable() -> list[StoredVersion]:
     ]
 
 
+class _Engine:
+    """Stand in for the engine main builds, recording whether it was disposed."""
+
+    def __init__(self) -> None:
+        """Start undisposed."""
+        self.disposed = False
+
+    def dispose(self) -> None:
+        """Record the dispose."""
+        self.disposed = True
+
+
 @pytest.fixture
-def stored(monkeypatch: pytest.MonkeyPatch) -> list[StoredVersion]:
+def engine(monkeypatch: pytest.MonkeyPatch) -> _Engine:
+    """Hand main a fake engine in place of a real one."""
+    fake = _Engine()
+    monkeypatch.setattr(verify, "open_engine", lambda settings: fake)
+    return fake
+
+
+@pytest.fixture
+def stored(monkeypatch: pytest.MonkeyPatch, engine: _Engine) -> list[StoredVersion]:
     """Serve main's rows from a list the test fills."""
     rows: list[StoredVersion] = []
-    monkeypatch.setattr(verify, "read_stored", lambda settings: rows)
+    monkeypatch.setattr(verify, "read_stored", lambda engine: rows)
     monkeypatch.setattr(verify, "get_settings", Settings)
     monkeypatch.setattr(verify, "configure_logging", lambda **kwargs: None)
     return rows
@@ -132,7 +152,7 @@ def test_a_database_error_exits_two(
 ) -> None:
     """Nothing was checked, so the command neither passes nor blames a version."""
 
-    def fail(settings: Settings) -> list[StoredVersion]:
+    def fail(engine: object) -> list[StoredVersion]:
         """Simulate an unreachable ledger database."""
         raise sa_exc.OperationalError("SELECT", {}, Exception("connection refused"))
 
@@ -141,6 +161,58 @@ def test_a_database_error_exits_two(
         assert verify.main([]) == verify.EXIT_DATABASE_UNREADABLE
     assert [event["event"] for event in events] == ["configuration_verify.database_unreadable"]
     assert "connection refused" in events[0]["error"]
+
+
+def test_the_engine_is_disposed_after_the_read(
+    stored: list[StoredVersion], engine: _Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed read still releases the engine."""
+
+    def fail(engine: object) -> list[StoredVersion]:
+        """Simulate an unreachable ledger database."""
+        raise sa_exc.OperationalError("SELECT", {}, Exception("connection refused"))
+
+    monkeypatch.setattr(verify, "read_stored", fail)
+    assert verify.main([]) == verify.EXIT_DATABASE_UNREADABLE
+    assert engine.disposed
+
+
+def test_invalid_settings_exit_two(
+    stored: list[StoredVersion], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A malformed database URL is a setup problem, logged without the URL's password."""
+    monkeypatch.setenv("CURATE_D_LEDGER_DATABASE_URL", "mysql://u:dsn-pw@db/ledger")
+    with capture_logs() as events:
+        assert verify.main([]) == verify.EXIT_DATABASE_UNREADABLE
+    assert [event["event"] for event in events] == ["configuration_verify.setup_failed"]
+    assert "ledger_database_url" in events[0]["error"]
+    assert "dsn-pw" not in events[0]["error"]
+
+
+def test_a_missing_database_driver_exits_two(
+    stored: list[StoredVersion], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An engine that cannot load its driver checks nothing."""
+
+    def fail(settings: Settings) -> object:
+        """Simulate a driver absent from the image."""
+        raise ModuleNotFoundError("No module named 'psycopg'")
+
+    monkeypatch.setattr(verify, "open_engine", fail)
+    with capture_logs() as events:
+        assert verify.main([]) == verify.EXIT_DATABASE_UNREADABLE
+    assert [event["event"] for event in events] == ["configuration_verify.setup_failed"]
+    assert "psycopg" in events[0]["error"]
+
+
+def test_an_unknown_dialect_exits_two(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real engine factory's dialect error is caught as a setup failure."""
+    monkeypatch.setenv("CURATE_D_LEDGER_DATABASE_URL", "postgresql+nodriver://ledger@localhost/db")
+    monkeypatch.setattr(verify, "get_settings", Settings)
+    monkeypatch.setattr(verify, "configure_logging", lambda **kwargs: None)
+    with capture_logs() as events:
+        assert verify.main([]) == verify.EXIT_DATABASE_UNREADABLE
+    assert [event["event"] for event in events] == ["configuration_verify.setup_failed"]
 
 
 def test_arguments_are_refused() -> None:

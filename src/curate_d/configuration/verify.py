@@ -19,8 +19,9 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
 
-from pydantic import BaseModel
-from sqlalchemy import create_engine, select
+from pydantic import BaseModel, ValidationError
+from pydantic_settings import SettingsError
+from sqlalchemy import Engine, create_engine, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.pool import NullPool
 
@@ -38,7 +39,7 @@ EXIT_IN_FORCE_UNREADABLE: Final = 1
 """A version in force does not read; this build would fail every read of its kind."""
 
 EXIT_DATABASE_UNREADABLE: Final = 2
-"""The configurations could not be read from the database; nothing was checked."""
+"""Settings, engine or read failed before any version was parsed; nothing was checked."""
 
 _READERS: Final[Mapping[ConfigurationKind, Callable[[Mapping[str, object]], BaseModel]]] = {
     ConfigurationKind.TAXONOMY: parse_taxonomy,
@@ -113,26 +114,32 @@ def verify(rows: Iterable[StoredVersion]) -> Report:
     return Report(checked=checked, failures=tuple(failures))
 
 
-def read_stored(settings: Settings) -> list[StoredVersion]:
+def open_engine(settings: Settings) -> Engine:
+    """Return an unpooled engine on the ledger database; nothing connects yet.
+
+    Raises:
+        SQLAlchemyError: The URL names a dialect SQLAlchemy cannot load.
+        ImportError: The dialect's database driver is not installed.
+    """
+    return create_engine(str(settings.ledger_database_url), poolclass=NullPool)
+
+
+def read_stored(engine: Engine) -> list[StoredVersion]:
     """Return every stored configuration version, read on a read-only connection.
 
     Raises:
         SQLAlchemyError: Connecting to or querying the ledger database failed.
     """
-    engine = create_engine(str(settings.ledger_database_url), poolclass=NullPool)
-    try:
-        with engine.connect() as connection:
-            readonly = connection.execution_options(postgresql_readonly=True)
-            rows = readonly.execute(
-                select(
-                    configurations.c.kind,
-                    configurations.c.version,
-                    configurations.c.active,
-                    configurations.c.document,
-                ).order_by(configurations.c.kind, configurations.c.version)
-            ).all()
-    finally:
-        engine.dispose()
+    with engine.connect() as connection:
+        readonly = connection.execution_options(postgresql_readonly=True)
+        rows = readonly.execute(
+            select(
+                configurations.c.kind,
+                configurations.c.version,
+                configurations.c.active,
+                configurations.c.document,
+            ).order_by(configurations.c.kind, configurations.c.version)
+        ).all()
     return [
         StoredVersion(kind=kind, version=version, active=active, document=document)
         for kind, version, active, document in rows
@@ -145,7 +152,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     Returns:
         0 when every version in force reads, even if older versions fail (they are
         logged); `EXIT_IN_FORCE_UNREADABLE` when a version in force does not read;
-        `EXIT_DATABASE_UNREADABLE` when the database could not be read.
+        `EXIT_DATABASE_UNREADABLE` when the settings did not load, the engine could not
+        be built or the database could not be read, before any version was parsed.
     """
     parser = argparse.ArgumentParser(
         prog="python -m curate_d.configuration.verify",
@@ -154,11 +162,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.parse_args(argv)
     configure_logging(level=logging.INFO)
 
+    # A setup failure must not leave as an uncaught exception: Python would exit 1, which
+    # reads as "a version in force does not read". Settings errors carry no input values.
     try:
-        rows = read_stored(get_settings())
+        engine = open_engine(get_settings())
+    except (ValidationError, SettingsError, SQLAlchemyError, ImportError) as failed:
+        logger.error("configuration_verify.setup_failed", error=str(failed))
+        return EXIT_DATABASE_UNREADABLE
+    try:
+        rows = read_stored(engine)
     except SQLAlchemyError as unreadable:
         logger.error("configuration_verify.database_unreadable", error=str(unreadable))
         return EXIT_DATABASE_UNREADABLE
+    finally:
+        engine.dispose()
     report = verify(rows)
     for failure in report.failures:
         log = logger.error if failure.active else logger.warning

@@ -130,7 +130,7 @@ kubectl -n <namespace> exec statefulset/curate-d-worker-io -- python -m curate_d
   | --- | --- |
   | `0` | Every version in force reads. Older versions that fail are listed but don't change the code. |
   | `1` | A version in force does not read. Don't roll out. |
-  | `2` | The database could not be read (`configuration_verify.database_unreadable`), or invalid arguments; nothing was checked. |
+  | `2` | The database could not be read (`configuration_verify.database_unreadable`), the settings did not load or the engine could not be built (`configuration_verify.setup_failed`), or invalid arguments; nothing was checked. |
 - **Recovery:** `PUT` a corrected document for each failing kind through the current build's
   control plane, one the new build also reads, which makes it the version in force; then run
   the check again until it exits `0`. Policy and template activation never read the version
