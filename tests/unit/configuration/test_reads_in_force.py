@@ -33,7 +33,10 @@ _UNKNOWN_PROFILE: dict[str, object] = {
     "rules": [],
     "retention": [],
 }
-_UNKNOWN_MEDIA_KIND: dict[str, object] = {"templates": [{"name": "x", "when": {"media_kind": "x"}}]}
+_UNKNOWN_MEDIA_KIND: dict[str, object] = {
+    "version": "v1",
+    "templates": [{"name": "x", "path": "{original_name}", "when": {"media_kind": "x"}}],
+}
 
 
 @dataclass
@@ -72,11 +75,11 @@ async def test_a_policy_in_force_naming_an_unknown_profile_raises_a_configuratio
 async def test_a_template_set_in_force_on_an_unknown_media_kind_raises_a_configuration_error() -> (
     None
 ):
-    """The error names the templates kind and each problem."""
+    """The error names the templates kind and the unknown `media_kind`."""
     repository = cast(ConfigurationRepository, _Repository(_UNKNOWN_MEDIA_KIND))
 
     with pytest.raises(ConfigurationError, match="invalid templates configuration") as raised:
         await active_templates(repository)
 
     assert raised.value.kind is ConfigurationKind.TEMPLATES
-    assert raised.value.problems
+    assert any("media_kind 'x'" in problem for problem in raised.value.problems)
