@@ -311,7 +311,9 @@ async def place_content(request: PlacementRequest) -> PlaceOutcome:
             deferred = await datasource.run_tx_step_async(
                 {"name": "defer_placement"}, _defer_tx, placement.id, failure, placement.attempts
             )
-            if not deferred:
+            # A build before this one checkpointed None here: its deferral was recorded,
+            # and only an explicit False means the attempt was superseded.
+            if deferred is False:
                 logger.info(
                     "placement.superseded",
                     placement_id=str(placement.id),
