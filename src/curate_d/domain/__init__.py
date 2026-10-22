@@ -11,7 +11,7 @@ from curate_d.domain.audit import (
     AuditEntryType,
     AuditValue,
 )
-from curate_d.domain.base import DomainModel
+from curate_d.domain.base import DomainModel, StaleCheckpointError
 from curate_d.domain.conditions import (
     CONDITION_FIELDS,
     check_conditions,
@@ -136,6 +136,7 @@ __all__ = [
     "SourceObject",
     "SourceObjectId",
     "SourceObjectState",
+    "StaleCheckpointError",
     "StrongFingerprint",
     "Taxonomy",
     "TaxonomyField",
