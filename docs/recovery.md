@@ -137,6 +137,22 @@ kubectl -n <namespace> exec statefulset/curate-d-worker-io -- python -m curate_d
   in force, so their `PUT` succeeds while it is unreadable. A taxonomy `PUT` is refused while a
   policy or template set in force does not read, so correct those first.
 
+**Pickled rows across a deploy.** DBOS pickles workflow inputs and step outputs, so a row
+written by the build being replaced reaches the new one whenever the recovery sweep forks it
+across versions, and a fork copies every completed step's output. A deploy is blue-green with
+a budget of 15 minutes: promote the new version (`python -m curate_d.runtime.promote`, under
+Rollback and roll-forward), so schedules and new enqueues move to it within one
+`schedule_reconciliation_interval_seconds`; let the old version's workers drain what they
+hold; stop them after at most 15 minutes. What they leave is forked by the sweep, and that
+fork is the exception, not the deploy path. A drain command and the pipeline gate are #74.
+
+A forked row is reconstructed by `DomainModel.__setstate__`: a field added since the row was
+pickled reads as its declared default, which must mean what the old build did; a required
+field the pickle lacks raises `StaleCheckpointError`, naming the model and the fields, and
+the row ends ERROR (Triage). A change that adds a required field to a pickled model, or
+retypes one, is therefore a breaking deploy: the drain must reach zero before the old workers
+stop. Say so in the PR.
+
 ## Rollback and roll-forward
 
 DBOS registers a version again without retiming it. A build deployed a second time, by
@@ -222,6 +238,14 @@ of a still-pending row. Its successor isn't the recovery successor
 original's lineage (`DBOSClient.list_workflows(forked_from=<id>)`). Once the hand fork is the
 one you want, cancel the original with `DBOSClient.cancel_workflow(<id>)`, and the sweep stops
 reporting it.
+
+**`StaleCheckpointError` in a workflow's error.** A row pickled by an older build reached
+this one lacking a required field; its forked successor ended ERROR before any step ran. It
+is a deploy that stopped the old workers before they drained, or a hand fork. Nothing is
+half-done: the error is raised while the input or a copied step output is reconstructed. A
+placement is started again by the next reconciliation pass; a reconcile part runs again on
+its schedule; a dry run is started again by hand. Then find the field in the error and the
+build that added it without a default, since that is the bug.
 
 **Hand resume and fork.** Always pass `queue_name` (and `queue_partition_key` on a
 partitioned queue). Without one, DBOS assigns its internal queue, which every worker dequeues.
@@ -318,7 +342,10 @@ a cancel, schedule authority check to write, and prune re-read to delete.
   target. The lease monitor polls every 5 s, so a worker can also run briefly after losing
   its lease.
 - **No replay compatibility check.** A fork onto code that can't replay the original's
-  checkpoints isn't prevented. Review a version bump for replay compatibility.
+  checkpoints isn't prevented. A missing required field fails by name (`StaleCheckpointError`,
+  Triage) and an added field with a default is filled, but a retyped or renamed field, or a
+  changed step sequence, is not detected. Review a version bump for replay compatibility; the
+  pickled-model baseline test of #74 makes the first case a declared decision.
 - **The fork boundary.** A fork copies step outputs only. A ledger transaction that committed
   without its step checkpoint runs again under the successor.
 - **dbos-transact-py#886.** A superseded execution's exception can become a datasource step's
