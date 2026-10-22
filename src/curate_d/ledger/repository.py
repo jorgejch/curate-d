@@ -263,11 +263,18 @@ class PlacementRepository:
         result = await self._connection.execute(upsert)
         return to_placement(result.mappings().one())
 
-    async def get(self, placement_id: PlacementId) -> Placement | None:
-        """Fetch a placement by its derived identifier, or None if absent."""
-        result = await self._connection.execute(
-            select(placements).where(placements.c.id == placement_id)
-        )
+    async def get(self, placement_id: PlacementId, *, for_update: bool = False) -> Placement | None:
+        """Fetch a placement by its derived identifier, or None if absent.
+
+        Args:
+            placement_id: The placement to fetch.
+            for_update: Lock the row (`FOR UPDATE`) until the transaction ends, so a
+                read, check and write on it cannot interleave with another one's.
+        """
+        statement = select(placements).where(placements.c.id == placement_id)
+        if for_update:
+            statement = statement.with_for_update()
+        result = await self._connection.execute(statement)
         row = result.mappings().one_or_none()
         return to_placement(row) if row is not None else None
 

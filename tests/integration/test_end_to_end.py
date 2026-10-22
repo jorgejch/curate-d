@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from curate_d.api.app import create_app
 from curate_d.config import Settings
 from curate_d.configuration.documents import parse_policy, parse_taxonomy
-from curate_d.configuration.store import ConfigurationRepository
+from curate_d.configuration.store import ConfigurationRepository, DocumentValidator
 from curate_d.domain import (
     AuditEntryType,
     ConfigurationKind,
@@ -74,7 +74,7 @@ from tests.integration.transfer_harness import (
 pytestmark = pytest.mark.integration
 
 type Activate = Callable[[ConfigurationKind, dict[str, object]], Awaitable[None]]
-_PARSERS = {
+_PARSERS: dict[ConfigurationKind, DocumentValidator] = {
     ConfigurationKind.TAXONOMY: parse_taxonomy,
     ConfigurationKind.TEMPLATES: parse_templates,
     ConfigurationKind.POLICY: parse_policy,

@@ -448,7 +448,8 @@ async def test_retention_follows_the_strongly_verified_copies(
     names: tuple[str, str],
 ) -> None:
     """Retained while the original is needed, permitted with two strong copies, withdrawn
-    when one is found weaker; each decision audited with its inputs and rule."""
+    when one is found weaker; each decision, and each new policy version, audited with its
+    inputs and rule."""
     library, offsite = names
     rule = RetentionRule(name="archive", release_source=True, required_copies=2)
     await activate(_policy(library, retention=(rule,)))
@@ -461,7 +462,7 @@ async def test_retention_follows_the_strongly_verified_copies(
         await _reconcile(pipeline, content_id)  # places the copy; the original is still needed
         await _reconcile(pipeline, content_id)
         await activate(_policy(library, offsite, retention=(rule,)))
-        await _reconcile(pipeline, content_id)  # places the second copy
+        await _reconcile(pipeline, content_id)  # same decision, new version; places the 2nd copy
         await _reconcile(pipeline, content_id)
         async with ledger_engine.begin() as connection:
             repository = PlacementRepository(connection)
@@ -474,20 +475,82 @@ async def test_retention_follows_the_strongly_verified_copies(
         decisions = await _audit(ledger_engine, content_id, AuditEntryType.RETENTION_DECIDED, since)
         assert [(d.details["outcome"], d.details["reason"]) for d in decisions] == [
             ("retain", "0 of 2 required copies are strongly verified"),
-            ("retain", "the original is one of the 2 required copies; releasing it would leave 1"),
+            ("retain", "1 of 2 required copies are strongly verified"),
+            ("retain", "1 of 2 required copies are strongly verified"),
             (
                 "release_permitted",
                 "2 strongly verified copies meet the 2 required without the original",
             ),
             (
                 "retain",
-                "the original is one of the 2 required copies; releasing it would leave 1; "
-                f"1 weaker copies do not count ({offsite})",
+                "1 of 2 required copies are strongly verified; 1 weaker copies do not count "
+                f"({offsite})",
             ),
         ]
+        assert decisions[1].details["policy_version"] != decisions[2].details["policy_version"]
         assert decisions[-1].details["rule"] == "archive"
+        assert "source_counts_as_copy" not in decisions[-1].details
         assert decisions[-1].details["weak_copies"] == offsite
         assert decisions[-1].details["strong_copies"] == library
+
+
+async def test_a_copy_at_a_destination_dropped_from_the_policy_stops_counting(
+    settings: Settings,
+    ledger_engine: AsyncEngine,
+    tmp_path: Path,
+    daemon: tuple[RcloneClient, str],
+    activate: Activate,
+    names: tuple[str, str],
+) -> None:
+    """Dropped from the policy, a destination is no longer checked, so a copy lost there
+    stays present in the ledger; retention stops counting it and names it."""
+    library, offsite = names
+    rule = RetentionRule(name="archive", release_source=True, required_copies=2)
+    await activate(_policy(library, offsite, retention=(rule,)))
+    rclone, workspace = daemon
+    access = ScriptedAccess()
+    check = reconcile.check_schedule(
+        settings.model_copy(update={"destination_check_schedule": "0 2 * * *"})
+    )
+    check["schedule_name"] = f"{check['schedule_name']}-{uuid4().hex[:8]}"
+    async with transfer_pipeline(
+        settings, ledger_engine, tmp_path, WorkspaceRemotes(workspace), access
+    ) as pipeline:
+        content_id = (await _ingest(pipeline, daemon))[_DATED]
+        since = await _high_water(ledger_engine)
+        await _reconcile(pipeline, content_id)  # places both copies
+        await _reconcile(pipeline, content_id)
+        [*_, permitted] = await _audit(
+            ledger_engine, content_id, AuditEntryType.RETENTION_DECIDED, since
+        )
+        assert permitted.details["outcome"] == "release_permitted"
+
+        await activate(_policy(library, retention=(rule,)))
+        lost = (await _placements(ledger_engine, content_id))[offsite]
+        await rclone.delete("/", f"{workspace}/destination{lost.locator}")
+        since = await _high_water(ledger_engine)
+        await _backfill(pipeline, check)
+        summary = await _reconcile(pipeline, content_id)
+
+        async with ledger_engine.connect() as connection:
+            store = ReconciliationStore(connection)
+            assert await store.checks([offsite]) == []
+            [checked] = await store.checks([library])
+        assert (checked.reachable, checked.absent) == (True, 0)
+        assert await _audit(ledger_engine, content_id, AuditEntryType.PLACEMENT_ABSENT, since) == []
+        assert (await _placements(ledger_engine, content_id))[offsite] == lost
+        [decision] = await _audit(
+            ledger_engine, content_id, AuditEntryType.RETENTION_DECIDED, since
+        )
+        assert (decision.details["outcome"], decision.details["reason"]) == (
+            "retain",
+            "1 of 2 required copies are strongly verified; "
+            f"1 copies at destinations no longer in the policy do not count ({offsite})",
+        )
+        assert decision.details["strong_copies"] == library
+        assert decision.details["unchecked_copies"] == offsite
+        assert (summary.placed, summary.satisfied) == (0, 1)
+        assert access.copies == 2
 
 
 async def test_a_render_failure_opens_one_review_item_and_places_nothing(

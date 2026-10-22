@@ -105,6 +105,58 @@ through it. `compose.yaml` connects directly, with server-side `tcp_keepalives_*
 For capacity, count one extra short-lived pooler client per I/O replica per reconciliation
 interval, on top of each worker's two long-lived lease sessions.
 
+## Before deploying
+
+A build reads every stored configuration version as strictly as a submission, except for the
+taxonomy check and retired fields. A version in force that it cannot read, such as a policy
+naming a profile it dropped or a template set conditioned on an unknown `media_kind`, fails
+every read of its kind: reconciliation, classification, review resolution and dry runs fail
+with a `ConfigurationError`, `GET /configuration/<kind>` fails, and
+`PUT /configuration/taxonomy` is refused. Check the stored versions first:
+
+```bash
+kubectl -n <namespace> exec statefulset/curate-d-worker-io -- python -m curate_d.configuration.verify
+```
+
+- **When:** before the rollout, from the image about to be deployed, against the target
+  database. Run from the current build, it checks nothing the new build changed.
+- **What it checks:** it parses every stored version of every kind with the read parsers,
+  on one read-only connection, and writes nothing. Each version that fails is logged as
+  `configuration_verify.unreadable` with its kind, version, whether it is in force, and its
+  problems: an ERROR for a version in force, a WARNING for an older one. A database with no
+  stored versions passes.
+
+  | Exit | Meaning |
+  | --- | --- |
+  | `0` | Every version in force reads. Older versions that fail are listed but don't change the code. |
+  | `1` | A version in force does not read. Don't roll out. |
+  | `2` | The database could not be read (`configuration_verify.database_unreadable`), the settings did not load or the engine could not be built (`configuration_verify.setup_failed`), or invalid arguments; nothing was checked. |
+- **Recovery:** `PUT` a corrected document for each failing kind through the current build's
+  control plane, one the new build also reads, which makes it the version in force; then run
+  the check again until it exits `0`. Policy and template activation never read the version
+  in force, so their `PUT` succeeds while it is unreadable. A taxonomy `PUT` is refused while a
+  policy or template set in force does not read, so correct those first. A policy or template
+  `PUT` is checked against the taxonomy in force, so it is refused while that taxonomy does not
+  read.
+
+**Pickled rows across a deploy.** DBOS pickles workflow inputs and step outputs, so a row
+written by the build being replaced reaches the new one whenever the recovery sweep forks it
+across versions, and a fork copies every completed step's output. A deploy is blue-green with
+a budget of 15 minutes: promote the new version (`python -m curate_d.runtime.promote`, under
+Rollback and roll-forward), so schedules and new enqueues move to it within one
+`schedule_reconciliation_interval_seconds`; let the old version's workers drain what they
+hold; stop them after at most 15 minutes. What they leave is forked by the sweep, and that
+fork is the exception, not the deploy path. Until #74 caps it, a placement waiting for scratch
+or admission is the exception's main source: its wait loop can run about 90 minutes, longer
+than the drain. The drain command, the wait cap and the pipeline gate are #74.
+
+A forked row is reconstructed by `DomainModel.__setstate__`: a field added since the row was
+pickled reads as its declared default, which must mean what the old build did; a required
+field the pickle lacks raises `StaleCheckpointError`, naming the model and the fields, and
+the row ends ERROR (Triage). A change that adds a required field to a pickled model, or
+retypes one, is therefore a breaking deploy: the drain must reach zero before the old workers
+stop. Say so in the PR.
+
 ## Rollback and roll-forward
 
 DBOS registers a version again without retiming it. A build deployed a second time, by
@@ -190,6 +242,14 @@ of a still-pending row. Its successor isn't the recovery successor
 original's lineage (`DBOSClient.list_workflows(forked_from=<id>)`). Once the hand fork is the
 one you want, cancel the original with `DBOSClient.cancel_workflow(<id>)`, and the sweep stops
 reporting it.
+
+**`StaleCheckpointError` in a workflow's error.** A row pickled by an older build reached
+this one lacking a required field; its forked successor ended ERROR before any step ran. It
+is a deploy that stopped the old workers before they drained, or a hand fork. Nothing is
+half-done: the error is raised while the input or a copied step output is reconstructed. A
+placement is started again by the next reconciliation pass; a reconcile part runs again on
+its schedule; a dry run is started again by hand. Then find the field in the error and the
+build that added it without a default, since that is the bug.
 
 **Hand resume and fork.** Always pass `queue_name` (and `queue_partition_key` on a
 partitioned queue). Without one, DBOS assigns its internal queue, which every worker dequeues.
@@ -286,7 +346,10 @@ a cancel, schedule authority check to write, and prune re-read to delete.
   target. The lease monitor polls every 5 s, so a worker can also run briefly after losing
   its lease.
 - **No replay compatibility check.** A fork onto code that can't replay the original's
-  checkpoints isn't prevented. Review a version bump for replay compatibility.
+  checkpoints isn't prevented. A missing required field fails by name (`StaleCheckpointError`,
+  Triage) and an added field with a default is filled, but a retyped or renamed field, or a
+  changed step sequence, is not detected. Review a version bump for replay compatibility; the
+  pickled-model baseline test of #74 makes the first case a declared decision.
 - **The fork boundary.** A fork copies step outputs only. A ledger transaction that committed
   without its step checkpoint runs again under the successor.
 - **dbos-transact-py#886.** A superseded execution's exception can become a datasource step's

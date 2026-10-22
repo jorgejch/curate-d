@@ -12,11 +12,12 @@ from typing import Final
 from pydantic import AwareDatetime, Field
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from curate_d.configuration.store import ConfigurationRepository
+from curate_d.configuration.store import ConfigurationRepository, check_document
 from curate_d.domain import (
     AuditEntry,
     AuditEntryType,
     AuditValue,
+    CapabilityProfileName,
     ConfigurationKind,
     ContentObjectId,
     DestinationConfig,
@@ -47,13 +48,22 @@ class ActiveTemplates(DomainModel):
 
 
 async def active_templates(configurations: ConfigurationRepository) -> ActiveTemplates:
-    """The active template set, storing the seed as version 1 if none was ever stored."""
-    version = await configurations.ensure(
+    """Return the active template set, storing the seed as version 1 if none was ever stored.
+
+    Raises:
+        ConfigurationError: the stored template set in force does not read; it names the
+            kind and each problem.
+    """
+    await configurations.ensure(
         ConfigurationKind.TEMPLATES, SEED_TEMPLATES, parse_templates, created_by="seed"
     )
+    # Take the version and the document from one read so a concurrent activation cannot split them.
     stored = await configurations.active(ConfigurationKind.TEMPLATES)
     assert stored is not None
-    return ActiveTemplates(configuration_version=version, templates=parse_templates(stored[1]))
+    version, document = stored
+    templates = check_document(ConfigurationKind.TEMPLATES, document, parse_templates)
+    assert isinstance(templates, TemplateSet)
+    return ActiveTemplates(configuration_version=version, templates=templates)
 
 
 class PlacementPlan(DomainModel):
@@ -139,13 +149,7 @@ async def plan_at(
     destination: DestinationConfig,
 ) -> PlacementPlan | RenderFailure:
     """Plan one placement at `destination`, resolved against what the ledger has there."""
-    profile = PROFILES.get(destination.profile)
-    if profile is None:
-        return RenderFailure(
-            content_object_id=content_object_id,
-            destination_name=destination.name,
-            reason=f"unknown capability profile {destination.profile!r}",
-        )
+    profile = PROFILES[CapabilityProfileName(destination.profile)]
 
     def attempt(occupants: Mapping[str, Placement]) -> PlacementPlan | RenderFailure:
         """Plan against `occupants`."""
