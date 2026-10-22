@@ -6,7 +6,9 @@ apart, so each side is checked when it changes:
 
 - A policy or template set is activated against the taxonomy in force, and refused if a
   condition names a value it does not list. Activation reads that taxonomy with
-  `taxonomy_in_force` while holding the taxonomy's lock in shared mode.
+  `taxonomy_in_force` while holding the taxonomy's lock in shared mode. A dry run's
+  drafts pass the same check, `check_against`, when the run is requested and when it
+  opens.
 - A taxonomy is never refused for the conditions it leaves without a value to match:
   removing a value in use would otherwise take three steps. Its activation reports them
   instead (`orphans_in_force`).
@@ -17,10 +19,18 @@ policy's retired fields are dropped and no taxonomy is checked; a version in for
 still does not read raises a `ConfigurationError` naming its kind.
 """
 
-from pydantic import Field
+from collections.abc import Mapping
+from functools import partial
+from typing import Final
 
-from curate_d.configuration.documents import parse_stored_policy, parse_taxonomy
-from curate_d.configuration.store import ConfigurationRepository, check_document
+from pydantic import BaseModel, Field
+
+from curate_d.configuration.documents import parse_policy, parse_stored_policy, parse_taxonomy
+from curate_d.configuration.store import (
+    ConfigurationRepository,
+    DocumentValidator,
+    check_document,
+)
 from curate_d.domain import (
     SEED_POLICY,
     SEED_TAXONOMY,
@@ -32,6 +42,43 @@ from curate_d.domain import (
     orphaned,
 )
 from curate_d.rendering.templates import SEED_TEMPLATES, TemplateSet, parse_templates
+
+_SUBMISSION_PARSERS: Final[Mapping[ConfigurationKind, DocumentValidator]] = {
+    ConfigurationKind.TAXONOMY: parse_taxonomy,
+    ConfigurationKind.TEMPLATES: parse_templates,
+    ConfigurationKind.POLICY: parse_policy,
+}
+
+
+def submission_parser(kind: ConfigurationKind, taxonomy: Taxonomy | None) -> DocumentValidator:
+    """Return the parser activating `kind` validates with, against `taxonomy` when given."""
+    if taxonomy is None or kind is ConfigurationKind.TAXONOMY:
+        return _SUBMISSION_PARSERS[kind]
+    if kind is ConfigurationKind.POLICY:
+        return partial(parse_policy, taxonomy=taxonomy)
+    return partial(parse_templates, taxonomy=taxonomy)
+
+
+def check_against(
+    kind: ConfigurationKind, document: BaseModel, *, taxonomy: Taxonomy | None
+) -> BaseModel:
+    """Validate a submitted document as activating it would, storing nothing.
+
+    Args:
+        kind: The kind `document` is submitted as.
+        document: The submitted document, already parsed.
+        taxonomy: The taxonomy in force, read by the caller under the taxonomy's shared
+            lock: every category and subcategory condition of a policy or template set
+            must be one it lists. Ignored for a taxonomy.
+
+    Returns:
+        The document as parsed from its stored (JSON) form.
+
+    Raises:
+        ConfigurationError: the document is invalid for `kind`, or names a category or
+            subcategory `taxonomy` does not list.
+    """
+    return check_document(kind, document.model_dump(mode="json"), submission_parser(kind, taxonomy))
 
 
 class OrphanedCondition(DomainModel):

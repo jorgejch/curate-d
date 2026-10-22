@@ -23,7 +23,6 @@ puts content from its next pass; until then every placement stays as it is.
 """
 
 from collections.abc import Callable, Mapping, Sequence
-from functools import partial
 from typing import Annotated, Final, Protocol
 
 from fastapi import APIRouter, Depends, Header, Request
@@ -35,7 +34,9 @@ from curate_d.api.reclassification import Reclassify, nothing
 from curate_d.classification.taxonomy import active_taxonomy
 from curate_d.configuration.consistency import (
     OrphanedCondition,
+    check_against,
     orphans_in_force,
+    submission_parser,
     taxonomy_in_force,
 )
 from curate_d.configuration.documents import parse_policy, parse_taxonomy
@@ -44,7 +45,6 @@ from curate_d.configuration.store import (
     ConfigurationRepository,
     ConfigurationVersion,
     DocumentValidator,
-    check_document,
 )
 from curate_d.domain import ConfigurationKind, PlacementPolicy, Taxonomy
 from curate_d.observability import get_logger
@@ -60,12 +60,6 @@ UNNAMED_OPERATOR: Final = "control-plane"
 
 logger = get_logger(__name__)
 
-_PARSERS: Final[Mapping[ConfigurationKind, DocumentValidator]] = {
-    ConfigurationKind.TAXONOMY: parse_taxonomy,
-    ConfigurationKind.TEMPLATES: parse_templates,
-    ConfigurationKind.POLICY: parse_policy,
-}
-
 
 def _lax(parser: DocumentValidator) -> BeforeValidator:
     """Parse a submitted JSON object leniently in type and strictly in shape."""
@@ -77,22 +71,14 @@ SubmittedTemplates = Annotated[TemplateSet, _lax(parse_templates)]
 SubmittedPolicy = Annotated[PlacementPolicy, _lax(parse_policy)]
 
 
-def _submission_parser(kind: ConfigurationKind, taxonomy: Taxonomy | None) -> DocumentValidator:
-    """Return the parser activating `kind` validates with, against `taxonomy` when given."""
-    if taxonomy is None or kind is ConfigurationKind.TAXONOMY:
-        return _PARSERS[kind]
-    if kind is ConfigurationKind.POLICY:
-        return partial(parse_policy, taxonomy=taxonomy)
-    return partial(parse_templates, taxonomy=taxonomy)
-
-
 def check_submission(
     kind: ConfigurationKind, document: BaseModel, *, taxonomy: Taxonomy | None = None
 ) -> BaseModel:
     """Validate a submitted document as activating it would, storing nothing.
 
-    Activation and a dry run's drafts both pass through here, so a draft a dry run
-    accepts is one `PUT /configuration/{kind}` would accept too.
+    `check_against`, mapped to the API's refusal. Activation validates with the parser it
+    uses, and a dry run checks its drafts with it, so a draft a dry run accepts is one
+    `PUT /configuration/{kind}` would accept too.
 
     Args:
         kind: The kind `document` is submitted as.
@@ -109,9 +95,7 @@ def check_submission(
             subcategory `taxonomy` does not list.
     """
     try:
-        return check_document(
-            kind, document.model_dump(mode="json"), _submission_parser(kind, taxonomy)
-        )
+        return check_against(kind, document, taxonomy=taxonomy)
     except ConfigurationError as error:
         raise RejectedError(str(error)) from None
 
@@ -325,7 +309,7 @@ class LedgerConfiguration:
                 version = await configurations.activate(
                     kind,
                     document.model_dump(mode="json"),
-                    _submission_parser(kind, taxonomy),
+                    submission_parser(kind, taxonomy),
                     created_by=by,
                 )
                 if kind is ConfigurationKind.TAXONOMY:
