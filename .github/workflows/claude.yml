@@ -20,8 +20,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # Push commits for requested changes
-      pull-requests: write # Comment on and update pull requests
-      issues: write # Comment on issues
+      pull-requests: write # Create, comment on and update pull requests
+      issues: write # Edit issue bodies and comment on issues
       id-token: write
       actions: read # Required for Claude to read CI results on PRs
     steps:
@@ -43,8 +43,8 @@ jobs:
           # Optional: Give a custom prompt to Claude. If this is not specified, Claude will perform the instructions specified in the comment that tagged it.
           # prompt: 'Update the pull request description to include a summary of changes.'
 
-          # Optional: Add claude_args to customize behavior and configuration
-          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://code.claude.com/docs/en/cli-reference for available options
-          # claude_args: '--allowed-tools Bash(gh pr *)'
+          # GitHub write scopes also need matching Claude tool permissions.
+          claude_args: |
+            --allowedTools "Bash(gh issue view:*),Bash(gh issue edit:*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(gh pr create:*)"
+            --append-system-prompt "When requested, edit issue bodies with gh issue edit and create pull requests with gh pr create. For requested PR creation, push the changes first, check for an existing PR for the branch, target dev, follow the repository PR template, and return the created PR URL instead of a pre-filled creation link."
 
