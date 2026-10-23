@@ -49,7 +49,7 @@ dependencies = [
     # Request tracing for the control plane API, exported to Logfire when a token is present
     "logfire[fastapi]~=5.1",
     # Media inspection and perceptual fingerprinting
-    "pillow~=12.3",
+    "pillow>=12.3,<14.0",
     "pillow-heif~=1.8.0",   # HEIC/HEIF, the default format for Apple photo libraries
     "imagehash~=4.3",
     "numpy~=2.5",
