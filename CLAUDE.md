@@ -4,7 +4,10 @@
 > queue, schedule, datasource or `DBOSClient` call. It holds DBOS's own patterns,
 > conventions and architecture guidance: decide against it, and treat a departure from it as
 > a decision to record under [DBOS](#dbos). It is vendored in `.agents/skills/dbos-python`
-> (`.claude/skills/dbos-python` links to it) and pinned in `skills-lock.json`.
+> (`.claude/skills/dbos-python` links to it) and pinned in `skills-lock.json`. A change that
+> bumps the `dbos` package version refreshes the skill from upstream (`dbos-inc/agent-skills`)
+> and its `skills-lock.json` hash in the same change, so the guidance matches the DBOS in use.
+> Keep it whole, as upstream ships it: don't trim it by hand, Conductor references included.
 
 ## Changes
 
