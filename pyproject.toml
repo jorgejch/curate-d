@@ -58,7 +58,7 @@ dependencies = [
     "pytesseract~=0.3.13", # requires the tesseract binary on PATH
     # Remote classification tier. OpenRouter exposes an OpenAI-compatible API,
     # so the model is selected by configuration rather than by client choice.
-    "openai==3.22.1",
+    "openai==3.35.1",
     # openai 3.x runs on httpx2 rather than httpx; imported directly to inject a transport.
     "httpx2~=2.13",
     # S3 content staging: RustFS locally, OVH Standard S3 in the cluster. Patch releases
