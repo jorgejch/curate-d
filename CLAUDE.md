@@ -151,9 +151,17 @@ how it is made idempotent, whether it belongs in a workflow — against the `dbo
   a re-executed step appends new audit entries. That is intended: the trail keeps the
   original decision and the new one. Don't deduplicate audit entries by workflow or step.
 - Rewind does not re-run child workflows. A rewound parent calling a child under the same
-  deterministic ID gets the child's old result back, so rewind or delete the children too.
+  deterministic ID gets the child's old result back, so rewind the children after the
+  parent; never delete them (`docs/rewind.md`).
+- DBOS pickles workflow inputs and step outputs, and the sweep's fork carries them across
+  versions. `DomainModel.__setstate__` fills a declared default for a field added since the
+  pickle was written and raises `StaleCheckpointError` for a missing required one. So a field
+  added to a model a workflow takes or a step returns carries a default that means what the
+  old code did; a required field, a retyped or a renamed one is a breaking deploy that must
+  drain first (`docs/recovery.md`, Before deploying). Retire a field; never retype it.
 - Nothing in curate.d rewinds a workflow, so the two points above concern a rewind run by
-  hand; record who ran it, from which step and why in the audit trail.
+  hand; record who ran it, from which step and why in the issue tracking the incident. The
+  rewind itself writes no audit entry.
 - New periodic work uses persisted schedules: declare them in `schedules_for`
   (`workflows/registry.py`); `worker/schedules.py`'s `apply_schedules` writes them after
   launch, and its reconciler periodically, through the schedule authority.

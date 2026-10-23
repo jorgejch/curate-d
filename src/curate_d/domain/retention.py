@@ -28,7 +28,7 @@ class RetentionReason(StrEnum):
     """No policy permits release. This is the default and needs no configuration."""
 
     SOURCE_NEEDED_FOR_COPY_COUNT = "source_needed_for_copy_count"
-    """The source is itself one of the copies the policy requires."""
+    """Too few copies exist without the source, so it is retained until they do."""
 
     INSUFFICIENT_VERIFICATION = "insufficient_verification"
     """Enough copies exist, but not enough of them are strongly verified."""

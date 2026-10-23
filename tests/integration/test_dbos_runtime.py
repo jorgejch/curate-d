@@ -311,3 +311,152 @@ async def test_a_rewound_step_appends_the_decision_it_reaches(
 
     assert audited == ["2019", "2020"], "the re-executed decision was not audited"
     assert ledger == audited[-1], "the newest audit entry does not explain the ledger"
+
+
+class _ParentAndChild:
+    """A parent that records a decision, then starts a child under a deterministic ID.
+
+    The child reads the decision and records what it saw. Both write through the ledger
+    datasource, as curate.d's workflows do, and each parent run reaches the next decision.
+    """
+
+    def __init__(self, datasource: AsyncSQLAlchemyDatasource, engine: AsyncEngine) -> None:
+        """Register the two workflows under identifiers no other run shares."""
+        self.subject = f"child-{uuid4()}"
+        self.parent_id = f"rewind-parent-{uuid4()}"
+        self.child_id = f"rewind-child-{uuid4()}"
+        self._engine = engine
+        decisions = iter(["2019", "2020"])
+        child_id = self.child_id
+
+        @datasource.transaction()
+        async def decide(subject: str, decision: str) -> None:
+            """Upsert the parent's decision."""
+            await datasource.sql_session().execute(
+                text(
+                    "INSERT INTO rewind_parent_probe (subject, decision)"
+                    " VALUES (:subject, :decision)"
+                    " ON CONFLICT (subject) DO UPDATE SET decision = excluded.decision"
+                ),
+                {"subject": subject, "decision": decision},
+            )
+
+        @datasource.transaction()
+        async def record_seen(subject: str) -> None:
+            """Record the decision the child finds."""
+            await datasource.sql_session().execute(
+                text(
+                    "INSERT INTO rewind_child_probe (subject, seen)"
+                    " SELECT subject, decision FROM rewind_parent_probe WHERE subject = :subject"
+                ),
+                {"subject": subject},
+            )
+
+        @DBOS.step()
+        async def evaluate() -> str:
+            """Reach a decision; a rewound run reaches the next one."""
+            return next(decisions)
+
+        @DBOS.workflow()
+        async def child(subject: str) -> None:
+            """Act on whatever the parent decided."""
+            await record_seen(subject)
+
+        @DBOS.workflow()
+        async def parent(subject: str) -> None:
+            """Decide, then hand over to the child, as `place_content` does to verification."""
+            await decide(subject, await evaluate())
+            with SetWorkflowID(child_id):
+                await DBOS.start_workflow_async(child, subject)
+
+        self._parent = parent
+
+    async def run(self) -> None:
+        """Run the parent and wait for the child it started."""
+        with SetWorkflowID(self.parent_id):
+            await self._parent(self.subject)
+        await (await DBOS.retrieve_workflow_async(self.child_id)).get_result()
+
+    async def children(self, start_step: int) -> list[str]:
+        """Return the child workflows the parent's steps from `start_step` on recorded."""
+        steps = await DBOS.list_workflow_steps_async(self.parent_id, load_output=False)
+        return [
+            child
+            for step in steps
+            if step["function_id"] >= start_step
+            and (child := step["child_workflow_id"]) is not None
+        ]
+
+    async def decided(self) -> tuple[str | None, list[str]]:
+        """Return the parent's current decision and every decision the child saw, in order."""
+        async with self._engine.connect() as connection:
+            decision = await connection.scalar(
+                text("SELECT decision FROM rewind_parent_probe WHERE subject = :subject"),
+                {"subject": self.subject},
+            )
+            seen = [
+                row[0]
+                for row in await connection.execute(
+                    text(
+                        "SELECT seen FROM rewind_child_probe WHERE subject = :subject ORDER BY id"
+                    ),
+                    {"subject": self.subject},
+                )
+            ]
+        return decision, seen
+
+
+@pytest.fixture
+async def parent_and_child(
+    datasource: AsyncSQLAlchemyDatasource, ledger_engine: AsyncEngine
+) -> AsyncIterator[_ParentAndChild]:
+    """Create the probe tables and the two workflows; drop the tables afterwards."""
+    async with ledger_engine.begin() as connection:
+        await connection.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS rewind_parent_probe"
+                " (subject text PRIMARY KEY, decision text)"
+            )
+        )
+        await connection.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS rewind_child_probe"
+                " (id bigserial PRIMARY KEY, subject text, seen text)"
+            )
+        )
+    yield _ParentAndChild(datasource, ledger_engine)
+    async with ledger_engine.begin() as connection:
+        await connection.execute(text("DROP TABLE rewind_parent_probe, rewind_child_probe"))
+
+
+async def test_a_rewound_parent_does_not_rerun_its_child(
+    parent_and_child: _ParentAndChild,
+) -> None:
+    """The re-run collapses onto the finished child, which acted on the old decision."""
+    probe = parent_and_child
+    await probe.run()
+    recorded = await probe.children(start_step=1)
+    assert recorded == [probe.child_id]
+
+    rewound = await DBOS.rewind_workflow_async(probe.parent_id, start_step=1)
+    await rewound.get_result()
+
+    assert await probe.decided() == ("2020", ["2019"])
+    assert await probe.children(start_step=1) == recorded
+
+
+async def test_rewinding_the_collapsed_child_after_its_parent_repairs_it(
+    parent_and_child: _ParentAndChild,
+) -> None:
+    """The runbook's repair: a child recorded before and after the rewind is rewound too."""
+    probe = parent_and_child
+    await probe.run()
+    recorded = await probe.children(start_step=1)
+    rewound = await DBOS.rewind_workflow_async(probe.parent_id, start_step=1)
+    await rewound.get_result()
+
+    again = await probe.children(start_step=1)
+    for child_id in (c for c in recorded if c in again):
+        await (await DBOS.rewind_workflow_async(child_id, start_step=1)).get_result()
+
+    assert await probe.decided() == ("2020", ["2019", "2020"])

@@ -1,10 +1,15 @@
 """The dry-run workflow: evaluate every content object, persist what placement would do.
 
 Runs on the `maintenance` queue. The run's header is written first, pinning the template
-set and taxonomy it evaluates with; then content is evaluated a page at a time, each page
-read in a step and its items written in one transaction, and the header is closed. A
-page that fails midway is evaluated again on recovery and its items replaced. Nothing
-outside dry_runs and dry_run_items is written.
+set, taxonomy and policy it evaluates with: the versions in force, or the drafts the
+request carries, which are recorded on the header and never stored as configuration
+versions. A draft is checked again against the taxonomy the header records; one that
+taxonomy refuses fails the run before anything is written. Then content is evaluated a
+page at a time, each page read in a step and its items written in one transaction, and
+the header is closed. A page that fails midway is evaluated again on recovery and its
+items replaced. A rewind from before the header starts the run over: the header is
+written again with what is in force then, and the items recorded before are discarded
+(`docs/rewind.md`). Nothing outside dry_runs and dry_run_items is written.
 """
 
 from datetime import datetime
@@ -13,9 +18,19 @@ from uuid import UUID
 
 from dbos import DBOS, SetWorkflowID
 
-from curate_d.classification.taxonomy import active_taxonomy
-from curate_d.configuration.store import ConfigurationRepository
-from curate_d.domain import ContentObjectId, DomainModel, PlacementPolicy
+from curate_d.classification.taxonomy import SEEDED_BY, active_taxonomy
+from curate_d.configuration.consistency import check_against
+from curate_d.configuration.documents import parse_taxonomy
+from curate_d.configuration.store import ConfigurationError, ConfigurationRepository
+from curate_d.domain import (
+    SEED_TAXONOMY,
+    ConfigurationKind,
+    ContentObjectId,
+    DomainModel,
+    PlacementPolicy,
+    PolicySource,
+    Taxonomy,
+)
 from curate_d.placement.dry_run import (
     DryRun,
     DryRunItem,
@@ -33,6 +48,25 @@ from curate_d.runtime.workflow_ids import dry_run_workflow_id
 
 # Registered under this name, so a process that does not run workflows can enqueue one.
 WORKFLOW_NAME: Final = "dry_run"
+
+
+class DraftRefusedError(Exception):
+    """A draft the run carries that the taxonomy in force when it opens refuses."""
+
+
+def check_drafts(request: DryRunRequest, taxonomy: Taxonomy) -> None:
+    """Refuse a draft in `request` that activating it under `taxonomy` would refuse.
+
+    The API runs it before it enqueues a run, and the run again when it opens.
+
+    Raises:
+        ConfigurationError: a draft is invalid, or names a category or subcategory
+            `taxonomy` does not list.
+    """
+    if request.policy is not None:
+        check_against(ConfigurationKind.POLICY, request.policy, taxonomy=taxonomy)
+    if request.templates is not None:
+        check_against(ConfigurationKind.TEMPLATES, request.templates, taxonomy=taxonomy)
 
 
 class DryRunContext(DomainModel):
@@ -87,22 +121,64 @@ async def _dry_run_page_step(
 # Transactions.
 
 
-async def _open_tx(run_id: UUID, now: datetime) -> DryRunContext:
-    """Record the run's header with the template set and taxonomy it evaluates with."""
+async def _open_tx(request: DryRunRequest, now: datetime) -> DryRunContext:
+    """Record the run's header with the template set, taxonomy and policy it evaluates with.
+
+    A draft in the request takes the place of the version in force and is recorded on the
+    header; the versions in force are only read. A draft is checked again against the
+    taxonomy the header records, read under the taxonomy's shared lock, since one may
+    have been activated since the API accepted the draft. Re-executed after a rewind, it
+    replaces the header and discards the run's items, so the export never pairs one
+    policy's header with another's items.
+
+    Raises:
+        DraftRefusedError: the taxonomy in force refuses a draft; nothing is written and
+            the run ends in error.
+    """
     connection = await current().datasource.sql_session().connection()
     configurations = ConfigurationRepository(connection)
-    templates = await active_templates(configurations)
+    await configurations.ensure(
+        ConfigurationKind.TAXONOMY, SEED_TAXONOMY, parse_taxonomy, created_by=SEEDED_BY
+    )
+    await configurations.lock_shared(ConfigurationKind.TAXONOMY)
     taxonomy = await active_taxonomy(configurations)
-    policy = await active_policy(configurations)
+    try:
+        check_drafts(request, taxonomy.taxonomy)
+    except ConfigurationError as error:
+        raise DraftRefusedError(str(error)) from None
+    templates = (
+        request.templates
+        if request.templates is not None
+        else (await active_templates(configurations)).templates
+    )
+    version: int | None = None
+    if request.policy is not None:
+        policy, source = request.policy, PolicySource.DRAFT
+    elif request.destinations:
+        # Named destinations ignore the rules; the policy is never consulted.
+        policy, source = PlacementPolicy(), PolicySource.DESTINATIONS
+    else:
+        active = await active_policy(configurations)
+        policy, source, version = active.policy, PolicySource.ACTIVE, active.version
     await DryRunStore(connection).create(
         DryRun(
-            id=run_id,
+            id=request.run_id,
             started_at=now,
-            template_version=templates.templates.version,
+            template_version=templates.version,
             taxonomy_version=taxonomy.version,
+            policy_source=source,
+            policy_version=version,
+            policy_rules=tuple(rule.name for rule in policy.rules),
+            templates_draft=request.templates is not None,
+            policy_document=None
+            if request.policy is None
+            else request.policy.model_dump(mode="json"),
+            templates_document=None
+            if request.templates is None
+            else request.templates.model_dump(mode="json"),
         )
     )
-    return DryRunContext(templates=templates.templates, policy=policy.policy)
+    return DryRunContext(templates=templates, policy=policy)
 
 
 async def _record_tx(items: tuple[DryRunItem, ...]) -> None:
@@ -125,7 +201,7 @@ async def dry_run(request: DryRunRequest) -> int:
     """Evaluate every content object and persist the results; return how many items."""
     datasource = current().datasource
     context = await datasource.run_tx_step_async(
-        {"name": "open_dry_run"}, _open_tx, request.run_id, await _dry_run_now_step()
+        {"name": "open_dry_run"}, _open_tx, request, await _dry_run_now_step()
     )
     after: ContentObjectId | None = None
     total = 0

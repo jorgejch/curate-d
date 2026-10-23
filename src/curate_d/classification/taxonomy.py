@@ -14,7 +14,7 @@ from pydantic import Field
 
 from curate_d.classification.store import RejectedValueCount
 from curate_d.configuration.documents import parse_taxonomy
-from curate_d.configuration.store import ConfigurationRepository
+from curate_d.configuration.store import ConfigurationRepository, check_document
 from curate_d.domain import (
     SEED_TAXONOMY,
     ConfigurationKind,
@@ -35,13 +35,20 @@ class ActiveTaxonomy(DomainModel):
 
 
 async def active_taxonomy(configurations: ConfigurationRepository) -> ActiveTaxonomy:
-    """The active taxonomy, storing the seed as version 1 if none was ever stored."""
+    """Return the active taxonomy, storing the seed as version 1 if none was ever stored.
+
+    Raises:
+        ConfigurationError: the stored taxonomy in force does not read; it names the kind
+            and each problem.
+    """
     version = await configurations.ensure(
         ConfigurationKind.TAXONOMY, SEED_TAXONOMY, parse_taxonomy, created_by=SEEDED_BY
     )
     stored = await configurations.active(ConfigurationKind.TAXONOMY)
     assert stored is not None
-    return ActiveTaxonomy(version=version, taxonomy=parse_taxonomy(stored[1]))
+    taxonomy = check_document(ConfigurationKind.TAXONOMY, stored[1], parse_taxonomy)
+    assert isinstance(taxonomy, Taxonomy)
+    return ActiveTaxonomy(version=version, taxonomy=taxonomy)
 
 
 def promote_all(taxonomy: Taxonomy, values: Sequence[RejectedValue]) -> Taxonomy:
@@ -73,10 +80,16 @@ async def promote(
 ) -> ActiveTaxonomy:
     """Promote values into the taxonomy as a new active version.
 
+    The taxonomy's lock is taken before the version in force is read, so a taxonomy
+    activated meanwhile is extended rather than overwritten: promotion only ever adds
+    values, and so never orphans a policy or template condition unreported.
+
     Raises:
-        ConfigurationError: the promoted taxonomy is invalid; the current one stays.
+        ConfigurationError: the taxonomy in force does not read, or the promoted taxonomy
+            is invalid; the current one stays.
         ValueError: a subcategory is promoted without its category.
     """
+    await configurations.lock(ConfigurationKind.TAXONOMY)
     current = await active_taxonomy(configurations)
     extended = promote_all(current.taxonomy, values)
     if extended == current.taxonomy:

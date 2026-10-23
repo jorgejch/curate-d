@@ -3,8 +3,9 @@
 from collections.abc import AsyncIterator
 
 import pytest
-from sqlalchemy import delete
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy import delete, text
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from curate_d.configuration.documents import parse_taxonomy
 from curate_d.configuration.store import ConfigurationError, ConfigurationRepository
@@ -95,3 +96,49 @@ async def test_only_one_version_is_active_at_a_time(
             created_by="t",
         )
     assert [v.version for v in await repository.history(_KIND) if v.active] == [3]
+
+
+async def _rollback(*connections: AsyncConnection) -> None:
+    """Roll back each connection still in a transaction."""
+    for connection in connections:
+        if connection.in_transaction():
+            await connection.rollback()
+
+
+async def test_a_shared_hold_blocks_a_taxonomy_activation_until_it_ends(
+    ledger_engine: AsyncEngine,
+) -> None:
+    """A policy activation's shared hold keeps a taxonomy change waiting until it commits."""
+    document = SEED_TAXONOMY.model_dump(mode="json")
+    async with ledger_engine.connect() as holder, ledger_engine.connect() as writer:
+        try:
+            await holder.begin()
+            await ConfigurationRepository(holder).lock_shared(_KIND)
+            await writer.begin()
+            await writer.execute(text("SET LOCAL lock_timeout = '200ms'"))
+            blocked = ConfigurationRepository(writer)
+            with pytest.raises(OperationalError, match="lock timeout"):
+                await blocked.activate(_KIND, document, parse_taxonomy, created_by="t")
+            await writer.rollback()
+
+            await holder.rollback()
+            await writer.begin()
+            await writer.execute(text("SET LOCAL lock_timeout = '2s'"))
+            assert await ConfigurationRepository(writer).activate(
+                _KIND, document, parse_taxonomy, created_by="t"
+            )
+        finally:
+            await _rollback(holder, writer)
+
+
+async def test_two_shared_holds_coexist(ledger_engine: AsyncEngine) -> None:
+    """Concurrent policy and template activations do not wait on each other's hold."""
+    async with ledger_engine.connect() as first, ledger_engine.connect() as second:
+        try:
+            await first.begin()
+            await ConfigurationRepository(first).lock_shared(_KIND)
+            await second.begin()
+            await second.execute(text("SET LOCAL lock_timeout = '2s'"))
+            await ConfigurationRepository(second).lock_shared(_KIND)
+        finally:
+            await _rollback(first, second)
