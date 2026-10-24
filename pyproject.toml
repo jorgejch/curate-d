@@ -49,12 +49,12 @@ dependencies = [
     # Request tracing for the control plane API, exported to Logfire when a token is present
     "logfire[fastapi]~=5.1",
     # Media inspection and perceptual fingerprinting
-    "pillow~=12.3",
+    "pillow>=12.3,<14.0",
     "pillow-heif~=1.8.0",   # HEIC/HEIF, the default format for Apple photo libraries
     "imagehash~=4.3",
     "numpy~=2.5",
     # Document text extraction for the local classification tier
-    "pypdf~=6.19.0",
+    "pypdf>=6.19,<6.22",
     "pytesseract~=0.3.13", # requires the tesseract binary on PATH
     # Remote classification tier. OpenRouter exposes an OpenAI-compatible API,
     # so the model is selected by configuration rather than by client choice.
