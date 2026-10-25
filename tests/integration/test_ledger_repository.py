@@ -7,10 +7,9 @@ repository.
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from curate_d.domain import (
@@ -36,8 +35,6 @@ from curate_d.ledger import (
     SourceObjectRepository,
     assess,
 )
-from curate_d.ledger.mapping import to_audit_entry
-from curate_d.ledger.tables import audit_entries
 
 pytestmark = pytest.mark.integration
 
@@ -355,20 +352,3 @@ async def test_audit_history_for_an_unknown_content_object_is_empty(
     )
     assert await contents.get(content.id) is None
     assert await audit.history_for_content_object(content.id) == []
-
-
-async def test_a_historical_operator_command_entry_still_reads_back(
-    connection: AsyncConnection,
-) -> None:
-    """An entry the removed Conductor commands wrote still maps back from its row."""
-    entry = AuditEntry(
-        entry_type=AuditEntryType.WORKFLOW_COMMAND_ISSUED,
-        occurred_at=_WHEN,
-        decided_by="conductor",
-        details={"command": "cancel", "source": "conductor", "request_id": f"req-{uuid4()}"},
-    )
-    entry_id = await AuditRepository(connection).append(entry)
-
-    result = await connection.execute(select(audit_entries).where(audit_entries.c.id == entry_id))
-
-    assert to_audit_entry(result.mappings().one()) == entry

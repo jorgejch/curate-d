@@ -35,10 +35,6 @@ class AuditEntryType(StrEnum):
     RETENTION_DECIDED = "retention_decided"
     SOURCE_READ_FAILED = "source_read_failed"
     SOURCE_DISCREPANCY_DETECTED = "source_discrepancy_detected"
-    # Historical: written by the audited Conductor commands, which no longer exist since
-    # Conductor became read-only. Kept so entries already in the ledger stay readable.
-    WORKFLOW_COMMAND_ISSUED = "workflow_command_issued"
-    WORKFLOW_COMMAND_COMPLETED = "workflow_command_completed"
 
 
 class AuditEntry(DomainModel):

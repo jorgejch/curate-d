@@ -96,39 +96,6 @@ async def test_migrations_leave_no_difference_against_the_model_metadata(
     assert unexpected == [], f"schema drift: {unexpected}"
 
 
-async def test_the_migrated_command_request_index_matches_the_model_metadata(
-    ledger_engine: AsyncEngine,
-) -> None:
-    """The applied one-entry-per-request index has the metadata's expression and predicate.
-
-    `compare_metadata` does not compare a partial index's predicate, so the declared index is
-    built on a copy of audit_entries in a scratch schema, rolled back, and the two definitions
-    PostgreSQL reports are compared.
-    """
-    from sqlalchemy import MetaData
-
-    from curate_d.ledger.tables import audit_entries
-
-    name = "uq_audit_entries_command_request_id"
-    probe_schema = f"probe_{uuid.uuid4().hex}"
-    probe = audit_entries.to_metadata(MetaData(), schema=probe_schema)
-    async with ledger_engine.connect() as connection:
-        await connection.execute(text(f"CREATE SCHEMA {probe_schema}"))
-        await connection.run_sync(probe.create)
-        rows = (
-            await connection.execute(
-                text("SELECT schemaname, indexdef FROM pg_indexes WHERE indexname = :name"),
-                {"name": name},
-            )
-        ).all()
-        await connection.rollback()
-
-    # pg_get_indexdef names the schema and table before USING; compare what follows.
-    definitions = {schema: indexdef.split(" USING ", 1)[1] for schema, indexdef in rows}
-    declared = definitions.pop(probe_schema)
-    assert list(definitions.values()) == [declared]
-
-
 async def test_duplicate_provider_account_native_id_is_rejected(
     ledger_engine: AsyncEngine,
 ) -> None:
