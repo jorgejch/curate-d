@@ -100,7 +100,7 @@ PR targets `dev`. Integration tests need `make test-stack` once before the first
 
 ## 5. Stream E: span integration test (after streams A and B)
 
-- [ ] 5.1 Add `tests/integration/test_workflow_telemetry.py` (design.md D11): configure
+- [x] 5.1 Add `tests/integration/test_workflow_telemetry.py` (design.md D11): configure
   tracing over a `TestExporter`, `dbos_app.configure`, `DBOS.launch`, a module-level test
   workflow with two steps that enqueues a child workflow on a queue the test registers and
   listens to; assert the parent's three spans share one trace with the step spans parented
@@ -109,7 +109,7 @@ PR targets `dev`. Integration tests need `make test-stack` once before the first
   has a handler other than its console handler; tear down with `DBOS.destroy()` and a
   send-nowhere `logfire.configure`; verify with `make test-stack` then
   `uv run pytest tests/integration/test_workflow_telemetry.py --no-cov -m integration` green
-- [ ] 5.2 Confirm an integration test that launches DBOS without configuring Logfire still
+- [x] 5.2 Confirm an integration test that launches DBOS without configuring Logfire still
   passes and logs DBOS's provider warnings rather than failing; verify with
   `uv run pytest tests/integration/test_recovery_schedule.py --no-cov -m integration`
   green and its captured log showing `OTLP is enabled but` warnings only
