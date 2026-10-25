@@ -82,7 +82,7 @@ Owns `docs/recovery.md`.
 
 - [x] 6.1 Merge groups 1 to 5 into the change branch. Update `tests/integration/test_end_to_end.py` and `tests/local/pcloud/in_pod.py` (the ledger dump names each placement's `destination_id`) for the new signatures. Verify with `make check` passing (lint, typecheck and the unit suite with its coverage gate).
 - [x] 6.2 Run the targeted integration files on the merged branch: `test_migrations.py`, `test_ledger_schema.py`, `test_ledger_repository.py`, `test_reconcile_workflow.py`, `test_reconcile_audit.py`, `test_placement_reservation.py`, `test_placement_concurrency.py`, `test_placement_workflow.py`, `test_dry_run_workflow.py`, `test_api_dry_runs.py`, `test_api_audit.py`, `test_api_jobs.py`, `test_api_configuration.py` and `test_end_to_end.py`. Verify with `make test-stack`, then the integration command on those files, all passing.
-- [ ] 6.3 Run `grep -rn "destination_name" src` and confirm every remaining use is a label (a model field, an audit detail, a view column, a dry-run primary key) and none is a key for a lookup, a lock, a constraint or a workflow identifier; record the list in the PR description. Verify that the PR description lists every site the grep returns.
+- [x] 6.3 Run `grep -rn "destination_name" src` and confirm every remaining use is a label (a model field, an audit detail, a view column, a dry-run primary key) and none is a key for a lookup, a lock, a constraint or a workflow identifier; record the list in the PR description. Verify that the PR description lists every site the grep returns.
 - [x] 6.4 Run `openspec validate tie-placements-to-destination-identity --strict` and verify it reports the change valid.
 
 ## Workflow follow-up
