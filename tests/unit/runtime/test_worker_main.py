@@ -7,6 +7,7 @@ overwrites a limit the control plane set. DBOS is substituted at the boundary so
 sequence itself is what gets asserted.
 """
 
+import logging
 import os
 import threading
 
@@ -15,7 +16,7 @@ from dbos import DBOS
 from sqlalchemy.exc import OperationalError
 from structlog.testing import capture_logs
 
-from curate_d.config import Settings
+from curate_d.config import DeploymentEnvironment, Settings
 from curate_d.runtime import dbos_app
 from curate_d.runtime.identity import EXECUTOR_ID_ENV, POD_NAME_ENV, ExecutorIdentityError
 from curate_d.runtime.lease import (
@@ -23,7 +24,7 @@ from curate_d.runtime.lease import (
     ExecutorLeaseLostError,
     ExecutorLeaseUnavailableError,
 )
-from curate_d.runtime.profiles import WorkerProfile
+from curate_d.runtime.profiles import PROFILE_ENV, WorkerProfile
 from curate_d.runtime.version_lease import VersionRegistryError
 from curate_d.worker import main as worker_main
 from tests.unit.conftest import NetworkAccessInUnitTestError
@@ -398,14 +399,62 @@ def test_main_exits_at_once_when_the_lease_is_lost(monkeypatch: pytest.MonkeyPat
     def lose(settings: Settings, profile: WorkerProfile) -> None:
         raise ExecutorLeaseLostError("lost")
 
-    monkeypatch.setattr(worker_main, "configure_logging", lambda level: None)
+    monkeypatch.setattr(worker_main, "configure_logging", lambda **kwargs: None)
+    monkeypatch.setattr(worker_main, "configure_tracing", lambda **kwargs: None)
     monkeypatch.setattr(worker_main, "get_settings", Settings)
     monkeypatch.setattr(worker_main, "resolve_profile", lambda: WorkerProfile.IO)
+    monkeypatch.setattr(worker_main, "resolve_executor_id", lambda: "worker-io-0")
     monkeypatch.setattr(worker_main, "run", lose)
     monkeypatch.setattr(os, "_exit", hard_exit)
     with pytest.raises(SystemExit):
         worker_main.main()
     assert exits == [worker_main.EXIT_LEASE_LOST]
+
+
+@pytest.mark.parametrize("profile", list(WorkerProfile))
+def test_main_configures_telemetry_before_dbos(
+    calls: list[tuple[str, object]], monkeypatch: pytest.MonkeyPatch, profile: WorkerProfile
+) -> None:
+    """DBOS binds its log handler at construction, so Logfire must be configured first."""
+    settings = Settings(environment=DeploymentEnvironment.DEV)
+    real_run = worker_main.run
+    monkeypatch.setenv(PROFILE_ENV, profile.value)
+    monkeypatch.setattr(worker_main, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        worker_main, "configure_logging", lambda **kwargs: calls.append(("logging", kwargs))
+    )
+    monkeypatch.setattr(
+        worker_main, "configure_tracing", lambda **kwargs: calls.append(("tracing", kwargs))
+    )
+    monkeypatch.setattr(
+        worker_main,
+        "run",
+        lambda settings, profile: real_run(settings, profile, block=False),
+    )
+    assert worker_main.main() == 0
+    names = [name for name, _ in calls]
+    assert names.index("logging") < names.index("tracing") < names.index("configure")
+    assert dict(calls)["logging"] == {"level": logging.INFO, "to_logfire": True}
+    assert dict(calls)["tracing"] == {
+        "service_name": f"curate-d-worker-{profile.value}",
+        "service_version": dbos_app.APPLICATION_VERSION,
+        "environment": DeploymentEnvironment.DEV,
+        "instance_id": "worker-io-0",
+    }
+
+
+def test_main_without_an_identity_exports_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing executor identity fails before any telemetry is configured."""
+    traced: list[dict[str, object]] = []
+    monkeypatch.delenv(EXECUTOR_ID_ENV, raising=False)
+    monkeypatch.delenv(POD_NAME_ENV, raising=False)
+    monkeypatch.setenv(PROFILE_ENV, WorkerProfile.IO.value)
+    monkeypatch.setattr(worker_main, "get_settings", Settings)
+    monkeypatch.setattr(worker_main, "configure_logging", lambda **kwargs: None)
+    monkeypatch.setattr(worker_main, "configure_tracing", lambda **kwargs: traced.append(kwargs))
+    with pytest.raises(ExecutorIdentityError):
+        worker_main.main()
+    assert traced == []
 
 
 def test_an_unsubstituted_drain_client_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:

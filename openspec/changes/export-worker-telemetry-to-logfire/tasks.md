@@ -60,17 +60,17 @@ PR targets `dev`. Integration tests need `make test-stack` once before the first
 
 ## 3. Stream C: entry points (after 1.2 and 1.3)
 
-- [ ] 3.1 In `src/curate_d/worker/main.py:main()`, resolve `profile = resolve_profile()`,
+- [x] 3.1 In `src/curate_d/worker/main.py:main()`, resolve `profile = resolve_profile()`,
   `settings = get_settings()` and `executor_id = resolve_executor_id()`, call
   `configure_logging(level=logging.INFO, to_logfire=True)` then
   `configure_tracing(service_name=f"curate-d-worker-{profile.value}",
   service_version=dbos_app.APPLICATION_VERSION, environment=settings.environment,
   instance_id=executor_id)`, then `run(settings, profile)`; update the docstring; verify
   with `make lint typecheck` and `python -m curate_d.runtime.workflow_audit` clean
-- [ ] 3.2 In `src/curate_d/api/__main__.py:main()`, pass `to_logfire=True` to
+- [x] 3.2 In `src/curate_d/api/__main__.py:main()`, pass `to_logfire=True` to
   `configure_logging`; verify with `make lint typecheck` and the existing API tests green
   (`uv run pytest tests/unit/api --no-cov`)
-- [ ] 3.3 Add to `tests/unit/runtime/test_worker_main.py` a test of `main()` that patches
+- [x] 3.3 Add to `tests/unit/runtime/test_worker_main.py` a test of `main()` that patches
   `configure_tracing` and `dbos_app.configure` (through the existing `calls` fixture's
   recording style) and asserts the call order `logging → tracing → configure`, the
   service name for each profile, the environment from settings and `instance_id` equal to

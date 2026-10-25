@@ -42,7 +42,7 @@ def main() -> int:
     Returns:
         Always 0; uvicorn.run blocks until the process is signaled to stop.
     """
-    configure_logging(level=logging.INFO)
+    configure_logging(level=logging.INFO, to_logfire=True)
     configure_tracing(
         service_name=SERVICE_NAME,
         service_version=APPLICATION_VERSION,
