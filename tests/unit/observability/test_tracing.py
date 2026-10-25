@@ -1,51 +1,33 @@
-"""Request tracing: what a request span carries to Logfire.
+"""Process telemetry: what a span carries to Logfire, and what a failing export costs.
 
 Isolated: tracing is configured with an in-memory exporter in place of Logfire's, so
-nothing is sent. The exporter also receives the pending span Logfire emits when a span
-starts, which is where a value set before any hook runs would show up. Logfire's
-configuration is process-wide, so each test detaches its exporter when it ends.
+nothing is sent (`capture.traced_to`). The exporter also receives the pending span Logfire
+emits when a span starts, which is where a value set before any hook runs would show up.
 """
 
-from collections.abc import Iterator
-from contextlib import contextmanager
+import uuid
+from collections.abc import Iterator, Sequence
 
 import logfire
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from logfire.testing import TestExporter
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
 
-from curate_d.observability import configure_tracing, trace_requests
+from curate_d.observability import configure_logging, get_logger, trace_requests
 from curate_d.observability.tracing import validation_errors_only
+from tests.unit.observability.capture import stderr_captured, traced_to
 
 SECRET = "s3cr3t-code"
-
-
-@contextmanager
-def _traced_to(captured: TestExporter, environment: str | None = None) -> Iterator[None]:
-    """Configure tracing over `captured`, then reconfigure Logfire to export nowhere.
-
-    Logfire has no public reset. Reconfiguring shuts down the previous tracer provider,
-    so spans from later tests cannot reach `captured`.
-    """
-    configure_tracing(
-        service_name="test",
-        service_version="0",
-        environment=environment,
-        local_processor=SimpleSpanProcessor(captured),
-    )
-    try:
-        yield
-    finally:
-        logfire.configure(send_to_logfire=False, console=False, metrics=False)
 
 
 @pytest.fixture
 def exporter() -> Iterator[TestExporter]:
     """Configure tracing over an in-memory exporter for one test and return it."""
     captured = TestExporter()
-    with _traced_to(captured):
+    with traced_to(SimpleSpanProcessor(captured)):
         yield captured
 
 
@@ -123,7 +105,7 @@ def test_mapper_records_nothing_without_errors() -> None:
 def test_exporter_is_detached_after_the_test() -> None:
     """Send no span to a test's exporter once its tracing scope has ended."""
     captured = TestExporter()
-    with _traced_to(captured):
+    with traced_to(SimpleSpanProcessor(captured)):
         logfire.info("inside")
     inside = len(captured.exported_spans)
     logfire.info("after")
@@ -134,7 +116,7 @@ def test_exporter_is_detached_after_the_test() -> None:
 def test_spans_carry_the_environment() -> None:
     """Label every span's resource with the configured deployment environment."""
     captured = TestExporter()
-    with _traced_to(captured, environment="dev"):
+    with traced_to(SimpleSpanProcessor(captured), environment="dev"):
         logfire.info("labelled")
     resources = [span.resource.attributes for span in captured.exported_spans]
     assert resources
@@ -145,3 +127,85 @@ def test_health_probes_are_not_traced(client: TestClient, exporter: TestExporter
     """Create no span for a health probe, so probes do not drown out real requests."""
     assert client.get("/health/live").status_code == 200
     assert exporter.exported_spans == []
+
+
+def test_spans_carry_the_given_instance_id() -> None:
+    """Label every span's resource with the instance id the process passes."""
+    captured = TestExporter()
+    with traced_to(SimpleSpanProcessor(captured), instance_id="curate-d-worker-io-0"):
+        logfire.info("labelled")
+    resources = [span.resource.attributes for span in captured.exported_spans]
+    assert resources
+    assert all(r.get("service.instance.id") == "curate-d-worker-io-0" for r in resources)
+
+
+def test_no_instance_id_keeps_logfires_generated_one() -> None:
+    """Passing no instance id leaves Logfire's generated one in place."""
+    captured = TestExporter()
+    with traced_to(SimpleSpanProcessor(captured)):
+        logfire.info("unlabelled")
+    [instance_id] = {
+        span.resource.attributes.get("service.instance.id") for span in captured.exported_spans
+    }
+    assert isinstance(instance_id, str)
+    uuid.UUID(instance_id)
+
+
+class _RaisingExporter(SpanExporter):
+    """An exporter that fails every export, as an unreachable backend would."""
+
+    def __init__(self) -> None:
+        """Start with no export attempted."""
+        self.attempts = 0
+
+    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+        """Count the attempt and raise."""
+        self.attempts += 1
+        raise ConnectionError("export failed")
+
+
+class _RaisingProcessor(SpanProcessor):
+    """A span processor that raises on every finished span."""
+
+    def __init__(self) -> None:
+        """Start with no span seen."""
+        self.ended = 0
+
+    def on_end(self, span: ReadableSpan) -> None:
+        """Count the span and raise."""
+        self.ended += 1
+        raise RuntimeError("processor failed")
+
+
+def _log_exported_event(processor: SpanProcessor) -> str:
+    """Log one event with export on over `processor`; return what reached stderr."""
+    with (
+        pytest.MonkeyPatch.context() as patch,
+        traced_to(processor),
+        stderr_captured() as stderr,
+    ):
+        # Logfire re-raises its internal errors while PYTEST_CURRENT_TEST is set, to fail
+        # its own tests loudly; without it, it logs and swallows them, as in production.
+        patch.delenv("PYTEST_CURRENT_TEST")
+        configure_logging(to_logfire=True)
+        returned = get_logger("curate_d.test.failing_export").info(
+            "staging.writer_lock_held", caller="ingest"
+        )
+        assert returned is None
+    return stderr.getvalue()
+
+
+def test_a_raising_exporter_leaves_logging_intact() -> None:
+    """A raising exporter drops the record; the stderr line is written, nothing raises."""
+    raising = _RaisingExporter()
+    written = _log_exported_event(SimpleSpanProcessor(raising))
+    assert raising.attempts >= 1
+    assert '"event": "staging.writer_lock_held"' in written
+
+
+def test_a_raising_span_processor_leaves_logging_intact() -> None:
+    """A raising span processor drops the record; the stderr line is written, nothing raises."""
+    raising = _RaisingProcessor()
+    written = _log_exported_event(raising)
+    assert raising.ended >= 1
+    assert '"event": "staging.writer_lock_held"' in written

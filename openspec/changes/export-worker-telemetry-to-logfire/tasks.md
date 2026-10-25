@@ -13,19 +13,19 @@ PR targets `dev`. Integration tests need `make test-stack` once before the first
   `opentelemetry-instrumentation-logging`), run `uv lock` and `uv sync`; verify with
   `.venv/bin/python -c "import opentelemetry.instrumentation.logging.handler"` succeeding
   and `git diff --stat uv.lock` showing only the one added package and the extra marker
-- [ ] 1.2 Add `to_logfire: bool = False` to `configure_logging` in
+- [x] 1.2 Add `to_logfire: bool = False` to `configure_logging` in
   `src/curate_d/observability/logging.py`, appending `logfire.StructlogProcessor(console_log=False)`
   after `redaction_processor` and before the renderer when set, and widen the module
   docstring to say the export reads the same masked dict stderr gets; verify with
   `make lint typecheck` and the new tests in 1.4
-- [ ] 1.3 Add `instance_id: str | None = None` to `configure_tracing` in
+- [x] 1.3 Add `instance_id: str | None = None` to `configure_tracing` in
   `src/curate_d/observability/tracing.py`, passed as
   `resource_attributes={"service.instance.id": instance_id}` when set, and widen the
   module docstring from request tracing to process telemetry (events, spans, which
   processes call it); verify with `make lint typecheck` and a test in
   `tests/unit/observability/test_tracing.py` asserting an exported span's resource
   carries the given `service.instance.id` and that none is forced when omitted
-- [ ] 1.4 Add tests to `tests/unit/observability/test_logging.py` driving
+- [x] 1.4 Add tests to `tests/unit/observability/test_logging.py` driving
   `configure_logging(to_logfire=True)` under `_traced_to`-style capture (import the
   helper from `test_tracing.py` or move it to a shared module under `tests/unit/observability/`):
   a `staging.writer_lock_held` event logged from a `threading.Thread` arrives as one record
@@ -35,7 +35,7 @@ PR targets `dev`. Integration tests need `make test-stack` once before the first
   stderr line; the stderr JSON line of one event is identical (timestamp aside) with
   `to_logfire` on and off; `configure_logging()` without the flag adds no record; verify
   with `uv run pytest tests/unit/observability --no-cov` green
-- [ ] 1.5 Add failure-isolation tests to `tests/unit/observability/test_tracing.py`: with
+- [x] 1.5 Add failure-isolation tests to `tests/unit/observability/test_tracing.py`: with
   `local_processor=SimpleSpanProcessor(<exporter whose export raises>)` and with a
   `SpanProcessor` whose `on_end` raises, a structlog event under `to_logfire=True` still
   writes its stderr line, `logger.info` returns normally and no exception reaches the test;

@@ -1,8 +1,13 @@
 """Structured logging setup.
 
 JSON in deployment so records are queryable; human-readable locally. The redaction
-processor sits last in the chain, after everything that might add a field, so nothing
-can be bound to an event after its last chance to be masked.
+processor sits after everything that might add a field, so nothing can be bound to an
+event after its last chance to be masked.
+
+A process that exports telemetry also sends each event to Logfire as a log record. The
+export reads the same masked dict stderr gets, from between redaction and rendering, and
+leaves it unchanged, so the stderr line is the same with export on or off. Logfire must be
+configured (`tracing.configure_tracing`) for the record to go anywhere.
 """
 
 import logging
@@ -10,6 +15,7 @@ import sys
 import threading
 from collections.abc import MutableMapping
 
+import logfire
 import structlog
 from structlog.typing import EventDict, WrappedLogger
 
@@ -54,8 +60,20 @@ def redaction_processor(
     return redacted
 
 
-def configure_logging(*, json_output: bool = True, level: int = logging.INFO) -> None:
-    """Install the shared processor chain. Safe to call more than once."""
+def configure_logging(
+    *, json_output: bool = True, level: int = logging.INFO, to_logfire: bool = False
+) -> None:
+    """Install the shared processor chain. Safe to call more than once.
+
+    Args:
+        level: Events below it are dropped before any processor, export included.
+        to_logfire: Also send every event to Logfire as a log record. Only entry points
+            that configure Logfire pass it; elsewhere each record would be dropped with a
+            not-configured warning.
+    """
+    exporters: list[structlog.typing.Processor] = (
+        [logfire.StructlogProcessor(console_log=False)] if to_logfire else []
+    )
     renderer: structlog.typing.Processor = (
         structlog.processors.JSONRenderer()
         if json_output
@@ -69,8 +87,10 @@ def configure_logging(*, json_output: bool = True, level: int = logging.INFO) ->
             structlog.processors.TimeStamper(fmt="iso", utc=True),
             structlog.processors.StackInfoRenderer(),
             structlog.processors.format_exc_info,
-            # Last before rendering: every field that will be emitted now exists.
+            # Every field that will be emitted now exists.
             redaction_processor,
+            # After redaction, so the export never sees an unmasked field.
+            *exporters,
             renderer,
         ],
         wrapper_class=structlog.make_filtering_bound_logger(level),
