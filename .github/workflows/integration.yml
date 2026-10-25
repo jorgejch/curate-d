@@ -371,11 +371,13 @@ jobs:
       # keeps the container and its log, so only the running incarnation's log counts
       # (`--since` its start), and it must be the same incarnation, still running, once
       # the event is seen: a worker that logged ready and then crashed or restarted is not.
+      # Once both have, each is checked again, since one may exit while the other is waited on.
       - name: Wait for the workers to be ready
         run: |
           incarnation() {
             docker inspect --format '{{.State.Running}} {{.State.StartedAt}} {{.RestartCount}}' "$1"
           }
+          seen=""
           for service in worker-io worker-cpu; do
             deadline=$((SECONDS + 120))
             ready=false
@@ -397,7 +399,16 @@ jobs:
               [ -n "${container:-}" ] && incarnation "$container"
               exit 1
             fi
+            seen+="$service $container $before"$'\n'
           done
+          while read -r service container before; do
+            [ -n "$service" ] || continue
+            now=$(incarnation "$container" 2>&1 || true)
+            if [ "$now" != "$before" ]; then
+              echo "::error::$service changed after it logged worker.ready: it was '$before', it is now '$now'"
+              exit 1
+            fi
+          done <<< "$seen"
 
       # `worker.ready` follows the schedule apply whether or not it wrote anything: a worker
       # not on DBOS's latest version leaves the schedules to that version. The image's own
