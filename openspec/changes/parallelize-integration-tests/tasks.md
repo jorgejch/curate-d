@@ -160,12 +160,12 @@ B and C can be written against the same contract. Group 4 waits on everything.
 - [x] 4.1 Run `make lint typecheck test` and verify it passes with the coverage floor met
 - [x] 4.2 Run `openspec validate parallelize-integration-tests --strict` and verify it
   passes
-- [ ] 4.3 Open the pull request against `dev`; verify the run shows `Plan the integration
+- [x] 4.3 Open the pull request against `dev`; verify the run shows `Plan the integration
   run`, `Integration shard 1 of 4` to `4 of 4`, `Application boot` and `Integration tests`
   all green, the `Integration tests` summary lists four shard lines whose test counts sum
   to the plan's collected count and the merged contract and backend-check counts, and
   record the run URL and the shard wall times in the pull request description
-- [ ] 4.4 Verify the fail-closed path once on the pull request: push a commit that sets
+- [x] 4.4 Verify the fail-closed path once on the pull request: push a commit that sets
   `INTEGRATION_SHARDS`'s default expression to `0` (or temporarily fails one shard's test),
   confirm `Integration tests` fails naming the plan or the shard while the other shards
   finish, then revert the commit; record both run URLs in the pull request description
