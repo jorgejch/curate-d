@@ -68,15 +68,17 @@ are documentation, not behaviour.
   `observability/tracing.py` (no behaviour change; docstring widens from "request
   tracing" to process telemetry), `worker/main.py:main()` (configure tracing before
   `run`), `runtime/dbos_app.py:build_dbos_config` (`enable_otlp`, semconv attribute
-  names), `api/__main__.py` (none beyond ordering, see design).
+  names), `api/__main__.py` (`to_logfire=True` on its logging call).
 - Dependencies: `pyproject.toml` `dbos[otel]>=3.3,<3.4` (adds
   `opentelemetry-instrumentation-logging`), `uv.lock`.
-- Tests: `tests/unit/observability/test_tracing.py` (worker configuration, masked fields
-  arrive masked, no token no export, failing exporter), `tests/unit/observability/test_logging.py`
-  (processor order), `tests/unit/runtime/test_worker_main.py` (main configures tracing
-  before DBOS), `tests/unit/runtime/test_dbos_app.py` or equivalent (config carries
-  `enable_otlp`), one integration test that a launched workflow produces a span under a
-  local processor (`tests/integration/test_workflow_telemetry.py`).
+- Tests: `tests/unit/observability/test_tracing.py` (instance id, failing exporter and
+  processor), `tests/unit/observability/test_logging.py` (masked fields arrive masked,
+  background-thread events, debug filtering, unchanged stderr, no export without the flag)
+  over a shared capture helper `tests/unit/observability/capture.py`,
+  `tests/unit/runtime/test_worker_main.py` (main configures tracing before DBOS),
+  `tests/unit/runtime/test_dbos_app.py` (config carries `enable_otlp`), one integration
+  test that a launched workflow produces a span under a local processor
+  (`tests/integration/test_workflow_telemetry.py`).
 - Docs: `docs/staging.md` "Lock contention events" (SQL queries), `CLAUDE.md` DBOS list
   (configure Logfire before constructing DBOS), `README.md` tech stack line for Logfire if
   it names the API alone.

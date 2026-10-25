@@ -2,7 +2,9 @@
 
 ## Context
 
-See proposal.md for motivation. Current state on `dev` (`6728069`), verified 2026-10-25:
+See proposal.md for motivation. Current state on `dev` (`6728069`), verified 2026-10-25;
+the branch was rebased onto `dev` at `c2ecbf8` the same day, and nothing in between touches
+the files this change edits:
 
 - `observability/tracing.py:configure_tracing` wraps `logfire.configure(send_to_logfire=
   "if-token-present", console=False, scrubbing=extra patterns, additional_span_processors=
@@ -136,7 +138,9 @@ synchronously (Logfire checks it on a background thread and warns); the exporter
 and the batch processor catch exporter exceptions and log them; `Logfire.log` swallows and
 logs internal errors. The unit tests pin the two paths we can drive without a network: an
 exporter whose `export` raises, and a span processor whose `on_end` raises, each behind a
-structlog event, asserting the stderr line and the caller's return.
+structlog event, asserting the stderr line and the caller's return. The redaction-order
+proof is a free-text field carrying `Bearer <secret>`: Logfire has no bearer pattern, so
+only `redaction.py` running first can produce the masked value the test demands.
 
 **D8. Volume: no sampling, no new settings.** Inventory on `dev`: 16 info, 15 warning,
 14 error and 1 critical distinct call sites in `src/curate_d`, none per listed object; the
@@ -199,6 +203,15 @@ waits on A's signature tasks; E waits on A and B.
   read.
 - [Volume grows with a future per-object info event] → D8 names the knob; the event
   inventory is in the proposal for the next reviewer.
+- [Logfire re-raises its internal errors whenever `PYTEST_CURRENT_TEST` is set, so under
+  pytest a raising span processor escapes `Logfire.log` the way it never does in
+  production] → the processor-failure test clears that variable inside its body
+  (`tests/unit/observability/test_tracing.py`, `_log_exported_event`). Undocumented Logfire
+  behaviour: re-check it on every Logfire upgrade.
+- [Logfire's scrubber runs after ours and replaces `[REDACTED]` on a key it also matches
+  (`refresh_token`) with its own marker] → harmless, the secret is gone either way; the spec
+  scenario accepts either mask, and the order proof uses a bearer-token text field Logfire
+  does not scrub (D7).
 
 ## Migration Plan
 

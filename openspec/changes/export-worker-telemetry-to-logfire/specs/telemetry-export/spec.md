@@ -42,7 +42,7 @@ alter the stderr line.
 
 #### Scenario: A masked field stays masked
 - **WHEN** an event is logged with a field named `refresh_token` and a free-text field containing `Bearer <secret>`
-- **THEN** the exported record carries the mask in both places and the secret appears nowhere in it
+- **THEN** the exported record carries a mask in both places (`redaction.py`'s, or Logfire's own scrub marker where its scrubber also matches the key) and the secret appears nowhere in it
 
 #### Scenario: Debug events are not exported
 - **WHEN** a process logging at INFO emits a debug event
