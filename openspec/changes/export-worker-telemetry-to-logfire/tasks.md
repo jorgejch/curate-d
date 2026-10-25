@@ -44,13 +44,13 @@ PR targets `dev`. Integration tests need `make test-stack` once before the first
 
 ## 2. Stream B: DBOS configuration and the `CLAUDE.md` record
 
-- [ ] 2.1 Set `enable_otlp=True` and `otel_attribute_format="semconv"` in
+- [x] 2.1 Set `enable_otlp=True` and `otel_attribute_format="semconv"` in
   `build_dbos_config` (`src/curate_d/runtime/dbos_app.py`) with a comment naming the
   provider contract (spans and the log handler go to whatever OpenTelemetry providers are
   installed when `DBOS()` is constructed, which is why entry points configure Logfire
   first) and extend the module docstring's construction rule accordingly; verify with a
   test in `tests/unit/runtime/test_dbos_app.py` asserting both keys and `make lint typecheck`
-- [ ] 2.2 Add a bullet to `CLAUDE.md`'s DBOS list: workflow and step spans and DBOS's log
+- [x] 2.2 Add a bullet to `CLAUDE.md`'s DBOS list: workflow and step spans and DBOS's log
   lines export through `enable_otlp` onto the process's Logfire providers; an entry point
   that exports calls `configure_tracing` before `dbos_app.configure`, DBOS constructed
   first still runs but exports no DBOS log lines, and the `otel` extra is what supplies

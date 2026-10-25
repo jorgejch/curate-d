@@ -56,6 +56,15 @@ def test_the_configuration_pins_a_version_and_a_schema() -> None:
     assert config["executor_id"] == "worker-1"
 
 
+def test_the_configuration_exports_spans_and_logs_through_the_global_providers() -> None:
+    """DBOS exports onto whatever providers Logfire installed, with semconv attribute names."""
+    config = build_dbos_config(Settings(), executor_id="worker-1")
+    assert config["enable_otlp"] is True
+    assert config["otel_attribute_format"] == "semconv"
+    assert "otlp_traces_endpoints" not in config
+    assert "otlp_logs_endpoints" not in config
+
+
 @pytest.mark.parametrize("environment", list(DeploymentEnvironment))
 def test_dbos_runs_under_the_environment_s_name(
     environment: DeploymentEnvironment, monkeypatch: pytest.MonkeyPatch
