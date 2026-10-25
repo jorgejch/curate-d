@@ -6,22 +6,38 @@
 #   <root>/source      the fixture library, scanned
 #   <root>/organized   the policy's only destination
 #
-# Requires CURATE_D_URL, CURATE_D_NAMESPACE, CURATE_D_POD and CURATE_D_TEST_ROOT (see .env.example).
+# Requires CURATE_D_URL, CURATE_D_NAMESPACE and CURATE_D_TEST_ROOT (see .env.example). The I/O
+# worker pod is found by its labels (app=curate-d, component=worker-io).
 #
 # Usage: tests/local/pcloud/dev_api.sh COMMAND [ARGS]   (run with no command for the list)
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../../.." && pwd)
-# Deployment-specific values come from the gitignored .env (see .env.example).
-if [[ -f $REPO/.env ]]; then set -a; source "$REPO/.env"; set +a; fi
+# Export the KEY=VALUE lines of $1, skipping comments and keys the environment already sets.
+# Values are taken literally, one pair of surrounding quotes stripped, never evaluated.
+load_env() {
+  local line key value skip='^[[:space:]]*(#|$)' name='^[A-Za-z_][A-Za-z0-9_]*$'
+  local quoted='^"(.*)"$' single="^'(.*)'$"
+  while IFS= read -r line; do
+    if [[ $line =~ $skip || $line != *=* ]]; then continue; fi
+    key=${line%%=*} value=${line#*=}
+    if [[ ! $key =~ $name ]]; then continue; fi
+    if [[ $value =~ $quoted || $value =~ $single ]]; then value=${BASH_REMATCH[1]}; fi
+    if [[ -z ${!key+x} ]]; then export "$key=$value"; fi
+  done <<<"$1"
+}
+# Deployment-specific values come from the gitignored .env (see .env.example), which may be
+# a 1Password Environment mounted as a named pipe: not a regular file (-f fails), served
+# afresh on every read, and empty to bash 3.2's `source`. So read it once, whole, and parse it.
+if [[ -e $REPO/.env ]]; then load_env "$(<"$REPO/.env")"; fi
 BASE=${CURATE_D_URL:?set CURATE_D_URL (the deployed control plane URL) in .env}
 NAMESPACE=${CURATE_D_NAMESPACE:?set CURATE_D_NAMESPACE (the Kubernetes namespace) in .env}
 TEST_ROOT=${CURATE_D_TEST_ROOT:?set CURATE_D_TEST_ROOT (the pCloud test folder) in .env}
 SOURCE=$TEST_ROOT/source
 ORGANIZED=$TEST_ROOT/organized
 DESTINATION=test-organized
-POD=${CURATE_D_POD:?set CURATE_D_POD (the I/O worker pod name) in .env}
+POD=
 STATE=${XDG_CACHE_HOME:-$HOME/.cache}/curate-d-local
 JAR=$STATE/cookies.txt
 mkdir -p "$STATE"
@@ -48,7 +64,17 @@ account() {
   esac
 }
 
+# Set POD to the I/O worker's running pod, found once by the worker-io StatefulSet's labels.
+find_io_pod() {
+  [[ -z $POD ]] || return 0
+  POD=$(kubectl -n "$NAMESPACE" get pods -l app=curate-d,component=worker-io \
+    --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}') || exit 1
+  POD=${POD%% *}
+  [[ -n $POD ]] || { echo "no running I/O worker pod (component=worker-io) in $NAMESPACE" >&2; exit 1; }
+}
+
 in_pod() {
+  find_io_pod
   kubectl -n "$NAMESPACE" exec -i "$POD" -c worker -- python - "$@" <"$HERE/in_pod.py"
 }
 
@@ -120,6 +146,7 @@ case $command in
     acct=$(account)
     library=$(mktemp -d)/curate-d-library
     (cd "$REPO" && uv run python -m tests.local.pcloud.write_library "$library" ${1:+"$1"})
+    find_io_pod
     kubectl -n "$NAMESPACE" exec -i "$POD" -c worker -- python -c '
 import shutil, sys, tarfile
 shutil.rmtree("/scratch/curate-d-seed", ignore_errors=True)
