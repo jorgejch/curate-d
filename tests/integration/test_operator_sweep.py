@@ -218,6 +218,9 @@ def test_a_live_workers_pending_row_is_left_alone(
     _seed(system_engine, workflow_id, executor_id=executor, version=target)
     worker = ExecutorLease.for_settings(settings, executor, version=target)
     worker.acquire(timeout=10)
+    # The worker stands in for another process. Its acquisition logs before `main` configures
+    # logging, and unconfigured structlog prints to stdout: drop that so stdout is the report.
+    capsys.readouterr()
     try:
         before = _row(system_engine, workflow_id)
         operator_sweep.main(["--target-version", target])

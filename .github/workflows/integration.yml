@@ -1,28 +1,45 @@
 name: Integration
 
-# The whole integration suite, against the whole local stack, on a pull request to dev or
-# main that changes a path the suite depends on (the `changes` step's `suite` filter). The
-# ruleset requires this job, so it is half of the merge gate; checks.yml is the other half.
-# Feature-branch pushes never run it: the suite is the slow part, and its PR run is the one
-# that counts.
+# The whole integration suite, split across shards, against the whole local stack, on a pull
+# request to dev or main that changes a path the suite depends on (the plan's `changes`
+# step, `suite` filter). The ruleset requires `Integration tests`, so it is half of the
+# merge gate; checks.yml is the other half. Feature-branch pushes never run it: the suite is
+# the slow part, and its PR run is the one that counts.
 #
-# The detection is a step of the required job, not a `paths` filter or a separate job: a
-# filtered-out workflow leaves the required check pending, and a job skipped because its
-# dependency failed counts as passing. A pull request that changes no declared path still
-# reports the check, green, with every step after the guard skipped; a detection that fails
-# or answers neither true nor false fails it.
+# Four jobs. `plan` detects the change, checks the shard count and, when the suite is
+# selected, collects it once. `shard` runs one group of that collection per matrix entry.
+# `boot` builds the application image from this commit and boots it. `integration` is the
+# gate over the other three.
 #
-# The stack is the one `make stack-up` brings up: PostgreSQL with PostGIS, RustFS with the
-# staging provisioning, the rclone daemon, the API and both worker profiles, all from
-# compose.yaml with its pinned images, so CI cannot drift from what developers run. The
-# application image is built from this commit, which also checks the Dockerfile before
-# docker-publish.yml builds from it.
+# The required name sits on the aggregate, not on the shards: a matrix names its checks
+# `<name> (<group>)`, so the required set would change with the shard count, and GitHub
+# counts a skipped required check as passing. So the aggregate runs on every outcome
+# (`if: always()`) and fails closed: it passes only when the plan succeeded and either the
+# suite was not selected and the shards and the boot were skipped, or it was selected, they
+# all succeeded, and the shards' reports account for every collected test.
 #
-# The API and the workers start only after the suite. The suite calls neither, and a worker
-# writes the persisted schedules on launch: every launched DBOS process, the suite's
-# included, then fires them onto the latest application version, which the suite's schedule
-# fixtures make its own. A recovery or refresh tick would then run in the test process,
-# against the test rows, whenever the wall clock says so.
+# The detection is a step of the plan, not a `paths` filter: a filtered-out workflow leaves
+# the required check pending. A pull request that changes no declared path still reports
+# the check, green, with the shards and the boot skipped; a detection that fails or answers
+# neither true nor false fails the plan, and the gate with it.
+#
+# Each shard and the boot bring up their own stack, the one `make test-stack` brings up:
+# PostgreSQL with PostGIS, RustFS with the staging provisioning and the rclone daemon, all
+# from compose.yaml with its pinned images, so CI cannot drift from what developers run.
+# Every runner has its own Docker daemon, so compose's published ports cannot collide
+# between jobs, and no job reads another's database or bucket. Inside a shard the tests run
+# serially (see its suite step).
+#
+# The shard count is the repository variable INTEGRATION_SHARDS, default 4; the Makefile's
+# SPLITS mirrors the default and test_integration_workflow.py pins the two together.
+# Changing the variable changes the next run without a commit. pytest-split balances the
+# groups by the committed .test_durations (`make test-durations` regenerates it).
+#
+# The boot runs on its own stack, beside no test: a worker writes the persisted schedules on
+# launch, and every DBOS process on that database then fires them onto the latest
+# application version, so a recovery or refresh tick would otherwise run in a test process,
+# against the test rows, whenever the wall clock says so. Building the image here also
+# checks the Dockerfile before docker-publish.yml builds from it.
 on:
   pull_request:
     branches:
@@ -34,37 +51,34 @@ concurrency:
   group: integration-${{ github.ref }}
   cancel-in-progress: true
 
-permissions:
-  contents: read
-  # dorny/paths-filter lists a pull request's changed files through the API.
-  pull-requests: read
-
 env:
   # Compose interpolates it for every application service, and the suite encrypts and
   # decrypts provider tokens with it. A public dummy Fernet key: nothing here is real.
   CURATE_D_CREDENTIAL_ENCRYPTION_KEY: MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=
 
 jobs:
-  integration:
-    # The ruleset requires this check by name: renaming it leaves every pull request
-    # waiting on a check that never reports. Pinned by test_integration_workflow.py.
-    name: Integration tests
+  plan:
+    name: Plan the integration run
     runs-on: ubuntu-26.04
-    # The first full run took about 10 minutes, 9 of them the suite; three times that is
-    # room for a slow runner without letting a hung test hold the PR for the 6-hour default.
-    timeout-minutes: 30
+    # Per job, each the least its steps need. dorny/paths-filter lists a pull request's
+    # changed files through the API.
+    permissions:
+      contents: read
+      pull-requests: read
+    # Detection, two guards and, when selected, an install and a collection: minutes.
+    timeout-minutes: 10
+    outputs:
+      suite: ${{ steps.changes.outputs.suite }}
+      splits: ${{ steps.shards.outputs.splits }}
+      groups: ${{ steps.shards.outputs.groups }}
+      collected: ${{ steps.collect.outputs.collected }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-        with:
-          # The suite runs the pull request's code; no step authenticates to the remote.
-          persist-credentials: false
-
       # Rows 30/31 (lifecycle expiry and stale-upload reclamation) need a multi-day
       # observation on a real clock, which no job outlasts. Without a budget they skip,
       # citing the recorded observation; a budget short enough to pass here would record an
       # unobserved reclamation as verified. `make lifecycle-check` re-observes them on a
-      # time-scaled RustFS, by hand, on a pin bump.
+      # time-scaled RustFS, by hand, on a pin bump. The variable is workflow-wide, so
+      # refusing it here keeps every shard from starting.
       - name: Refuse a CI-sized observation budget
         if: env.CURATE_D_TEST_STAGING_LIFECYCLE_TIMEOUT_SECONDS != ''
         run: |
@@ -73,17 +87,24 @@ jobs:
           echo "enough to pass here would record unobserved reclamation as verified."
           exit 1
 
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          # The suite runs the pull request's code; no step authenticates to the remote.
+          persist-credentials: false
+
       # The suite's inputs: what it imports, builds, mounts, boots or reads. Each pattern is
       # `dir/**` or an exact file, and test_integration_workflow.py pins the set against
       # compose.yaml's mounts, the Dockerfile's copies and the tests' own reads. README.md,
-      # LICENSE and NOTICE are copied into the image for packaging metadata only. Some
-      # exact files need not exist yet, as each is picked up implicitly once added: the
-      # ancestor conftest.py files pytest loads when collecting tests/integration, the
-      # configuration files pytest prefers in tests/ or the root, every override file name
-      # `docker compose` merges into compose.yaml, the .env file Compose and `Settings`
-      # read, the .gitattributes files that rewrite inputs on checkout (the root's, and those
-      # in directories the patterns only partly cover), and the
-      # Dockerfile-specific ignore file BuildKit prefers over .dockerignore.
+      # LICENSE and NOTICE are copied into the image for packaging metadata only.
+      # .test_durations decides which tests each shard runs. Some exact files need not exist
+      # yet, as each is picked up implicitly once added: the ancestor conftest.py files
+      # pytest loads when collecting tests/integration, the configuration files pytest
+      # prefers in tests/ or the root, every override file name `docker compose` merges into
+      # compose.yaml, the .env file Compose and `Settings` read, the .gitattributes files
+      # that rewrite inputs on checkout (the root's, and those in directories the patterns
+      # only partly cover), and the Dockerfile-specific ignore file BuildKit prefers over
+      # .dockerignore.
       - name: Detect changes the suite depends on
         id: changes
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
@@ -126,6 +147,7 @@ jobs:
               - 'pyproject.toml'
               - 'uv.lock'
               - '.python-version'
+              - '.test_durations'
               - '.env'
               - '.gitattributes'
               - 'tests/.gitattributes'
@@ -133,11 +155,12 @@ jobs:
               - 'docker/.gitattributes'
               - '.github/workflows/integration.yml'
 
-      # Every later step runs on `suite == 'true'`, which an empty output would read as a
-      # skip: fail instead, so a broken detection never opens the gate. GitHub lists at most
-      # 3,000 of a pull request's files, so a `false` for a pull request that reaches the
-      # limit may have missed a declared path: fail that too. The image copies README.md,
-      # LICENSE and NOTICE, which select nothing, so a skip without them fails as well.
+      # Every later step, and the shard and boot jobs, run on `suite == 'true'`, which an
+      # empty output would read as a skip: fail instead, so a broken detection never opens
+      # the gate. GitHub lists at most 3,000 of a pull request's files, so a `false` for a
+      # pull request that reaches the limit may have missed a declared path: fail that too.
+      # The image copies README.md, LICENSE and NOTICE, which select nothing, so a skip
+      # without them fails as well.
       - name: Refuse an undecided detection
         env:
           SUITE: ${{ steps.changes.outputs.suite }}
@@ -158,8 +181,299 @@ jobs:
             fi
           done
 
+      # `strategy` cannot read `env` and expressions have no range, so the group list is
+      # built here. The bound keeps a typo from starting hundreds of runners. Runs whether
+      # or not the suite is selected, so a bad variable fails every pull request alike.
+      - name: Refuse an invalid shard count
+        id: shards
+        env:
+          INTEGRATION_SHARDS: ${{ vars.INTEGRATION_SHARDS || 4 }}
+        run: |
+          case "$INTEGRATION_SHARDS" in
+            '' | *[!0-9]*) valid=false ;;
+            *) if [ "$INTEGRATION_SHARDS" -ge 1 ] && [ "$INTEGRATION_SHARDS" -le 32 ]; then valid=true; else valid=false; fi ;;
+          esac
+          if [ "$valid" != "true" ]; then
+            echo "::error::The repository variable INTEGRATION_SHARDS is '$INTEGRATION_SHARDS'; it must be an integer from 1 to 32."
+            exit 1
+          fi
+          splits=$((10#$INTEGRATION_SHARDS))
+          groups=$(seq 1 "$splits" | paste -sd, -)
+          echo "splits=$splits" >> "$GITHUB_OUTPUT"
+          echo "groups=[$groups]" >> "$GITHUB_OUTPUT"
+
+      - name: Install uv
+        if: steps.changes.outputs.suite == 'true'
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        if: steps.changes.outputs.suite == 'true'
+        run: uv sync --locked --no-build
+
+      # The count the gate holds the shards' reports to. Same commit, lockfile and flags as
+      # the shards, so the shards collect the same ids. Node ids are the lines before the
+      # first blank one; the summary after it is not counted.
+      - name: Collect the suite
+        id: collect
+        if: steps.changes.outputs.suite == 'true'
+        run: |
+          uv run --locked --no-build pytest tests/integration --collect-only -q -m integration --staging-backend=rustfs --no-cov > collected.txt
+          collected=$(awk '/^$/ { exit } /::/ { n++ } END { print n + 0 }' collected.txt)
+          if [ "$collected" -eq 0 ]; then
+            echo "::error::Collecting tests/integration found no tests."
+            cat collected.txt
+            exit 1
+          fi
+          echo "Collected $collected tests."
+          echo "collected=$collected" >> "$GITHUB_OUTPUT"
+
+  shard:
+    name: Integration shard ${{ matrix.group }} of ${{ needs.plan.outputs.splits }}
+    needs: plan
+    if: needs.plan.outputs.suite == 'true'
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    # A quarter of a nine-minute suite plus two to three minutes of setup, three times
+    # over: room for a slow runner without letting a hung test hold the PR.
+    timeout-minutes: 15
+    strategy:
+      # Every shard runs to completion, so one red shard still reports the others.
+      fail-fast: false
+      matrix:
+        group: ${{ fromJSON(needs.plan.outputs.groups) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          # The suite runs the pull request's code; no step authenticates to the remote.
+          persist-credentials: false
+
+      # test_local_ocr.py calls Tesseract from the test process, not from a container.
+      - name: Install Tesseract
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes tesseract-ocr
+          tesseract --version
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked --no-build
+
+      # `make test-stack`, the same target developers run: only what the suite talks to,
+      # then the migrations. Its services are image-only, so no image is built here; the
+      # boot job builds it. The DSN `Settings` defaults to is the published 5433. The flags
+      # keep CI's image and lockfile guarantees: nothing is built, and the lock must match.
+      - name: Start PostgreSQL, RustFS and rclone, and apply migrations
+        env:
+          TEST_STACK_UP_FLAGS: --no-build
+          TEST_STACK_UV_FLAGS: --locked --no-build
+        run: make test-stack
+
+      # Serial: a shard has one database, and the suite tests advisory locks across
+      # independent connections. The split is the plan's count, not `strategy.job-total`,
+      # so a second matrix dimension cannot shrink every group. RustFS is the only staging
+      # backend here; OVH verification stays PENDING, and the report header says so.
+      - name: Integration suite
+        run: >-
+          uv run --locked --no-build pytest tests/integration
+          --no-cov -m integration --staging-backend=rustfs
+          --splits ${{ needs.plan.outputs.splits }} --group ${{ matrix.group }}
+          --splitting-algorithm least_duration
+          --junitxml=integration-${{ matrix.group }}.xml -o junit_family=legacy
+
+      # On every outcome: the gate needs a failed shard's report too. A shard that never
+      # reached pytest uploads nothing, and the gate fails on the missing report.
+      - name: Upload the shard report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: integration-report-${{ matrix.group }}
+          path: integration-${{ matrix.group }}.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Stack logs
+        if: failure()
+        run: docker compose logs --no-color --timestamps
+
+      - name: Remove the stack
+        if: always()
+        run: docker compose down --volumes
+
+  boot:
+    name: Application boot
+    needs: plan
+    if: needs.plan.outputs.suite == 'true'
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    # An image build, a stack and two worker waits of at most two minutes each.
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          # The image is built from the pull request's code; no step authenticates to the
+          # remote.
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked --no-build
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Built once and loaded under the tag compose.yaml names, so `compose up --no-build`
+      # starts the API and both workers from it. Same cache as docker-publish.yml.
+      - name: Build the application image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/Dockerfile
+          tags: curate-d:dev
+          load: true
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The same stack as a shard's, then the migrations, so DBOS never launches against a
+      # schema Alembic is still changing. This job runs no test, so no worker's schedule
+      # can tick beside a test process.
+      - name: Start PostgreSQL, RustFS and rclone, and apply migrations
+        env:
+          TEST_STACK_UP_FLAGS: --no-build
+          TEST_STACK_UV_FLAGS: --locked --no-build
+        run: make test-stack
+
+      # The image built from this commit must boot as the API and both workers, on the
+      # migrated database. `--wait` holds for the API's health check (its /health/ready
+      # route); a worker has none, so for a worker it only means the container has not
+      # exited.
+      - name: Start the application services
+        run: docker compose up -d --wait --no-build api worker-io worker-cpu
+
+      # A worker serves no HTTP. It logs `worker.ready` once DBOS has launched, its queues
+      # are registered and its schedules applied (curate_d/worker/main.py), so a worker
+      # that hangs anywhere in startup never logs it. worker-cpu may restart until
+      # worker-io has seeded the staging marker (compose.yaml), hence the wait. A restart
+      # keeps the container and its log, so only the running incarnation's log counts
+      # (`--since` its start), and it must be the same incarnation, still running, once
+      # the event is seen: a worker that logged ready and then crashed or restarted is not.
+      # Once both have, each is checked again, since one may exit while the other is waited on.
+      - name: Wait for the workers to be ready
+        run: |
+          incarnation() {
+            docker inspect --format '{{.State.Running}} {{.State.StartedAt}} {{.RestartCount}}' "$1"
+          }
+          seen=""
+          for service in worker-io worker-cpu; do
+            deadline=$((SECONDS + 120))
+            ready=false
+            while [ "$SECONDS" -lt "$deadline" ]; do
+              container=$(docker compose ps --quiet --all "$service")
+              if [ -n "$container" ]; then
+                before=$(incarnation "$container")
+                started=${before#* }; started=${started%% *}
+                if docker logs --since "$started" "$container" 2>&1 | grep -q '"event": "worker.ready"' \
+                  && [ "$(incarnation "$container")" = "$before" ] && [ "${before%% *}" = "true" ]; then
+                  ready=true
+                  break
+                fi
+              fi
+              sleep 2
+            done
+            if [ "$ready" != "true" ]; then
+              echo "::error::$service did not log worker.ready and stay up, in one incarnation, within 120 seconds"
+              [ -n "${container:-}" ] && incarnation "$container"
+              exit 1
+            fi
+            seen+="$service $container $before"$'\n'
+          done
+          while read -r service container before; do
+            [ -n "$service" ] || continue
+            now=$(incarnation "$container" 2>&1 || true)
+            if [ "$now" != "$before" ]; then
+              echo "::error::$service changed after it logged worker.ready: it was '$before', it is now '$now'"
+              exit 1
+            fi
+          done <<< "$seen"
+
+      # `worker.ready` follows the schedule apply whether or not it wrote anything: a worker
+      # not on DBOS's latest version leaves the schedules to that version. The image's own
+      # version must hold latest here (its first launch on this fresh database registered
+      # it), and worker-io must have stored every declared schedule, under its declared
+      # cron, and nothing else. A stored schedule's status is not compared: a pause survives.
+      - name: Check the workers applied their schedules
+        run: uv run --locked --no-build python -m curate_d.worker.schedule_check
+
+      - name: Stack logs
+        if: failure()
+        run: docker compose logs --no-color --timestamps
+
+      - name: Remove the stack
+        if: always()
+        run: docker compose down --volumes
+
+  integration:
+    # The ruleset requires this check by name: renaming it leaves every pull request
+    # waiting on a check that never reports. Pinned by test_integration_workflow.py.
+    name: Integration tests
+    needs: [plan, shard, boot]
+    # On every outcome: a skipped required check counts as passing, so this job must run
+    # and decide even when a dependency failed or was skipped.
+    if: always()
+    runs-on: ubuntu-26.04
+    # No checkout; the shard reports are this run's own artifacts.
+    permissions:
+      actions: read
+    # Reads results and reports, nothing else.
+    timeout-minutes: 5
+    steps:
+      # Fails closed: only a successful plan with both jobs skipped (not selected) or both
+      # successful (selected) passes. A matrix's result is `failure` when any group failed.
+      - name: Refuse an incomplete run
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          SUITE: ${{ needs.plan.outputs.suite }}
+          SHARD_RESULT: ${{ needs.shard.result }}
+          BOOT_RESULT: ${{ needs.boot.result }}
+        run: |
+          if [ "$PLAN_RESULT" != "success" ]; then
+            echo "::error::The plan job (Plan the integration run) ended '$PLAN_RESULT', not success."
+            exit 1
+          fi
+          case "$SUITE" in
+            false) expected=skipped ;;
+            true) expected=success ;;
+            *)
+              echo "::error::The plan job reported suite='$SUITE', neither true nor false."
+              exit 1
+              ;;
+          esac
+          if [ "$SHARD_RESULT" != "$expected" ]; then
+            echo "::error::The shard job (Integration shard) ended '$SHARD_RESULT'; with suite=$SUITE it must be $expected."
+            exit 1
+          fi
+          if [ "$BOOT_RESULT" != "$expected" ]; then
+            echo "::error::The boot job (Application boot) ended '$BOOT_RESULT'; with suite=$SUITE it must be $expected."
+            exit 1
+          fi
+          echo "plan: $PLAN_RESULT; suite: $SUITE; shard: $SHARD_RESULT; boot: $BOOT_RESULT."
+
       - name: Suite not selected
-        if: steps.changes.outputs.suite == 'false'
+        if: needs.plan.outputs.suite == 'false'
         run: |
           cat >> "$GITHUB_STEP_SUMMARY" <<'MD'
           ### Integration suite
@@ -176,121 +490,101 @@ jobs:
           `docker-compose.override.yml`, `docker-compose.override.yaml`,
           `docker/Dockerfile`,
           `docker/Dockerfile.dockerignore`, `.dockerignore`, `Makefile`,
-          `pyproject.toml`, `uv.lock`, `.python-version`, `.env`, `.gitattributes`,
-          `tests/.gitattributes`, `infrastructure/.gitattributes`,
+          `pyproject.toml`, `uv.lock`, `.python-version`, `.test_durations`, `.env`,
+          `.gitattributes`, `tests/.gitattributes`, `infrastructure/.gitattributes`,
           `docker/.gitattributes`, `.github/workflows/integration.yml`.
           MD
 
-      # test_local_ocr.py calls Tesseract from the test process, not from a container.
-      - name: Install Tesseract
-        if: steps.changes.outputs.suite == 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes tesseract-ocr
-          tesseract --version
-
-      - name: Install uv
-        if: steps.changes.outputs.suite == 'true'
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      # On every selected outcome: a failed shard's report is what the evidence below
+      # shows, as the single report did before the split.
+      - name: Download the shard reports
+        if: always() && needs.plan.outputs.suite == 'true'
+        uses: actions/download-artifact@v8
         with:
-          enable-cache: true
+          pattern: integration-report-*
+          merge-multiple: true
+          path: reports
 
-      - name: Install dependencies
-        if: steps.changes.outputs.suite == 'true'
-        run: uv sync --locked --no-build
-
-      - name: Set up Buildx
-        if: steps.changes.outputs.suite == 'true'
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-
-      # Built once and loaded under the tag compose.yaml names, so `compose up --no-build`
-      # starts the API and both workers from it. Same cache as docker-publish.yml.
-      - name: Build the application image
-        if: steps.changes.outputs.suite == 'true'
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: docker/Dockerfile
-          tags: curate-d:dev
-          load: true
-          push: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      # `make test-stack`, the same target developers run: only what the suite talks to,
-      # then the migrations, so the API and workers wait until the suite is done (see the
-      # header) and DBOS never launches against a schema Alembic is still changing. The DSN
-      # `Settings` defaults to is the published 5433. The flags keep CI's image and lockfile
-      # guarantees: nothing is built, and the lock must match.
-      - name: Start PostgreSQL, RustFS and rclone, and apply migrations
-        if: steps.changes.outputs.suite == 'true'
+      # A green shard proves only what it ran. One report per group, and together exactly
+      # the plan's collection: a shard that never reached pytest, or one that collected
+      # differently, fails the gate even when every job succeeded. JUnit's `tests` counts
+      # skipped tests, as collection does.
+      - name: Check the shards ran the whole suite
+        if: needs.plan.outputs.suite == 'true'
         env:
-          TEST_STACK_UP_FLAGS: --no-build
-          TEST_STACK_UV_FLAGS: --locked --no-build
-        run: make test-stack
-
-      # Serial: the suite shares one database and tests advisory locks across independent
-      # connections. RustFS is the only staging backend here; OVH verification stays
-      # PENDING, and the report header says so.
-      - name: Integration suite
-        if: steps.changes.outputs.suite == 'true'
-        run: >-
-          uv run --locked --no-build pytest tests/integration
-          --no-cov -m integration --staging-backend=rustfs
-          --junitxml=integration.xml -o junit_family=legacy
-
-      # The image built from this commit must still boot as the API and both workers, on
-      # the migrated database. After the suite, so their schedules never tick beside it.
-      # `--wait` holds for the API's health check (its /health/ready route); a worker has
-      # none, so for a worker it only means the container has not exited.
-      - name: Start the application services
-        if: steps.changes.outputs.suite == 'true'
-        run: docker compose up -d --wait --no-build api worker-io worker-cpu
-
-      # A worker serves no HTTP. It logs `worker.ready` once DBOS has launched, its queues
-      # are registered and its schedules applied (curate_d/worker/main.py), so a worker
-      # that hangs anywhere in startup never logs it. worker-cpu may restart until
-      # worker-io has seeded the staging marker (compose.yaml), hence the wait.
-      - name: Wait for the workers to be ready
-        if: steps.changes.outputs.suite == 'true'
-        run: |
-          for service in worker-io worker-cpu; do
-            if ! timeout 120 sh -c "until docker compose logs --no-color $service | grep -q '\"event\": \"worker.ready\"'; do sleep 2; done"; then
-              echo "::error::$service did not log worker.ready within 120 seconds"
-              exit 1
-            fi
-          done
-          # Ready, and still up: a worker that logged ready and then exited is not.
-          for service in worker-io worker-cpu; do
-            docker compose ps --status running --services | grep -qx "$service" || {
-              echo "::error::$service is not running after it logged worker.ready"
-              exit 1
-            }
-          done
-
-      # `worker.ready` follows the schedule apply whether or not it wrote anything: a worker
-      # not on DBOS's latest version leaves the schedules to that version. The image's own
-      # version must hold latest here (its first launch on this database registered it),
-      # and worker-io must have stored every declared schedule, under its declared cron,
-      # and nothing else. A stored schedule's status is not compared: a pause survives.
-      - name: Check the workers applied their schedules
-        if: steps.changes.outputs.suite == 'true'
-        run: uv run --locked --no-build python -m curate_d.worker.schedule_check
-
-      - name: Record staging evidence
-        if: always() && steps.changes.outputs.suite == 'true'
+          SPLITS: ${{ needs.plan.outputs.splits }}
+          COLLECTED: ${{ needs.plan.outputs.collected }}
         run: |
           python3 - <<'PY'
           import os
+          import sys
           from pathlib import Path
           from xml.etree import ElementTree
 
-          report = Path("integration.xml")
+          splits_text = os.environ.get("SPLITS", "")
+          collected_text = os.environ.get("COLLECTED", "")
+          if not splits_text.isdigit() or not collected_text.isdigit():
+              print(f"::error::The plan reported splits='{splits_text}' and collected='{collected_text}'; both must be counts.")
+              sys.exit(1)
+          splits = int(splits_text)
+          collected = int(collected_text)
+
+          expected = {f"integration-{group}.xml" for group in range(1, splits + 1)}
+          present = {report.name for report in Path("reports").glob("integration-*.xml")}
+          for name in sorted(expected - present):
+              print(f"::error::Shard {name.removeprefix('integration-').removesuffix('.xml')} of {splits} left no report ({name}); its tests are unaccounted for.")
+          for name in sorted(present - expected):
+              print(f"::error::{name} matches no shard of {splits}.")
+          if expected != present:
+              sys.exit(1)
+
+          counts = {}
+          identities = set()
+          for group in range(1, splits + 1):
+              root = ElementTree.parse(Path("reports") / f"integration-{group}.xml").getroot()
+              # iter() includes the root itself, whether it is a testsuite or testsuites.
+              counts[group] = sum(int(suite.get("tests", "0")) for suite in root.iter("testsuite"))
+              for case in root.iter("testcase"):
+                  identity = tuple(
+                      case.get(name, "")
+                      for name in ("classname", "name", "file", "line", "url")
+                  )
+                  if identity in identities:
+                      print(f"::error::Duplicate testcase identity across shard reports: {identity}")
+                      sys.exit(1)
+                  identities.add(identity)
+          for group, count in counts.items():
+              print(f"Shard {group}: {count} tests")
+          total = sum(counts.values())
+          if total != collected or len(identities) != collected:
+              print(
+                  f"::error::The shards reported {total} tests and "
+                  f"{len(identities)} unique testcase identities; the plan collected {collected}."
+              )
+              sys.exit(1)
+          print(f"The shards ran all {collected} collected tests.")
+          PY
+
+      - name: Record staging evidence
+        if: always() && needs.plan.outputs.suite == 'true'
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+          from xml.etree import ElementTree
+
+          def group_of(report: Path) -> int:
+              match = re.fullmatch(r"integration-(\d+)\.xml", report.name)
+              return int(match.group(1)) if match else 0
+
+          reports = sorted(Path("reports").glob("integration-*.xml"), key=group_of)
           lines = ["### Integration suite", "", "OVH verification remains PENDING.", ""]
-          if not report.exists():
+          if not reports:
               lines.append("The suite did not produce a result; nothing was verified.")
           else:
-              cases = ElementTree.parse(report).findall(".//testcase")
+              trees = [ElementTree.parse(report) for report in reports]
+              cases = [case for tree in trees for case in tree.iter("testcase")]
 
               def counts(prefix: str) -> str:
                   # Counted per module, so the contract evidence is never mistaken for
@@ -306,8 +600,9 @@ jobs:
 
               lines += ["Whole suite: " + counts("tests.integration."), ""]
               lines += ["#### RustFS staging contract", "", counts("tests.integration.test_staging_contract"), ""]
-              for prop in ElementTree.parse(report).findall(".//property[@name='sdk_checksum_headers']"):
-                  lines += ["Safe SDK checksum headers:", "```json", prop.get("value", ""), "```", ""]
+              for tree in trees:
+                  for prop in tree.findall(".//property[@name='sdk_checksum_headers']"):
+                      lines += ["Safe SDK checksum headers:", "```json", prop.get("value", ""), "```", ""]
               lines += [
                   "#### RustFS backend provisioning checks",
                   "",
@@ -317,15 +612,23 @@ jobs:
                   "(infrastructure/staging-compatibility.md); `make lifecycle-check` "
                   "re-observes them on a RustFS pin bump. On OVH they were observed "
                   "separately.",
+                  "",
+                  "#### Shards",
+                  "",
               ]
+              # One line per shard, so an imbalance or stale .test_durations shows here.
+              for report, tree in zip(reports, trees):
+                  suites = list(tree.getroot().iter("testsuite"))
+                  n = {
+                      attribute: sum(int(s.get(attribute, "0")) for s in suites)
+                      for attribute in ("tests", "failures", "errors", "skipped")
+                  }
+                  seconds = sum(float(s.get("time", "0")) for s in suites)
+                  lines += [
+                      f"Shard {group_of(report)}: tests {n['tests']}; failures {n['failures']}; "
+                      f"errors {n['errors']}; skipped {n['skipped']}; time {seconds:.1f} s",
+                      "",
+                  ]
           with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary:
               summary.write("\n".join(lines) + "\n")
           PY
-
-      - name: Stack logs
-        if: failure() && steps.changes.outputs.suite == 'true'
-        run: docker compose logs --no-color --timestamps
-
-      - name: Remove the stack
-        if: always()
-        run: docker compose down --volumes

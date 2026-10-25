@@ -84,9 +84,12 @@ dev = [
     "pytest~=9.1",
     "pytest-asyncio~=1.4",
     "pytest-cov~=7.1",
-    # Parallel unit runs (`-n auto`). Not in addopts: the integration suite shares one
-    # database and its advisory locks, so it stays serial.
+    # Parallel unit runs (`-n auto`). Not in addopts: each shard's integration tests share
+    # one database and its advisory locks, so the suite stays serial per shard and is split
+    # across isolated stacks by pytest-split instead.
     "pytest-xdist~=3.8",
+    # Splits the integration suite across CI shards by recorded `.test_durations`.
+    "pytest-split~=0.11",
     "pyyaml~=6.0",
     "types-pyyaml~=6.0.12",
     # S3 client types. aioboto3 ships none, and the project forbids untyped containers,

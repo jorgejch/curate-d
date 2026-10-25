@@ -1,5 +1,6 @@
-"""The integration workflow's shape: its required check, trigger, path gate, suite and readiness."""
+"""The integration workflow's shape: its jobs, required check, path gate, shards and boot."""
 
+import json
 import posixpath
 import re
 from pathlib import Path
@@ -15,6 +16,7 @@ INTEGRATION_TESTS = REPOSITORY_ROOT / "tests" / "integration"
 API_APP = REPOSITORY_ROOT / "src" / "curate_d" / "api" / "app.py"
 WORKER_MAIN = REPOSITORY_ROOT / "src" / "curate_d" / "worker" / "main.py"
 MAKEFILE = REPOSITORY_ROOT / "Makefile"
+DURATIONS = REPOSITORY_ROOT / ".test_durations"
 
 # The paths whose change selects the suite, reviewed against design.md's table.
 EXPECTED_DECLARED_PATHS = [
@@ -60,6 +62,7 @@ EXPECTED_DECLARED_PATHS = [
     "infrastructure/.gitattributes",
     "docker/.gitattributes",
     ".github/workflows/integration.yml",
+    ".test_durations",
 ]
 
 # Files a tool picks up implicitly once they exist, so they select the suite before they do:
@@ -101,8 +104,20 @@ PULL_REQUEST_FILE_LIMIT = 3000
 # hatchling reads these for package metadata only; nothing the suite asserts depends on them.
 PACKAGING_FILES = {"README.md", "LICENSE", "NOTICE"}
 
-SUITE_SELECTED = "steps.changes.outputs.suite == 'true'"
-SUITE_SKIPPED = "steps.changes.outputs.suite == 'false'"
+# The job set: the plan, the shard matrix, the application boot and the required gate.
+JOBS = {"plan", "shard", "boot", "integration"}
+
+# A plan step's condition on the plan's own detection.
+DETECTED = "steps.changes.outputs.suite == 'true'"
+# A later job's or a gate step's condition on the plan's selection.
+SELECTED = "needs.plan.outputs.suite == 'true'"
+NOT_SELECTED = "needs.plan.outputs.suite == 'false'"
+
+STACK_STEP = "Start PostgreSQL, RustFS and rclone, and apply migrations"
+BUDGET_GUARD = "Refuse a CI-sized observation budget"
+SHARD_COUNT_GUARD = "Refuse an invalid shard count"
+BUDGET_VARIABLE = "CURATE_D_TEST_STAGING_LIFECYCLE_TIMEOUT_SECONDS"
+SHARD_COUNT_DEFAULT = 4
 
 # A repository path joined onto a test module's root: `_ROOT / "a" / "b"` reads `a/b`.
 _ROOT_READ = re.compile(r"""\b(?:_ROOT|REPOSITORY_ROOT)((?:\s*/\s*(?:"[^"]*"|'[^']*'))+)""")
@@ -118,24 +133,72 @@ def _workflow() -> RawDocument:
     return cast(RawDocument, yaml.safe_load(WORKFLOW.read_text(encoding="utf-8")))
 
 
-def _job() -> Document:
-    """Return the workflow's integration job."""
-    return cast(Document, cast(Document, _workflow()["jobs"])["integration"])
+def _jobs() -> dict[str, Document]:
+    """Return the workflow's jobs by id."""
+    return cast(dict[str, Document], _workflow()["jobs"])
 
 
-def _steps() -> list[Document]:
-    """Return the integration job's steps."""
-    return cast(list[Document], _job()["steps"])
+def _plan() -> Document:
+    """Return the plan job: detection, guards, collection and the shard split."""
+    return _jobs()["plan"]
 
 
-def _index(name: str) -> int:
-    """Return the position of the step called `name`."""
-    return next(i for i, s in enumerate(_steps()) if s.get("name") == name)
+def _shard() -> Document:
+    """Return the shard matrix job, which runs one group of the suite per runner."""
+    return _jobs()["shard"]
+
+
+def _boot() -> Document:
+    """Return the job that boots the application image on its own stack."""
+    return _jobs()["boot"]
+
+
+def _gate() -> Document:
+    """Return the required aggregate job, `Integration tests`."""
+    return _jobs()["integration"]
+
+
+def _steps(job: Document) -> list[Document]:
+    """Return a job's steps."""
+    return cast(list[Document], job["steps"])
+
+
+def _index(job: Document, name: str) -> int:
+    """Return the position of the step called `name` in `job`.
+
+    Raises:
+        AssertionError: The job has no step of that name.
+    """
+    for i, step in enumerate(_steps(job)):
+        if step.get("name") == name:
+            return i
+    raise AssertionError(f"job {job.get('name')!r} has no step {name!r}")
+
+
+def _step(job: Document, name: str) -> Document:
+    """Return the step called `name` in `job`."""
+    return _steps(job)[_index(job, name)]
+
+
+def _needs(job: Document) -> list[str]:
+    """Return a job's `needs` as a list, whether written as one id or several."""
+    needs = job.get("needs", [])
+    return [needs] if isinstance(needs, str) else cast(list[str], needs)
+
+
+def _text(step: Document) -> str:
+    """Return a step's script together with its environment, as one searchable string."""
+    return f"{step.get('run', '')}\n{step.get('env', '')}"
+
+
+def _fails_loudly(script: str) -> bool:
+    """Return whether a step's script annotates an error and exits non-zero, in shell or Python."""
+    return "::error::" in script and re.search(r"\bexit(?: |\()1\b", script) is not None
 
 
 def _suite_command() -> str:
-    """Return the integration suite's pytest command."""
-    return cast(str, _steps()[_index("Integration suite")]["run"])
+    """Return the shard's pytest command."""
+    return cast(str, _step(_shard(), "Integration suite")["run"])
 
 
 def _test_stack_recipe() -> str:
@@ -156,13 +219,13 @@ def _expanded(run: str) -> str:
 
 
 def _detection_index() -> int:
-    """Return the position of the change-detection step, `id: changes`."""
-    return next(i for i, s in enumerate(_steps()) if s.get("id") == "changes")
+    """Return the position of the plan's change-detection step, `id: changes`."""
+    return next(i for i, s in enumerate(_steps(_plan())) if s.get("id") == "changes")
 
 
 def _declared_paths() -> list[str]:
     """Return the patterns of the detection step's `suite` filter."""
-    step = _steps()[_detection_index()]
+    step = _steps(_plan())[_detection_index()]
     filters = cast(str, cast(Document, step["with"])["filters"])
     return cast(list[str], cast(Document, yaml.safe_load(filters))["suite"])
 
@@ -219,9 +282,49 @@ def _integration_test_reads() -> set[str]:
     return reads
 
 
+def _assert_durations_cover_the_suite(path: Path) -> None:
+    """Assert `path` is a non-empty JSON object of integration node ids to positive seconds."""
+    name = path.name
+    assert path.is_file(), f"{name} is missing: run `make test-durations`"
+    durations = json.loads(path.read_text(encoding="utf-8"))
+    assert isinstance(durations, dict), f"{name} is not a JSON object"
+    assert durations, f"{name} records no test"
+    for node_id, seconds in durations.items():
+        assert node_id.startswith("tests/integration/"), f"{name} records {node_id!r}"
+        # bool is an int to isinstance, and `true` is no duration.
+        positive = (
+            isinstance(seconds, int | float) and not isinstance(seconds, bool) and seconds > 0
+        )
+        assert positive, f"{name} records {seconds!r} for {node_id!r}"
+
+
 def test_the_job_keeps_the_required_check_name() -> None:
     """The ruleset requires the check by this name; a rename leaves every PR waiting."""
-    assert _job()["name"] == "Integration tests"
+    assert _gate()["name"] == "Integration tests"
+    for job_id, job in _jobs().items():
+        if job_id != "integration":
+            assert job.get("name") != "Integration tests", job_id
+
+
+def test_the_run_is_a_plan_its_shards_a_boot_and_the_gate() -> None:
+    """A job outside the four would neither gate the merge nor be gated by the plan."""
+    assert set(_jobs()) == JOBS
+    outputs = cast(Document, _plan()["outputs"])
+    assert {"suite", "splits", "groups", "collected"} <= set(outputs)
+
+
+def test_shards_and_boot_run_only_when_the_plan_selects_the_suite() -> None:
+    """Without the job-level condition, a pull request touching no input would start them."""
+    for job in (_shard(), _boot()):
+        assert _needs(job) == ["plan"], job["name"]
+        assert job["if"] == SELECTED, job["name"]
+
+
+def test_the_gate_runs_on_every_outcome_of_the_jobs_it_needs() -> None:
+    """A skipped required check passes, so the gate must run whatever its dependencies did."""
+    gate = _gate()
+    assert sorted(_needs(gate)) == ["boot", "plan", "shard"]
+    assert gate["if"] == "always()"
 
 
 def test_only_pull_requests_to_dev_or_main_run_the_suite() -> None:
@@ -253,26 +356,68 @@ def test_integration_coverage_never_reaches_sonarqube() -> None:
     assert "--cov-report" not in command
 
 
+def test_each_shard_runs_its_group_of_the_plans_split() -> None:
+    """Shards split the plan's count by recorded duration, serially, each with its own report."""
+    shard = _shard()
+    strategy = cast(Document, shard["strategy"])
+    assert strategy["fail-fast"] is False
+    assert strategy["matrix"] == {"group": "${{ fromJSON(needs.plan.outputs.groups) }}"}
+
+    command = _suite_command()
+    # `strategy.job-total` would double with a second matrix dimension and drop half the suite.
+    assert "--splits ${{ needs.plan.outputs.splits }}" in command
+    assert "--group ${{ matrix.group }}" in command
+    assert "--splitting-algorithm least_duration" in command
+    assert "--junitxml=integration-${{ matrix.group }}.xml" in command
+    # One database, one serial process: no xdist inside a shard.
+    assert re.search(r"(?:^|\s)(?:-n\b|--numprocesses|--dist\b)", command) is None
+
+    suite = _index(shard, "Integration suite")
+    upload = _steps(shard)[suite + 1]
+    assert upload["name"] == "Upload the shard report"
+    assert upload["if"] == "always()"
+    assert str(upload["uses"]).startswith("actions/upload-artifact@")
+    assert "integration-report-${{ matrix.group }}" in str(cast(Document, upload["with"])["name"])
+
+    for step in _steps(shard):
+        uses = str(step.get("uses", ""))
+        assert not uses.startswith(("docker/build-push-action@", "docker/setup-buildx-action@")), (
+            step["name"]
+        )
+
+
 def test_a_ci_sized_lifecycle_budget_fails_before_the_suite() -> None:
     """A budget short enough for a job would record unobserved reclamation as verified."""
-    guard = _steps()[_index("Refuse a CI-sized observation budget")]
-    assert guard["if"] == "env.CURATE_D_TEST_STAGING_LIFECYCLE_TIMEOUT_SECONDS != ''"
+    guard = _step(_plan(), BUDGET_GUARD)
+    assert guard["if"] == f"env.{BUDGET_VARIABLE} != ''"
     assert "exit 1" in cast(str, guard["run"])
-    assert _index("Refuse a CI-sized observation budget") < _index("Integration suite")
+    assert _index(_plan(), BUDGET_GUARD) < _detection_index()
+    # The guard reads the plan's environment; a budget set on a later job would evade it.
+    assert BUDGET_VARIABLE not in cast(Document, _workflow().get("env", {}))
+    for job_id, job in _jobs().items():
+        assert BUDGET_VARIABLE not in cast(Document, job.get("env", {})), job_id
 
 
 def test_migrations_run_before_the_application_services_start() -> None:
     """DBOS must not launch against a schema Alembic is still changing."""
-    migrations = "Start PostgreSQL, RustFS and rclone, and apply migrations"
-    assert _index(migrations) < _index("Start the application services")
+    boot = _boot()
+    assert _index(boot, STACK_STEP) < _index(boot, "Start the application services")
+    assert _index(boot, "Build the application image") < _index(
+        boot, "Start the application services"
+    )
+
+
+def test_the_boot_runs_no_test() -> None:
+    """The booted workers' schedules would tick in a test process on the same database."""
+    for step in _steps(_boot()):
+        assert "pytest" not in cast(str, step.get("run", "")), step["name"]
 
 
 def test_no_application_service_runs_beside_the_suite() -> None:
     """A worker's persisted schedules would tick in the test process, on the suite's version."""
-    suite = _index("Integration suite")
-    assert _index("Start the application services") > suite
     started = False
-    for step in _steps()[:suite]:
+    for step in _steps(_shard()):
+        assert step.get("name") != "Start the application services"
         for line in _expanded(cast(str, step.get("run", ""))).splitlines():
             if "compose" in line.lower() and " up " in line:
                 started = True
@@ -283,16 +428,19 @@ def test_no_application_service_runs_beside_the_suite() -> None:
 
 def test_ci_starts_the_suites_services_with_the_developers_target() -> None:
     """CI and a local run start the same services, so neither can drift from the other."""
-    suite = _index("Integration suite")
-    assert any("make test-stack" in cast(str, s.get("run", "")) for s in _steps()[:suite])
+    shard, boot = _shard(), _boot()
+    for job, first_user in ((shard, "Integration suite"), (boot, "Start the application services")):
+        stack = _index(job, STACK_STEP)
+        assert stack < _index(job, first_user), job["name"]
+        assert "make test-stack" in cast(str, _steps(job)[stack]["run"]), job["name"]
 
 
 def test_ci_keeps_its_image_and_lockfile_guarantees_through_the_target() -> None:
     """CI must build nothing and install only the locked dependencies."""
-    step = _steps()[_index("Start PostgreSQL, RustFS and rclone, and apply migrations")]
-    env = cast(Document, step["env"])
-    assert env["TEST_STACK_UP_FLAGS"] == "--no-build"
-    assert env["TEST_STACK_UV_FLAGS"] == "--locked --no-build"
+    for job in (_shard(), _boot()):
+        env = cast(Document, _step(job, STACK_STEP)["env"])
+        assert env["TEST_STACK_UP_FLAGS"] == "--no-build", job["name"]
+        assert env["TEST_STACK_UV_FLAGS"] == "--locked --no-build", job["name"]
 
 
 def test_test_stack_resets_the_stack_before_it_starts_the_rest() -> None:
@@ -305,18 +453,24 @@ def test_test_stack_resets_the_stack_before_it_starts_the_rest() -> None:
 
 
 def test_the_checkout_leaves_no_token_on_disk() -> None:
-    """The suite runs PR code, which must not read the workflow token from the Git config."""
-    checkouts = [s for s in _steps() if str(s.get("uses", "")).startswith("actions/checkout@")]
-    assert checkouts
-    for step in checkouts:
-        assert cast(Document, step["with"]).get("persist-credentials") is False
+    """Every job runs or reads PR code, which must not find the workflow token in Git config."""
+    checkouts = [
+        (job_id, step)
+        for job_id, job in _jobs().items()
+        for step in _steps(job)
+        if str(step.get("uses", "")).startswith("actions/checkout@")
+    ]
+    assert {job_id for job_id, _ in checkouts} >= {"plan", "shard", "boot"}
+    for job_id, step in checkouts:
+        assert cast(Document, step["with"]).get("persist-credentials") is False, job_id
 
 
 def test_the_stack_is_removed_on_every_outcome() -> None:
     """A failed run must not leave containers or volumes behind on the runner."""
-    teardown = _steps()[_index("Remove the stack")]
-    assert teardown["if"] == "always()"
-    assert "down --volumes" in cast(str, teardown["run"])
+    for job in (_shard(), _boot()):
+        teardown = _step(job, "Remove the stack")
+        assert teardown["if"] == "always()", job["name"]
+        assert "down --volumes" in cast(str, teardown["run"]), job["name"]
 
 
 def test_the_api_health_check_probes_its_readiness_route() -> None:
@@ -329,35 +483,42 @@ def test_the_api_health_check_probes_its_readiness_route() -> None:
 
 
 def test_each_worker_must_log_ready_after_it_starts() -> None:
-    """A worker has no health check, so the gate waits for the event its startup ends on."""
-    assert _index("Start the application services") < _index("Wait for the workers to be ready")
-    wait = cast(str, _steps()[_index("Wait for the workers to be ready")]["run"])
-    assert "for service in worker-io worker-cpu" in wait
-    assert "worker.ready" in wait
+    """A worker has no health check, so the boot waits for the event its startup ends on."""
+    boot = _boot()
+    wait = "Wait for the workers to be ready"
+    assert _index(boot, "Start the application services") < _index(boot, wait)
+    script = cast(str, _step(boot, wait)["run"])
+    assert "for service in worker-io worker-cpu" in script
+    assert "worker.ready" in script
     assert 'logger.info("worker.ready"' in WORKER_MAIN.read_text(encoding="utf-8")
 
 
 def test_the_gate_checks_the_workers_applied_their_schedules() -> None:
     """`worker.ready` follows a schedule apply that may have written nothing."""
-    check = _index("Check the workers applied their schedules")
-    assert _index("Wait for the workers to be ready") < check
-    step = _steps()[check]
+    boot = _boot()
+    check = _index(boot, "Check the workers applied their schedules")
+    assert _index(boot, "Wait for the workers to be ready") < check
+    step = _steps(boot)[check]
     assert step["run"] == "uv run --locked --no-build python -m curate_d.worker.schedule_check"
     assert "continue-on-error" not in step
-    assert step["if"] == SUITE_SELECTED
+    # The job is gated on the selection; a step condition could only skip the check.
+    assert "if" not in step
 
 
-def test_the_gate_detects_changes_inside_the_required_job() -> None:
-    """A detection outside the required job, or a step it does not gate, opens the merge."""
-    assert set(cast(Document, _workflow()["jobs"])) == {"integration"}
-    steps = _steps()
+def test_the_plan_detects_changes_before_installing_anything() -> None:
+    """A detection after an install, or a plan step it does not gate, costs or opens the merge."""
+    steps = _steps(_plan())
     detection = _detection_index()
     assert re.fullmatch(r"dorny/paths-filter@[0-9a-f]{40}", str(steps[detection]["uses"]))
-    assert _index("Refuse a CI-sized observation budget") < detection < _index("Install Tesseract")
+    assert _index(_plan(), BUDGET_GUARD) < detection
+    for step in steps[:detection]:
+        assert str(step.get("uses", "actions/checkout@")).startswith("actions/checkout@"), step[
+            "name"
+        ]
 
     guard = steps[detection + 1]
     run = cast(str, guard["run"])
-    assert "steps.changes.outputs.suite" in run + str(guard.get("env", "")), guard["name"]
+    assert "steps.changes.outputs.suite" in _text(guard), guard["name"]
     assert "::error::" in run and "exit 1" in run, guard["name"]
     assert "if" not in guard, guard["name"]
     # A `false` from a truncated file list may have missed a declared path.
@@ -368,21 +529,96 @@ def test_the_gate_detects_changes_inside_the_required_job() -> None:
     for file in sorted(PACKAGING_FILES):
         assert file in run, guard["name"]
 
-    skips = []
-    for step in steps[detection + 2 :]:
-        name = step["name"]
+    # An unbounded count would start that many runners.
+    count = steps[detection + 2]
+    assert count["name"] == SHARD_COUNT_GUARD
+    assert "if" not in count, count["name"]
+    count_env = cast(Document, count["env"])
+    assert any(
+        f"vars.INTEGRATION_SHARDS || {SHARD_COUNT_DEFAULT}" in str(v) for v in count_env.values()
+    )
+    count_run = cast(str, count["run"])
+    assert re.search(r"\b1\b", count_run) and re.search(r"\b32\b", count_run), count["name"]
+    assert _fails_loudly(count_run), count["name"]
+
+    later = steps[detection + 3 :]
+    assert {"Install uv", "Install dependencies", "Collect the suite"} <= {s["name"] for s in later}
+    for step in later:
         condition = cast(str, step.get("if", ""))
-        if name == "Remove the stack":
-            assert condition == "always()", name
-            continue
         # An `||` would let the step run whatever the detection reported.
-        assert "||" not in condition, name
-        if SUITE_SKIPPED in condition:
+        assert "||" not in condition, step["name"]
+        assert DETECTED in condition, step["name"]
+
+
+def test_the_gate_fails_closed() -> None:
+    """The gate passes only on a successful plan and all-skipped or all-successful jobs."""
+    steps = _steps(_gate())
+    first = steps[0]
+    assert first["name"] == "Refuse an incomplete run"
+    assert "if" not in first
+    text = _text(first)
+    for expression in (
+        "needs.plan.result",
+        "needs.plan.outputs.suite",
+        "needs.shard.result",
+        "needs.boot.result",
+    ):
+        assert expression in text, expression
+    run = cast(str, first["run"])
+    assert _fails_loudly(run)
+    assert "success" in run and "skipped" in run
+
+    skips = []
+    for step in steps[1:]:
+        condition = cast(str, step.get("if", ""))
+        assert "||" not in condition, step["name"]
+        if NOT_SELECTED in condition:
             skips.append(step)
         else:
-            assert SUITE_SELECTED in condition, name
-    assert len(skips) == 1
+            assert SELECTED in condition, step["name"]
+    assert [s["name"] for s in skips] == ["Suite not selected"]
+    assert skips[0]["if"] == NOT_SELECTED
     assert "GITHUB_STEP_SUMMARY" in cast(str, skips[0]["run"])
+    assert _step(_gate(), "Record staging evidence")["if"] == f"always() && {SELECTED}"
+
+
+def test_the_gate_checks_the_shards_ran_the_whole_suite() -> None:
+    """A shard that never reached pytest, or collected differently, fails the gate."""
+    gate = _gate()
+    download = _index(gate, "Download the shard reports")
+    step = _steps(gate)[download]
+    assert str(step["uses"]).startswith("actions/download-artifact@")
+    options = cast(Document, step["with"])
+    assert options["pattern"] == "integration-report-*"
+    assert options["merge-multiple"] is True
+
+    check_index = _index(gate, "Check the shards ran the whole suite")
+    assert download < check_index
+    check = _steps(gate)[check_index]
+    # One report per group, and their test counts summing to the plan's collection.
+    assert "needs.plan.outputs.splits" in _text(check)
+    assert "needs.plan.outputs.collected" in _text(check)
+    run = cast(str, check["run"])
+    assert _fails_loudly(run)
+
+
+def test_the_shard_count_defaults_agree() -> None:
+    """A local `GROUP=<n>` rerun reproduces CI's split only with the same shard count."""
+    makefile = re.search(r"^SPLITS \?= (\d+)$", MAKEFILE.read_text(encoding="utf-8"), re.M)
+    assert makefile, "Makefile sets no `SPLITS ?= <n>`"
+    env = cast(Document, _step(_plan(), SHARD_COUNT_GUARD)["env"])
+    workflow = re.search(r"vars\.INTEGRATION_SHARDS \|\| (\d+)", " ".join(map(str, env.values())))
+    assert workflow, "integration.yml sets no `vars.INTEGRATION_SHARDS || <n>`"
+    makefile_count, workflow_count = int(makefile.group(1)), int(workflow.group(1))
+    assert makefile_count == workflow_count, (
+        f"Makefile SPLITS ?= {makefile_count}, integration.yml || {workflow_count}"
+    )
+    assert workflow_count == SHARD_COUNT_DEFAULT
+
+
+def test_the_durations_file_covers_the_integration_suite() -> None:
+    """Without recorded durations pytest-split falls back to equal counts and skews the shards."""
+    _assert_durations_cover_the_suite(DURATIONS)
 
 
 def test_declared_paths_are_prefixes_or_exact_files() -> None:

@@ -457,8 +457,9 @@ defaults above remain the single source of those values.
 
 On a pull request to `dev` or `main` that changes a path the suite depends on, the
 integration workflow runs the whole integration suite, the shared contract suite and the
-backend checks included, against the pinned RustFS images with `--staging-backend=rustfs`.
-It records only safe checksum headers and result counts in its job summary, and removes its
+backend checks included, in shards, each against its own stack of the pinned RustFS images
+with `--staging-backend=rustfs`. The `Integration tests` summary merges every shard's
+evidence and records only safe checksum headers and result counts; each shard removes its
 stack on every outcome. Rows 30/31 skip there, citing the recorded observation;
 `make lifecycle-check` re-observes them on a RustFS pin bump. This supplies RustFS
 evidence, not OVH release approval.

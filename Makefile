@@ -1,10 +1,12 @@
 # Developer entry points. CI runs the same commands as `lint`, `typecheck` and `test`, so a
 # green `make check` locally means CI's lint, type and unit checks pass with the same
 # flags. A pull request that changes a path the suite depends on also runs
-# `test-integration`'s suite, with RustFS as the only staging backend.
+# `test-integration`'s suite in shards, each on its own stack, with RustFS as the only
+# staging backend.
 
-.PHONY: help install lint format typecheck test coverage test-stack test-integration check \
-	staging-init lifecycle-check stack-up stack-down stack-reset migrate image
+.PHONY: help install lint format typecheck test coverage test-stack test-integration \
+	test-durations check staging-init lifecycle-check stack-up stack-down stack-reset \
+	migrate image
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -47,6 +49,11 @@ TEST_STACK_COMPOSE = CURATE_D_CREDENTIAL_ENCRYPTION_KEY="$${CURATE_D_CREDENTIAL_
 TEST_STACK_UP_FLAGS ?=
 TEST_STACK_UV_FLAGS ?= --locked
 
+# The shard count `make test-integration GROUP=<n>` reproduces. integration.yml's default
+# (`vars.INTEGRATION_SHARDS || 4`) must match; tests/unit/infrastructure/
+# test_integration_workflow.py pins the two together.
+SPLITS ?= 4
+
 test-stack: ## Reset the local stack, then start only the integration suite's services and migrate
 	$(MAKE) stack-reset
 	$(TEST_STACK_COMPOSE) up -d --wait $(TEST_STACK_UP_FLAGS) postgres rustfs rclone
@@ -55,8 +62,15 @@ test-stack: ## Reset the local stack, then start only the integration suite's se
 
 # Integration coverage deliberately does not count toward the floor: these tests are
 # slower and flakier, and letting them cover the gap would hide untested edge cases.
-test-integration: ## Integration suite (needs `make test-stack`); no coverage gate
-	uv run pytest tests/integration --no-cov -m integration
+# GROUP mode forces RustFS: CI's collection is RustFS-only, and the split is a function of
+# the collection, so a reproduced shard must collect the same ids.
+test-integration: ## Integration suite (needs `make test-stack`); GROUP=<n> reruns one CI shard; no coverage gate
+	uv run pytest tests/integration --no-cov -m integration$(if $(GROUP), --staging-backend=rustfs --splits $(SPLITS) --group $(GROUP) --splitting-algorithm least_duration)
+
+# Generated with CI's backend flag so the node ids match. Drift only affects shard balance.
+test-durations: ## Regenerate .test_durations from a whole run; needs make test-stack
+	uv run pytest tests/integration --no-cov -m integration --staging-backend=rustfs \
+		--store-durations --clean-durations
 
 check: lint typecheck test ## Lint, type check and unit suite; PRs add the integration suite when they change its inputs
 

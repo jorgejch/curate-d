@@ -22,6 +22,7 @@ from sqlalchemy import ColumnElement, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from curate_d.api.app import create_app
+from curate_d.classification.taxonomy import active_taxonomy
 from curate_d.config import Settings
 from curate_d.configuration.documents import parse_policy, parse_taxonomy
 from curate_d.configuration.store import ConfigurationRepository, DocumentValidator
@@ -47,7 +48,9 @@ from curate_d.ledger.tables import (
     placements,
     staged_objects,
 )
+from curate_d.placement.policy import active_policy
 from curate_d.placement.rclone import RcloneClient
+from curate_d.rendering.planning import active_templates
 from curate_d.rendering.templates import SEED_TEMPLATES, parse_templates
 from curate_d.runtime.workflow_ids import classification_workflow_id, reconcile_workflow_id
 from curate_d.staging.keys import derive_staging_key
@@ -83,13 +86,21 @@ _PARSERS: dict[ConfigurationKind, DocumentValidator] = {
 
 @pytest.fixture
 async def activate(ledger_engine: AsyncEngine) -> AsyncIterator[Activate]:
-    """Activate configuration for the test; each kind's document in force is put back."""
-    before: dict[ConfigurationKind, dict[str, object] | None] = {}
+    """Activate configuration for the test; each kind's document in force is put back.
+
+    Each kind is stored lazily, on its first read, so on a fresh ledger none may be stored
+    yet. Reading each through its seeding helper first stores the seed, so teardown always
+    has a document to put back and nothing the test activated outlives it.
+    """
+    before: dict[ConfigurationKind, dict[str, object]] = {}
     async with ledger_engine.begin() as connection:
         repository = ConfigurationRepository(connection)
+        for seed in (active_taxonomy, active_templates, active_policy):
+            await seed(repository)
         for kind in _PARSERS:
             active = await repository.active(kind)
-            before[kind] = None if active is None else dict(active[1])
+            assert active is not None
+            before[kind] = dict(active[1])
 
     async def set_document(kind: ConfigurationKind, document: dict[str, object]) -> None:
         """Make `document` the one in force."""
@@ -103,7 +114,7 @@ async def activate(ledger_engine: AsyncEngine) -> AsyncIterator[Activate]:
         repository = ConfigurationRepository(connection)
         for kind, document in before.items():
             active = await repository.active(kind)
-            if document is not None and active is not None and dict(active[1]) != document:
+            if active is not None and dict(active[1]) != document:
                 await repository.activate(kind, document, _PARSERS[kind], created_by="test-e2e")
 
 
