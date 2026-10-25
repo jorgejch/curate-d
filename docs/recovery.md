@@ -157,6 +157,52 @@ the row ends ERROR (Triage). A change that adds a required field to a pickled mo
 retypes one, is therefore a breaking deploy: the drain must reach zero before the old workers
 stop. Say so in the PR.
 
+### Breaking deploys
+
+A breaking deploy is not blue-green. The old build's work is drained and its workers stopped
+before the migration runs, and the new build starts on an empty pipeline. Each entry says why
+it breaks, the steps, what the migration refuses, and where rollback stops. The `dbos` calls
+use the client of the Kill switch (Triage).
+
+1. **`0023_destination_identity`**: placements are keyed by destination identity (provider,
+   account, root) instead of name. The old build's placement workflows are keyed by the name,
+   so the new reconciler would not find one and would start a second copy beside it. Their
+   `Placement` checkpoints also lack the required `destination_id`, so a fork of one raises
+   `StaleCheckpointError`.
+
+   1. Pause the `reconcile` and `check-destinations` schedules:
+      `dbos.pause_schedule("reconcile")`, `dbos.pause_schedule("check-destinations")`.
+   2. Let `transfer-small`, `transfer-large` and `verify` drain, until this returns an empty
+      list:
+
+      ```python
+      dbos.list_workflows(workflow_id_prefix="placement:", status=["ENQUEUED", "PENDING"])
+      ```
+
+   3. Run one reconciliation by hand, `dbos.trigger_schedule("reconcile")`, and wait for it
+      and the work it enqueues. It fails each placement whose workflow died (`STALE`), which
+      the migration would otherwise refuse as in flight.
+   4. Stop the old workers and the API. Run `make migrate` (`alembic upgrade head`) from the
+      new image against the target database.
+   5. Roll out the new build, then resume both schedules (`dbos.resume_schedule(...)`). The
+      migration empties `destination_checks`; the first `check-destinations` cycle refills it.
+
+   When the upgrade refuses, it raises one of these errors and changes nothing. Fix the cause
+   and run step 4 again:
+
+   | Error | Meaning | Recovery |
+   | --- | --- | --- |
+   | `UnloadablePolicyError` | The active policy puts one place under two names, nests one root inside another in an account, or has a root that does not normalize. The new build would not load it. | `PUT` a corrected policy through the old build's control plane. |
+   | `InFlightPlacementsError` | Placements are still `pending`, `copying` or `verifying`; up to five are named. | Wait for step 2, or repeat step 3 for one whose workflow is gone. |
+   | `UnresolvedPlacementsError` | No recorded location, named policy version or version in force names the placement's destination. | Decide per placement, and record each decision in the issue tracking the deploy: set it `failed` with a `failure_reason`, or delete the row. |
+   | `SharedIdentityError` | Two placements resolve to one identity with one content object or one locator. | As for `UnresolvedPlacementsError`: fail or delete one of each pair by a recorded decision. |
+
+   **Rollback boundary.** Until the new build places content, roll back with
+   `alembic downgrade 0022_dry_run_drafts` and redeploy the old build. The downgrade also
+   empties `destination_checks`. Once the new build has placed one content object, or used one
+   locator, at two identities under one name, the name constraints cannot hold the rows: the
+   downgrade refuses ("cannot be restored"), and the only path is forward.
+
 ## Rollback and roll-forward
 
 DBOS registers a version again without retiming it. A build deployed a second time, by

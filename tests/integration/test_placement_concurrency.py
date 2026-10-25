@@ -7,7 +7,9 @@ the row as it was before the first and overwrite the first's write.
 
 Two first starts open on no placement row, which no row lock can hold. They render to
 different locators, so they lock different paths; the placement's own lock is what makes
-the second wait and then find the first's row, and leave the attempt to it.
+the second wait and then find the first's row, and leave the attempt to it. Two first
+starts under one name at two accounts are two placements and take neither lock of the
+other's.
 """
 
 import asyncio
@@ -24,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from curate_d.domain import (
     AuditEntryType,
     ContentObject,
+    DestinationConfig,
     HashAlgorithm,
     Placement,
     PlacementState,
@@ -32,7 +35,12 @@ from curate_d.domain import (
     StrongFingerprint,
     VerificationLevel,
 )
-from curate_d.ledger import ContentObjectRepository, PlacementRepository, SourceObjectRepository
+from curate_d.ledger import (
+    ContentObjectRepository,
+    DestinationRepository,
+    PlacementRepository,
+    SourceObjectRepository,
+)
 from curate_d.ledger.tables import audit_entries, content_objects, placements, source_objects
 from curate_d.placement.pipeline import PlacementStore, conclude, start
 from curate_d.placement.verification import Assessment, SideEvidence, TransferEvidence, Verdict
@@ -62,6 +70,7 @@ class _Verifying:
     content: ContentObject
     source: SourceObject
     placement: Placement
+    destination: DestinationConfig
 
 
 @dataclass(frozen=True)
@@ -70,7 +79,17 @@ class _Unplaced:
 
     content: ContentObject
     source: SourceObject
-    destination: str
+    destination: DestinationConfig
+
+
+def _destination(name: str | None = None) -> DestinationConfig:
+    """Return a destination at an account of its own, under `name` or a fresh one."""
+    return DestinationConfig(
+        name=name or f"dest-{uuid4().hex[:8]}",
+        provider=Provider.PCLOUD,
+        account=f"acct-{uuid4().hex[:8]}",
+        root_path="/Photos",
+    )
 
 
 async def _seed(connection: AsyncConnection) -> tuple[ContentObject, SourceObject]:
@@ -96,16 +115,11 @@ async def _seed(connection: AsyncConnection) -> tuple[ContentObject, SourceObjec
     return content, source
 
 
-async def _remove(
-    engine: AsyncEngine, content: ContentObject, source: SourceObject, destination: str
-) -> None:
-    """Delete the content's placement at `destination`, the source and the content."""
+async def _remove(engine: AsyncEngine, content: ContentObject, source: SourceObject) -> None:
+    """Delete the content's placements, the source and the content."""
     async with engine.begin() as connection:
         await connection.execute(
-            delete(placements).where(
-                placements.c.content_object_id == content.id,
-                placements.c.destination_name == destination,
-            )
+            delete(placements).where(placements.c.content_object_id == content.id)
         )
         await connection.execute(delete(source_objects).where(source_objects.c.id == source.id))
         await connection.execute(delete(content_objects).where(content_objects.c.id == content.id))
@@ -114,13 +128,15 @@ async def _remove(
 @pytest.fixture
 async def verifying(ledger_engine: AsyncEngine) -> AsyncIterator[_Verifying]:
     """Commit a placement verifying attempt 1; remove its rows afterwards."""
-    destination = f"dest-{uuid4().hex[:8]}"
+    destination = _destination()
     async with ledger_engine.begin() as connection:
         content, source = await _seed(connection)
+        await DestinationRepository(connection).ensure(destination.identity)
         placement = await PlacementRepository(connection).upsert(
             Placement.build(
                 content_object_id=content.id,
-                destination_name=destination,
+                destination_id=destination.id,
+                destination_name=destination.name,
                 locator=_LOCATOR,
                 template_version=_TEMPLATE,
             ).model_copy(
@@ -131,18 +147,17 @@ async def verifying(ledger_engine: AsyncEngine) -> AsyncIterator[_Verifying]:
                 }
             )
         )
-    yield _Verifying(content=content, source=source, placement=placement)
-    await _remove(ledger_engine, content, source, destination)
+    yield _Verifying(content=content, source=source, placement=placement, destination=destination)
+    await _remove(ledger_engine, content, source)
 
 
 @pytest.fixture
 async def unplaced(ledger_engine: AsyncEngine) -> AsyncIterator[_Unplaced]:
     """Commit content and its source with no placement; remove their rows afterwards."""
-    destination = f"dest-{uuid4().hex[:8]}"
     async with ledger_engine.begin() as connection:
         content, source = await _seed(connection)
-    yield _Unplaced(content=content, source=source, destination=destination)
-    await _remove(ledger_engine, content, source, destination)
+    yield _Unplaced(content=content, source=source, destination=_destination())
+    await _remove(ledger_engine, content, source)
 
 
 async def _start(
@@ -153,7 +168,7 @@ async def _start(
         connection,
         content_object_id=verifying.content.id,
         fingerprint=verifying.content.fingerprint,
-        destination_name=verifying.placement.destination_name,
+        destination=verifying.destination,
         locator=_LOCATOR,
         template_version=_TEMPLATE,
         source=verifying.source,
@@ -164,14 +179,18 @@ async def _start(
 
 
 async def _first_start(
-    connection: AsyncConnection, unplaced: _Unplaced, *, locator: str
+    connection: AsyncConnection,
+    unplaced: _Unplaced,
+    *,
+    locator: str,
+    destination: DestinationConfig | None = None,
 ) -> tuple[Placement, bool]:
     """Start the first copy of the fixture's content, rendered to `locator`."""
     return await start(
         connection,
         content_object_id=unplaced.content.id,
         fingerprint=unplaced.content.fingerprint,
-        destination_name=unplaced.destination,
+        destination=destination or unplaced.destination,
         locator=locator,
         template_version=_TEMPLATE,
         source=unplaced.source,
@@ -310,3 +329,28 @@ async def test_two_first_starts_at_different_locators_leave_the_attempt_to_the_f
         _LOCATOR,
         0,
     )
+
+
+async def test_first_starts_at_two_identities_under_one_name_do_not_wait_on_each_other(
+    ledger_engine: AsyncEngine, unplaced: _Unplaced
+) -> None:
+    """One name at two accounts: two placements at the plain locator, neither lock shared."""
+    here = unplaced.destination
+    there = _destination(here.name)
+    async with ledger_engine.connect() as first, ledger_engine.connect() as second:
+        await first.begin()
+        mine, copy = await _first_start(first, unplaced, locator=_LOCATOR)
+        assert copy
+
+        await second.begin()
+        # The first transaction still holds its placement and path locks.
+        theirs, copied = await asyncio.wait_for(
+            _first_start(second, unplaced, locator=_LOCATOR, destination=there), _BLOCKED_FOR * 4
+        )
+        await second.commit()
+        await first.commit()
+
+    assert copied
+    assert mine.id != theirs.id
+    assert (mine.destination_id, theirs.destination_id) == (here.id, there.id)
+    assert mine.locator == theirs.locator == _LOCATOR

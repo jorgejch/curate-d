@@ -26,14 +26,16 @@ from curate_d.configuration.store import ConfigurationRepository, DocumentValida
 from curate_d.domain import (
     ConfigurationKind,
     ContentObject,
+    DestinationIdentity,
     HashAlgorithm,
     Placement,
+    Provider,
     RejectedValue,
     StrongFingerprint,
     TaxonomyField,
 )
-from curate_d.ledger import ContentObjectRepository, PlacementRepository
-from curate_d.ledger.tables import configurations, content_objects, placements
+from curate_d.ledger import ContentObjectRepository, DestinationRepository, PlacementRepository
+from curate_d.ledger.tables import configurations, content_objects, destinations, placements
 from curate_d.placement.policy import active_policy
 from curate_d.rendering.planning import active_templates
 from curate_d.rendering.templates import parse_templates
@@ -139,9 +141,14 @@ async def test_a_template_change_leaves_existing_placements_untouched(
                 media_type="image/jpeg",
             )
         )
+        library = DestinationIdentity(
+            provider=Provider.PCLOUD, account=f"acct-{uuid.uuid4().hex[:8]}", root_path="/lib"
+        )
+        await DestinationRepository(connection).ensure(library)
         placed = await PlacementRepository(connection).upsert(
             Placement.build(
                 content_object_id=content.id,
+                destination_id=library.id,
                 destination_name=f"lib-{uuid.uuid4().hex[:8]}",
                 locator="/lib/Photos/2024/x.jpg",
                 template_version="seed-1",
@@ -161,6 +168,7 @@ async def test_a_template_change_leaves_existing_placements_untouched(
     finally:
         async with ledger_engine.begin() as connection:
             await connection.execute(delete(placements).where(placements.c.id == placed.id))
+            await connection.execute(delete(destinations).where(destinations.c.id == library.id))
             await connection.execute(
                 delete(content_objects).where(content_objects.c.id == content.id)
             )
@@ -514,3 +522,57 @@ async def test_a_stored_policy_with_the_retired_flag_is_served_without_it(
     [retention] = served.json()["document"]["retention"]
     assert retention["required_copies"] == 3
     assert "source_counts_as_copy" not in retention
+
+
+def _placing(*destinations: dict[str, str]) -> dict[str, object]:
+    """Return a policy defining `destinations`, with no rules."""
+    return {"destinations": list(destinations), "rules": []}
+
+
+_LIBRARY = {"name": "library", "provider": "pcloud", "account": "1", "root_path": "/Library"}
+
+
+@pytest.mark.parametrize(
+    ("other", "message"),
+    [
+        (_LIBRARY | {"name": "again"}, "are the same place"),
+        (_LIBRARY | {"name": "again", "root_path": "/Library/"}, "are the same place"),
+        (_LIBRARY | {"name": "inner", "root_path": "/Library/Photos"}, "overlap"),
+    ],
+)
+async def test_a_policy_putting_one_place_under_two_names_changes_nothing(
+    http: TestClient, ledger_engine: AsyncEngine, other: dict[str, str], message: str
+) -> None:
+    """Refused naming both destinations; the version in force and the history are unchanged."""
+    before = http.get("/configuration/policy").json()
+    versions = await _policy_versions(ledger_engine)
+
+    refused = http.put("/configuration/policy", json=_placing(_LIBRARY, other))
+
+    assert refused.status_code == 422
+    assert message in refused.text
+    assert "'library'" in refused.text
+    assert f"'{other['name']}'" in refused.text
+    assert http.get("/configuration/policy").json() == before
+    assert await _policy_versions(ledger_engine) == versions
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        _placing(_LIBRARY, _LIBRARY | {"name": "offsite", "account": "2"}),
+        _placing(_LIBRARY | {"account": "2"}),
+    ],
+    ids=["one root in two accounts", "a name moved to another account"],
+)
+async def test_a_policy_with_distinct_places_is_activated(
+    http: TestClient, ledger_engine: AsyncEngine, document: dict[str, object]
+) -> None:
+    """Another account is another place, whether under a second name or the same one."""
+    assert http.put("/configuration/policy", json=_placing(_LIBRARY)).status_code == 200
+    versions = await _policy_versions(ledger_engine)
+
+    accepted = http.put("/configuration/policy", json=document)
+
+    assert accepted.status_code == 200
+    assert await _policy_versions(ledger_engine) == [versions[0] + 1, *versions]

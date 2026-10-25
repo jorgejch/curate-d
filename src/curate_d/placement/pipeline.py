@@ -28,6 +28,14 @@ by content and destination, then its paths: two starts of one placement serializ
 whether or not its row exists yet, and the second finds the first's. When both start
 the same attempt at different locators, the second records nothing and leaves the
 attempt to the first, whose workflow is the one reconciliation looks for.
+
+"The destination" here is its identity (provider, account and root path), never the
+policy's name for it: the placement, its row, its locks and the locator it reserves all
+belong to the identity, and the start records the identity in its own transaction. The
+name is the placement's label, the latest one it was placed under, so a start under a new
+name for the same identity relabels the row and keeps its identifier. A row recorded
+before destinations had identities keeps the identifier derived from the name then, so a
+start finds the row by content and identity, never by a derived identifier.
 """
 
 from collections.abc import Awaitable, Callable, Mapping
@@ -43,6 +51,7 @@ from curate_d.domain import (
     AuditValue,
     ContentObjectId,
     DestinationConfig,
+    DestinationId,
     Placement,
     PlacementId,
     PlacementState,
@@ -51,7 +60,12 @@ from curate_d.domain import (
     StrongFingerprint,
     derive_placement_id,
 )
-from curate_d.ledger import AuditRepository, PlacementRepository, SourceObjectRepository
+from curate_d.ledger import (
+    AuditRepository,
+    DestinationRepository,
+    PlacementRepository,
+    SourceObjectRepository,
+)
 from curate_d.ledger.tables import placements
 from curate_d.placement.verification import Assessment, TransferEvidence, Verdict
 from curate_d.rendering.collision import resolve
@@ -190,6 +204,7 @@ def _audit(
         decided_by=DECIDED_BY,
         details={
             "destination": placement.destination_name,
+            "destination_id": str(placement.destination_id),
             "locator": placement.locator,
             **details,
         },
@@ -233,19 +248,16 @@ async def claim(
     raise LocatorConflictError(f"no free locator for content {content_object_id} from {locator}")
 
 
-def path_lock_name(destination_name: str, locator: str) -> str:
-    """Return the advisory-lock name of one path at a destination.
-
-    Unchanged across builds, so starts of mixed builds still exclude each other.
-    """
-    return f"{destination_name}\n{locator}"
+def path_lock_name(destination_id: DestinationId, locator: str) -> str:
+    """Return the advisory-lock name of one path at a destination identity."""
+    return f"{destination_id}\n{locator}"
 
 
 def placement_lock_name(placement_id: PlacementId) -> str:
     """Return the advisory-lock name of one placement.
 
-    No path's name equals it: a destination name holds only lowercase letters, digits
-    and hyphens, so a path's name has a newline before any colon.
+    No path's name equals it: a destination identifier holds only hexadecimal digits and
+    hyphens, so a path's name has a newline before any colon.
     """
     return f"placement:{placement_id}"
 
@@ -260,10 +272,10 @@ async def reserve(
     *,
     content_object_id: ContentObjectId,
     fingerprint: StrongFingerprint,
-    destination_name: str,
+    destination_id: DestinationId,
     locator: str,
 ) -> tuple[str, ContentObjectId | None]:
-    """Claim a locator at a destination for the rest of the transaction; see `claim`.
+    """Claim a locator at a destination identity for the rest of the transaction; see `claim`.
 
     Each candidate is locked before it is looked at, so two starts racing for one path
     serialize and the second sees the first's claim.
@@ -272,9 +284,9 @@ async def reserve(
 
     async def holder(candidate: str) -> Placement | None:
         """Lock `candidate`, then read what holds it."""
-        await hold(connection, path_lock_name(destination_name, candidate))
+        await hold(connection, path_lock_name(destination_id, candidate))
         return await placements_repo.find_at_locator(
-            destination_name=destination_name, locator=candidate
+            destination_id=destination_id, locator=candidate
         )
 
     return await claim(
@@ -312,7 +324,7 @@ async def start(
     *,
     content_object_id: ContentObjectId,
     fingerprint: StrongFingerprint,
-    destination_name: str,
+    destination: DestinationConfig,
     locator: str,
     template_version: str,
     source: SourceObject,
@@ -333,7 +345,9 @@ async def start(
     racing another of the same placement, with or without a row yet, waits and then
     sees the other's. A start that then finds the same attempt copying or verifying at
     another locator records nothing; see `taken_elsewhere`. `context` joins the audit
-    entry's details; see `started_details`.
+    entry's details; see `started_details`. The destination's identity is recorded first,
+    in this transaction, unless it already is; an existing row keeps its identifier and
+    takes `destination`'s name.
 
     Returns:
         The placement, and whether a copy should start. False, with the placement left
@@ -342,23 +356,25 @@ async def start(
         another locator; the placement's state tells the two apart.
     """
     placements_repo = PlacementRepository(connection)
+    destination_id = await DestinationRepository(connection).ensure(destination.identity)
     await hold(
-        connection, placement_lock_name(derive_placement_id(content_object_id, destination_name))
+        connection, placement_lock_name(derive_placement_id(content_object_id, destination_id))
     )
     reserved, displaced_by = await reserve(
         connection,
         content_object_id=content_object_id,
         fingerprint=fingerprint,
-        destination_name=destination_name,
+        destination_id=destination_id,
         locator=locator,
     )
     built = Placement.build(
         content_object_id=content_object_id,
-        destination_name=destination_name,
+        destination_id=destination_id,
+        destination_name=destination.name,
         locator=reserved,
         template_version=template_version,
     )
-    existing = await placements_repo.get(built.id, for_update=True)
+    existing = await placements_repo.find(content_object_id, destination_id, for_update=True)
     if existing is not None and (
         (existing.state is PlacementState.PRESENT and existing.locator == reserved)
         or taken_elsewhere(existing, attempt=attempt, locator=reserved)
@@ -366,6 +382,7 @@ async def start(
         return existing, False
     placement = built.model_copy(
         update={
+            "id": built.id if existing is None else existing.id,
             "state": PlacementState.COPYING,
             "source_object_id": source.id,
             "attempts": recorded_attempt(existing, attempt),

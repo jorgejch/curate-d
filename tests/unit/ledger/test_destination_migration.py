@@ -37,7 +37,9 @@ def migration() -> ModuleType:
     return module
 
 
-def _versions(migration: ModuleType, *destinations: dict[str, tuple[str, str, str]]) -> list:
+def _versions(
+    migration: ModuleType, *destinations: dict[str, tuple[str, str, str]]
+) -> list[object]:
     """Return policy versions 1, 2, ... activated a day apart from `_T0`."""
     return [
         migration.PolicyVersion(index + 1, _T0 + timedelta(days=index), by_name)

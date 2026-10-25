@@ -11,7 +11,10 @@ continuation, so no recovered workflow replays an unbounded history.
 
 `check_destination` lists a destination and marks registered placements it no longer
 holds as absent, then reconciles the content they belonged to. A destination that cannot
-be listed is recorded as unchecked, and nothing about its placements changes.
+be listed is recorded as unchecked, and nothing about its placements changes. A check looks
+only for placements made at the destination's identity, provider, account and root, and is
+recorded and keyed by it: placements left under the same name at an account or root the
+policy no longer gives it are neither looked for there nor copied again because of it.
 """
 
 from datetime import datetime
@@ -201,7 +204,7 @@ async def _absent_step(destination: DestinationConfig) -> tuple[list[PlacementId
     after: PlacementId | None = None
     async with current().datasource.engine.connect() as connection:
         store = ReconciliationStore(connection)
-        while page := await store.present_at(destination.name, after=after, limit=_PRESENT_PAGE):
+        while page := await store.present_at(destination.id, after=after, limit=_PRESENT_PAGE):
             absent.extend(placement_id for placement_id, locator in page if locator not in held)
             after = page[-1][0]
     return absent, None
@@ -263,7 +266,7 @@ async def _record_tx(
 
 
 async def _absent_tx(
-    destination_name: str, absent: list[PlacementId], checked: str, now: datetime
+    destination: DestinationConfig, absent: list[PlacementId], checked: str, now: datetime
 ) -> list[ContentObjectId]:
     """Mark placements absent and record the check; return the content they belonged to."""
     connection = await current().datasource.sql_session().connection()
@@ -275,18 +278,26 @@ async def _absent_tx(
     ]
     await ReconciliationStore(connection).record_check(
         DestinationCheck(
-            destination_name=destination_name, checked_at=now, reachable=True, absent=len(marked)
+            destination_id=destination.id,
+            destination_name=destination.name,
+            checked_at=now,
+            reachable=True,
+            absent=len(marked),
         )
     )
     return sorted({p.content_object_id for p in marked})
 
 
-async def _unreachable_tx(destination_name: str, reason: str, now: datetime) -> None:
+async def _unreachable_tx(destination: DestinationConfig, reason: str, now: datetime) -> None:
     """Record that a destination could not be checked."""
     connection = await current().datasource.sql_session().connection()
     await ReconciliationStore(connection).record_check(
         DestinationCheck(
-            destination_name=destination_name, checked_at=now, reachable=False, reason=reason
+            destination_id=destination.id,
+            destination_name=destination.name,
+            checked_at=now,
+            reachable=False,
+            reason=reason,
         )
     )
 
@@ -381,13 +392,13 @@ async def check_destination(destination: DestinationConfig, cycle: str) -> int:
             "reconcile.destination_unreachable", destination=destination.name, reason=unreachable
         )
         await datasource.run_tx_step_async(
-            {"name": "record_unreachable"}, _unreachable_tx, destination.name, unreachable, now
+            {"name": "record_unreachable"}, _unreachable_tx, destination, unreachable, now
         )
         return 0
     affected = await datasource.run_tx_step_async(
         {"name": "mark_absent"},
         _absent_tx,
-        destination.name,
+        destination,
         absent,
         f"check {cycle}",
         now,
@@ -395,7 +406,7 @@ async def check_destination(destination: DestinationConfig, cycle: str) -> int:
     if affected:
         await enqueue_reconcile(
             ReconcileRequest(
-                run=f"loss-{destination.name}-{cycle}", content_object_ids=tuple(affected)
+                run=f"loss-{destination.id}-{cycle}", content_object_ids=tuple(affected)
             )
         )
     return len(affected)
@@ -413,7 +424,7 @@ async def check_destinations(scheduled_time: datetime, context: object) -> None:
     for destination in policy.destinations:
         with (
             PropagateOtelContext(),
-            SetWorkflowID(destination_check_workflow_id(destination.name, cycle)),
+            SetWorkflowID(destination_check_workflow_id(destination.id, cycle)),
         ):
             await DBOS.enqueue_workflow_async(
                 QueueName.MAINTENANCE.value, check_destination, destination, cycle

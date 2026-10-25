@@ -18,6 +18,7 @@ from curate_d.domain import (
     MediaKind,
     Placement,
     StrongFingerprint,
+    derive_destination_id,
 )
 from curate_d.rendering.collision import disambiguate, resolve
 from curate_d.rendering.render import RenderError, normalize, render
@@ -308,7 +309,11 @@ def _fingerprint(char: str) -> StrongFingerprint:
 def _occupant(content: ContentObjectId, locator: str) -> Placement:
     """A placement already at `locator`."""
     return Placement.build(
-        content_object_id=content, destination_name="d", locator=locator, template_version="v"
+        content_object_id=content,
+        destination_id=derive_destination_id("pcloud", "acct-1", "/d"),
+        destination_name="d",
+        locator=locator,
+        template_version="v",
     )
 
 

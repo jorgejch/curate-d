@@ -582,7 +582,8 @@ async def test_destination_identity_backfills_from_the_evidence_and_round_trips(
 
     _alembic(empty_database, "upgrade", DESTINATION_IDENTITY)
 
-    assert dict(await _rows(empty_database, "SELECT id, destination_id FROM placements")) == {
+    rows = await _rows(empty_database, "SELECT id, destination_id FROM placements")
+    assert {row[0]: row[1] for row in rows} == {
         ids["recorded"]: _ACCOUNT_1,
         ids["named"]: _ACCOUNT_1,
         ids["between"]: _ACCOUNT_1,

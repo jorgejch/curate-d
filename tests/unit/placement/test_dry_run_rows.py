@@ -27,6 +27,7 @@ from curate_d.domain import (
     StrongFingerprint,
     TaxonomyField,
     VerificationLevel,
+    derive_destination_id,
 )
 from curate_d.placement import dry_run
 from curate_d.placement.dry_run import (
@@ -54,6 +55,7 @@ def test_a_proposed_item_round_trips_through_its_row() -> None:
         run_id=uuid4(),
         content_object_id=ContentObjectId(uuid4()),
         destination_name="lib",
+        destination_id=derive_destination_id("pcloud", "acct-1", "/lib"),
         outcome=DryRunOutcome.PROPOSED,
         paths=("/a/x.jpg", "/b/x.jpg"),
         facts=Facts(
@@ -106,6 +108,7 @@ def test_an_unselected_item_round_trips_without_a_destination() -> None:
         reason="no placement rule selects it",
     )
     assert _item_values(item)["outcome"] == "unselected"
+    assert _item_values(item)["destination_id"] is None
     assert _to_item(_item_values(item)) == item
 
 
@@ -161,6 +164,23 @@ def test_a_request_refuses_a_draft_policy_with_named_destinations() -> None:
     policy = PlacementPolicy(destinations=(_LIBRARY,))
     with pytest.raises(ValidationError, match="cannot be combined"):
         DryRunRequest(run_id=uuid4(), destinations=(_LIBRARY,), policy=policy)
+
+
+@pytest.mark.parametrize(
+    ("root", "match"),
+    [("/Org", "are the same place"), ("/Org/", "are the same place"), ("/Org/Sub", "overlap")],
+)
+def test_a_request_refuses_named_destinations_sharing_a_place(root: str, match: str) -> None:
+    """Named destinations are held to the policy's rule: no place under two names."""
+    other = DestinationConfig(name="other", provider=Provider.PCLOUD, account="1", root_path=root)
+    with pytest.raises(ValidationError, match=match):
+        DryRunRequest(run_id=uuid4(), destinations=(_LIBRARY, other))
+
+
+def test_a_request_accepts_one_root_in_two_accounts() -> None:
+    """The same root in another account is another place."""
+    other = DestinationConfig(name="other", provider=Provider.PCLOUD, account="2", root_path="/Org")
+    assert len(DryRunRequest(run_id=uuid4(), destinations=(_LIBRARY, other)).destinations) == 2
 
 
 _FACTS = Facts(media_kind=MediaKind.PHOTO, category="Photos")
@@ -255,6 +275,7 @@ async def test_content_no_rule_selects_is_one_unselected_item() -> None:
     [item] = await _evaluator(policy).evaluate(_Ledger.content.id)
     assert item.outcome is DryRunOutcome.UNSELECTED
     assert (item.destination_name, item.rules, item.locator) == (NO_DESTINATION, (), None)
+    assert item.destination_id is None
     assert item.facts == _FACTS
 
 
@@ -263,6 +284,7 @@ async def test_a_selected_destination_names_its_rules() -> None:
     """Only the matching rule is recorded, and nothing is unselected."""
     [item] = await _evaluator(_PHOTOS_TO_LIBRARY).evaluate(_Ledger.content.id)
     assert (item.destination_name, item.rules) == ("lib", (SelectingRule(index=1, name="photos"),))
+    assert item.destination_id == derive_destination_id("pcloud", "1", "/Org")
     assert item.outcome is DryRunOutcome.RENDER_FAILED
 
 

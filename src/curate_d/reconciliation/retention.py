@@ -6,20 +6,25 @@ verification rungs. The original never counts toward them. Weaker copies never c
 decision is re-derived from the placements as they stand on every evaluation, so a copy
 whose level is later found weaker changes it.
 
-Only copies at destinations the policy in force defines count, because only those are
-checked: a copy at a destination dropped from the policy is never verified again, so it
-may be gone without the ledger knowing. Such copies are named in the decision instead.
+Only copies at destination identities the policy in force defines count, because only
+those are checked: a copy at a destination dropped from the policy, or left behind when the
+policy pointed its name at another account or root, is never verified again, so it may be
+gone without the ledger knowing. Such copies are named in the decision instead, by the
+name they were placed under and their location. A counted copy is named by the policy's
+current name for its identity, so a renamed destination reads under its new name.
 
 Nothing here releases anything: the decision is recorded, with its inputs and rule.
 """
 
-from collections.abc import Collection, Sequence
+from collections.abc import Mapping, Sequence
 from enum import StrEnum
 
 from pydantic import Field
 
 from curate_d.domain import (
     AuditValue,
+    DestinationId,
+    DestinationIdentity,
     DomainModel,
     Placement,
     PlacementState,
@@ -51,8 +56,9 @@ class RetentionDecision(DomainModel):
     )
     unchecked_copies: tuple[str, ...] = Field(
         default=(),
-        description="Destinations no longer in the policy holding a present copy; nothing "
-        "checks them, so they do not count.",
+        description="Present copies at destination identities the policy no longer defines, "
+        "each as the name it was placed under and its location; nothing checks them, so "
+        "they do not count.",
     )
 
     def audit_details(self, *, policy_version: int | None = None) -> dict[str, AuditValue]:
@@ -76,15 +82,19 @@ def decide_retention(
     rule: RetentionRule | None,
     placements: Sequence[Placement],
     *,
-    destinations: Collection[str],
+    destinations: Mapping[DestinationId, str],
+    locations: Mapping[DestinationId, DestinationIdentity] | None = None,
 ) -> RetentionDecision:
     """Decide retention for one content object from its rule and its placements.
 
     Args:
         rule: The retention rule governing the content, or None.
         placements: The content's placements, at any destination.
-        destinations: The names of the destinations the policy in force defines. Present
-            copies elsewhere do not count; they are listed in `unchecked_copies`.
+        destinations: The destination identities the policy in force defines, each mapped
+            to its name there. Present copies elsewhere do not count; they are listed in
+            `unchecked_copies`.
+        locations: Where the placements at identities outside `destinations` are, to name
+            them by; one missing is named by its identifier.
     """
     if rule is None:
         return RetentionDecision(
@@ -101,22 +111,26 @@ def decide_retention(
     if not rule.release_source:
         return base
     present = [p for p in placements if p.state is PlacementState.PRESENT]
-    checked = [p for p in present if p.destination_name in destinations]
-    unchecked = tuple(sorted(p.destination_name for p in present if p not in checked))
+    checked = [p for p in present if p.destination_id in destinations]
+    unchecked = tuple(
+        sorted(
+            _located(p, locations or {}) for p in present if p.destination_id not in destinations
+        )
+    )
     counts = [
         p
         for p in checked
         if p.verification_level.permits_source_release
         and p.verification_level >= rule.minimum_level
     ]
-    strong = tuple(sorted(p.destination_name for p in counts))
-    weak = tuple(sorted(p.destination_name for p in checked if p not in counts))
+    strong = tuple(sorted(destinations[p.destination_id] for p in counts))
+    weak = tuple(sorted(destinations[p.destination_id] for p in checked if p not in counts))
     decided = base.model_copy(
         update={"strong_copies": strong, "weak_copies": weak, "unchecked_copies": unchecked}
     )
     dropped = (
-        f"; {len(unchecked)} copies at destinations no longer in the policy do not count "
-        f"({', '.join(unchecked)})"
+        f"; {len(unchecked)} copies at destinations no longer in the policy do not count: "
+        f"{', '.join(unchecked)}"
         if unchecked
         else ""
     )
@@ -132,3 +146,14 @@ def decide_retention(
     if weak:
         reason += f"; {len(weak)} weaker copies do not count ({', '.join(weak)})"
     return decided.model_copy(update={"reason": reason + dropped})
+
+
+def _located(placement: Placement, locations: Mapping[DestinationId, DestinationIdentity]) -> str:
+    """Return an unchecked copy as "name (provider:account:root)".
+
+    The bare name would read as a contradiction when the policy still has it, pointed at
+    another account: the location says which copy did not count.
+    """
+    location = locations.get(placement.destination_id)
+    where = location.label() if location is not None else str(placement.destination_id)
+    return f"{placement.destination_name} ({where})"

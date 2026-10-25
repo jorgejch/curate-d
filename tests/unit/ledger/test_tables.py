@@ -1,15 +1,17 @@
 """Schema shape decisions that no query expresses, pinned so they are not undone silently."""
 
-from sqlalchemy import Table, UniqueConstraint
+from collections.abc import Collection
+
+from sqlalchemy import Constraint, UniqueConstraint
 
 from curate_d.ledger.tables import destination_checks, dry_run_items, placements, staged_objects
 
 
-def _unique_column_sets(table: Table) -> set[tuple[str, ...]]:
-    """Return the column names of each unique constraint on `table`."""
+def _unique_column_sets(constraints: Collection[Constraint]) -> set[tuple[str, ...]]:
+    """Return the column names of each unique constraint among a table's `constraints`."""
     return {
         tuple(column.name for column in constraint.columns)
-        for constraint in table.constraints
+        for constraint in constraints
         if isinstance(constraint, UniqueConstraint)
     }
 
@@ -21,7 +23,7 @@ def test_the_staging_cache_index_carries_no_secondary_index() -> None:
 
 def test_placement_uniqueness_is_keyed_on_the_destination_identity() -> None:
     """One placement per content per identity and one content per locator per identity."""
-    assert _unique_column_sets(placements) == {
+    assert _unique_column_sets(placements.constraints) == {
         ("content_object_id", "destination_id"),
         ("destination_id", "locator"),
     }
