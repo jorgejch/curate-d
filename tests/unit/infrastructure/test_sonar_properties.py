@@ -1,4 +1,8 @@
-"""SonarQube's measured scope: coverage on src/ only, duplication on src/ and infrastructure/."""
+"""SonarQube's analysed and measured scope.
+
+Nothing under docs/ or openspec/ is analysed; coverage counts src/ only, duplication src/ and
+infrastructure/.
+"""
 
 import subprocess
 import tomllib
@@ -31,8 +35,8 @@ def _properties() -> dict[str, str]:
 
 
 def _exclusions(key: str) -> set[str]:
-    """Return the comma-separated patterns of the property called `key`."""
-    return {pattern.strip() for pattern in _properties()[key].split(",") if pattern.strip()}
+    """Return the comma-separated patterns of the property called `key`, none if it is unset."""
+    return {pattern.strip() for pattern in _properties().get(key, "").split(",") if pattern.strip()}
 
 
 def _tracked_directories() -> set[str]:
@@ -50,12 +54,23 @@ def _test_code_directories() -> set[str]:
     return {str(path).rstrip("/") for path in cast(list[str], pytest_options["testpaths"])}
 
 
-def _assert_measures_only(key: str, measured: set[str]) -> None:
-    """Assert `key` excludes the root files and every tracked directory but `measured`."""
-    expected = {_ROOT_FILES} | {f"{d}/**" for d in _tracked_directories() - measured}
+def _assert_excludes_exactly(key: str, expected: set[str]) -> None:
+    """Assert `key` lists exactly the patterns in `expected`."""
     actual = _exclusions(key)
     assert not expected - actual, f"{key} misses {sorted(expected - actual)}"
     assert not actual - expected, f"{key} also lists {sorted(actual - expected)}"
+
+
+def _assert_measures_only(key: str, measured: set[str]) -> None:
+    """Assert `key` excludes the root files and every tracked directory but `measured`."""
+    _assert_excludes_exactly(
+        key, {_ROOT_FILES} | {f"{d}/**" for d in _tracked_directories() - measured}
+    )
+
+
+def test_analysis_excludes_docs_and_openspec_only() -> None:
+    """SonarQube analyses nothing under docs/ or openspec/, and every other path stays analysed."""
+    _assert_excludes_exactly("sonar.exclusions", {"docs/**", "openspec/**"})
 
 
 def test_coverage_counts_src_only() -> None:
