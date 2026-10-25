@@ -168,7 +168,7 @@ lifecycle observation budget is set.
   own runner, removed when the shard ends on every outcome, and neither reads the other's
   database, bucket or ports
 
-### Requirement: Application boots after the suite, on the same database
+### Requirement: Application boots on its own stack, beside no test
 The API and both worker profiles, built from this commit, MUST start on a migrated
 database of their own, in a job that runs no test: a worker writes the persisted
 schedules on launch, and their ticks would otherwise run in a test process on the suite's
@@ -276,3 +276,8 @@ The plan MUST fail when the changed files cannot be determined or may be incompl
   missing from the checkout
 - **THEN** the plan fails before any later step, naming the file, and `Integration tests`
   fails
+
+## RENAMED Requirements
+
+- FROM: `### Requirement: Application boots after the suite, on the same database`
+- TO: `### Requirement: Application boots on its own stack, beside no test`
