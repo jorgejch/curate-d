@@ -59,6 +59,10 @@ cleanup of unrelated code.
   and, when it changes a path the suite depends on, the full integration suite against the
   local stack, and be up to date with its base, before it merges; a merge runs no tests
   again, only the image build on `dev` and the SonarQube coverage refresh.
+- **Gitar reviews pull requests.** [`.gitar/config/apply.md`](.gitar/config/apply.md)
+  bounds which of its code-review findings it may fix by itself, on top of the organization's
+  criteria. Gitar reads it from `dev`, so a pull request can't change the criteria for its own
+  fixes, and the file turns nothing on: auto-apply is enabled per pull request.
 
 ## Tests
 
