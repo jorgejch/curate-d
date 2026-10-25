@@ -157,8 +157,9 @@ jobs:
 
       # Every later step, and the shard and boot jobs, run on `suite == 'true'`, which an
       # empty output would read as a skip: fail instead, so a broken detection never opens
-      # the gate. GitHub lists at most 3,000 of a pull request's files, so a `false` for a
-      # pull request that reaches the limit may have missed a declared path: fail that too.
+      # the gate. GitHub lists at most 3,000 of a pull request's files, so a pull request that
+      # reaches the limit, or reports no count, may hold a declared path the detection never
+      # saw: fail it whatever the detection answered, `true` included.
       # The image copies README.md, LICENSE and NOTICE, which select nothing, so a skip
       # without them fails as well.
       - name: Refuse an undecided detection
@@ -170,7 +171,7 @@ jobs:
             echo "::error::The change detection (step 'changes') reported suite='$SUITE', neither true nor false."
             exit 1
           fi
-          if [ "$SUITE" = "false" ] && [ "${CHANGED_FILES:-3000}" -ge 3000 ]; then
+          if [ "${CHANGED_FILES:-3000}" -ge 3000 ]; then
             echo "::error::This pull request changes $CHANGED_FILES files; GitHub lists at most 3,000, so the detection may have missed a declared path. Split the pull request."
             exit 1
           fi
