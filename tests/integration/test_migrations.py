@@ -5,12 +5,14 @@ migration that only works when something else ran first. These tests create a da
 their own and drive the Alembic command line against it, as CI and a deployment do.
 """
 
+import json
 import os
 import subprocess
 import sys
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from alembic.config import Config
@@ -19,6 +21,7 @@ from sqlalchemy import make_url, text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from curate_d.config import Settings
+from curate_d.domain import derive_destination_id
 
 pytestmark = pytest.mark.integration
 
@@ -412,3 +415,311 @@ async def test_transfer_caps_downgrade_restores_the_uncapped_limits(
         "transfer-small": (4, None),
         "transfer-large": (1, None),
     }
+
+
+# 0023 keys placements on their destination identity, backfilled from recorded evidence.
+BEFORE_DESTINATION_IDENTITY = "0022_dry_run_drafts"
+DESTINATION_IDENTITY = "0023_destination_identity"
+_T0 = datetime(2026, 10, 1, tzinfo=UTC)
+_ACCOUNT_1 = derive_destination_id("pcloud", "acct-1", "/Library")
+_ACCOUNT_2 = derive_destination_id("pcloud", "acct-2", "/Library")
+
+
+def _alembic_fails(database_url: str, *arguments: str) -> str:
+    """Run the Alembic command line expecting it to fail; return what it reported."""
+    completed = _run_alembic(database_url, *arguments)
+    assert completed.returncode != 0, completed.stdout
+    return completed.stderr
+
+
+def _document(*destinations: tuple[str, str, str]) -> str:
+    """Return a policy document with these (name, account, root) destinations, as JSON."""
+    return json.dumps(
+        {
+            "destinations": [
+                {
+                    "name": name,
+                    "provider": "pcloud",
+                    "account": account,
+                    "root_path": root,
+                    "profile": "pcloud",
+                }
+                for name, account, root in destinations
+            ],
+            "rules": [],
+            "retention": [],
+        }
+    )
+
+
+async def _seed_policies(database_url: str, *documents: str) -> None:
+    """Store these policy documents as versions 1, 2, ... a day apart, the last one active."""
+    for version, document in enumerate(documents, start=1):
+        await _execute(
+            database_url,
+            "INSERT INTO configurations (kind, version, document, active, created_at, "
+            "created_by) VALUES ('policy', :version, CAST(:document AS jsonb), :active, :at, "
+            "'test')",
+            version=version,
+            document=document,
+            active=version == len(documents),
+            at=_T0 + timedelta(days=version - 1),
+        )
+
+
+async def _seed_placement(
+    database_url: str,
+    *,
+    name: str,
+    locator: str,
+    created: datetime,
+    state: str = "present",
+    content_id: UUID | None = None,
+    started: tuple[datetime, dict[str, object]] | None = None,
+) -> UUID:
+    """Seed a name-keyed placement and, with `started`, its placement_started entry.
+
+    Returns:
+        The placement's identifier.
+    """
+    placement_id = uuid4()
+    if content_id is None:
+        content_id = uuid4()
+        await _execute(
+            database_url,
+            "INSERT INTO content_objects (id, fingerprint_algorithm, fingerprint_digest, "
+            "size_bytes, media_type) VALUES (:id, 'sha256', :digest, 1, 'image/jpeg')",
+            id=content_id,
+            digest=content_id.hex * 2,
+        )
+    await _execute(
+        database_url,
+        "INSERT INTO placements (id, content_object_id, destination_name, locator, "
+        "template_version, state, verified_at, created_at) VALUES (:id, :content, :name, "
+        ":locator, 'seed-1', :state, :created, :created)",
+        id=placement_id,
+        content=content_id,
+        name=name,
+        locator=locator,
+        state=state,
+        created=created,
+    )
+    if started is not None:
+        at, details = started
+        await _execute(
+            database_url,
+            "INSERT INTO audit_entries (occurred_at, entry_type, content_object_id, "
+            "placement_id, decided_by, details) VALUES (:at, 'placement_started', :content, "
+            ":placement, 'placement', CAST(:details AS jsonb))",
+            at=at,
+            content=content_id,
+            placement=placement_id,
+            details=json.dumps(details),
+        )
+    return placement_id
+
+
+async def _rows(database_url: str, statement: str) -> list[tuple[object, ...]]:
+    """Return the rows one query reads."""
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.connect() as connection:
+            return [tuple(row) for row in await connection.execute(text(statement))]
+    finally:
+        await engine.dispose()
+
+
+async def _seed_redefinition(database_url: str) -> dict[str, UUID]:
+    """Seed `lib` at account 1 in policy v1, at account 2 in v2, and placements under it.
+
+    Returns:
+        Placement ids by case. `recorded` and `named` started after v2 but recorded
+        account 1, by location and by policy version; `between` was created under v1
+        with no start recorded; `after` was created under v2 with none.
+    """
+    await _seed_policies(
+        database_url,
+        _document(("lib", "acct-1", "/Library/")),
+        _document(("lib", "acct-2", "/Library")),
+    )
+    late = _T0 + timedelta(days=2)
+    location = {
+        "destination_provider": "pcloud",
+        "destination_account": "acct-1",
+        "destination_root": "/Library",
+        "policy_version": 2,
+    }
+    return {
+        "recorded": await _seed_placement(
+            database_url,
+            name="lib",
+            locator="/Library/r.jpg",
+            created=late,
+            started=(late, location),
+        ),
+        "named": await _seed_placement(
+            database_url,
+            name="lib",
+            locator="/Library/n.jpg",
+            created=late,
+            started=(late, {"policy_version": 1}),
+        ),
+        "between": await _seed_placement(
+            database_url, name="lib", locator="/Library/b.jpg", created=_T0 + timedelta(hours=1)
+        ),
+        "after": await _seed_placement(
+            database_url, name="lib", locator="/Library/a.jpg", created=late
+        ),
+    }
+
+
+async def test_destination_identity_backfills_from_the_evidence_and_round_trips(
+    empty_database: str,
+) -> None:
+    """Recorded location, then named version, then version in force decide; ids are kept."""
+    _alembic(empty_database, "upgrade", BEFORE_DESTINATION_IDENTITY)
+    ids = await _seed_redefinition(empty_database)
+
+    _alembic(empty_database, "upgrade", DESTINATION_IDENTITY)
+
+    assert dict(await _rows(empty_database, "SELECT id, destination_id FROM placements")) == {
+        ids["recorded"]: _ACCOUNT_1,
+        ids["named"]: _ACCOUNT_1,
+        ids["between"]: _ACCOUNT_1,
+        ids["after"]: _ACCOUNT_2,
+    }
+    assert await _rows(
+        empty_database, "SELECT id, provider, account, root_path FROM destinations ORDER BY account"
+    ) == [
+        (_ACCOUNT_1, "pcloud", "acct-1", "/Library"),
+        (_ACCOUNT_2, "pcloud", "acct-2", "/Library"),
+    ]
+    constraints = {
+        row[0]
+        for row in await _rows(
+            empty_database,
+            "SELECT conname FROM pg_constraint WHERE conrelid = 'placements'::regclass",
+        )
+    }
+    assert constraints >= {
+        "uq_placements_content_object_id_destination_id",
+        "uq_placements_destination_id_locator",
+        "fk_placements_destination_id_destinations",
+    }
+    assert not constraints & {
+        "uq_placements_content_object_id_destination_name",
+        "uq_placements_destination_name_locator",
+    }
+
+    _alembic(empty_database, "downgrade", BEFORE_DESTINATION_IDENTITY)
+
+    assert "destination_id" not in await _columns(empty_database, "placements")
+    assert len(await _rows(empty_database, "SELECT id FROM placements")) == len(ids)
+    assert (await _views_and_head(empty_database))[1] == BEFORE_DESTINATION_IDENTITY
+
+
+async def test_a_placement_under_a_name_in_no_version_stops_the_upgrade(
+    empty_database: str,
+) -> None:
+    """Nothing is guessed: the upgrade fails naming the placement, and nothing changes."""
+    _alembic(empty_database, "upgrade", BEFORE_DESTINATION_IDENTITY)
+    await _seed_redefinition(empty_database)
+    ghost = await _seed_placement(
+        empty_database, name="ghost", locator="/Library/g.jpg", created=_T0 + timedelta(days=3)
+    )
+
+    reported = _alembic_fails(empty_database, "upgrade", DESTINATION_IDENTITY)
+
+    assert "UnresolvedPlacementsError" in reported
+    assert str(ghost) in reported
+    assert (await _views_and_head(empty_database))[1] == BEFORE_DESTINATION_IDENTITY
+    assert "destination_id" not in await _columns(empty_database, "placements")
+
+
+async def test_two_placements_resolving_to_one_identity_and_locator_stop_the_upgrade(
+    empty_database: str,
+) -> None:
+    """Two names a past policy gave one place clash on its locator; the upgrade names both."""
+    _alembic(empty_database, "upgrade", BEFORE_DESTINATION_IDENTITY)
+    await _seed_policies(
+        empty_database,
+        _document(("a", "acct-1", "/Library"), ("b", "acct-1", "/Library/")),
+        _document(("a", "acct-1", "/Library")),
+    )
+    created = _T0 + timedelta(hours=1)
+    first = await _seed_placement(
+        empty_database, name="a", locator="/Library/x.jpg", created=created
+    )
+    second = await _seed_placement(
+        empty_database, name="b", locator="/Library/x.jpg", created=created
+    )
+
+    reported = _alembic_fails(empty_database, "upgrade", DESTINATION_IDENTITY)
+
+    assert "SharedIdentityError" in reported
+    assert str(first) in reported
+    assert str(second) in reported
+    assert (await _views_and_head(empty_database))[1] == BEFORE_DESTINATION_IDENTITY
+
+
+async def test_a_placement_still_copying_stops_the_upgrade(empty_database: str) -> None:
+    """Its workflow is keyed by the name: the deploy drains first, and nothing changes."""
+    _alembic(empty_database, "upgrade", BEFORE_DESTINATION_IDENTITY)
+    await _seed_policies(empty_database, _document(("lib", "acct-1", "/Library")))
+    copying = await _seed_placement(
+        empty_database,
+        name="lib",
+        locator="/Library/c.jpg",
+        created=_T0 + timedelta(hours=1),
+        state="copying",
+    )
+
+    reported = _alembic_fails(empty_database, "upgrade", DESTINATION_IDENTITY)
+
+    assert "InFlightPlacementsError" in reported
+    assert str(copying) in reported
+    assert (await _views_and_head(empty_database))[1] == BEFORE_DESTINATION_IDENTITY
+
+
+@pytest.mark.parametrize(
+    "destinations",
+    [
+        (("a", "acct-1", "/Library"), ("b", "acct-1", "/Library/Photos")),
+        (("a", "acct-1", "/Library"), ("b", "acct-1", "/Library/")),
+        (("a", "acct-1", "/Library//Photos"),),
+    ],
+    ids=["nested-roots", "two-names-one-place", "unnormalized-root"],
+)
+async def test_an_active_policy_the_application_would_refuse_stops_the_upgrade(
+    empty_database: str, destinations: tuple[tuple[str, str, str], ...]
+) -> None:
+    """The upgrade refuses before changing anything rather than leave an unloadable policy."""
+    _alembic(empty_database, "upgrade", BEFORE_DESTINATION_IDENTITY)
+    await _seed_policies(empty_database, _document(*destinations))
+
+    reported = _alembic_fails(empty_database, "upgrade", DESTINATION_IDENTITY)
+
+    assert "UnloadablePolicyError" in reported
+    assert "active policy version 1" in reported
+    assert (await _views_and_head(empty_database))[1] == BEFORE_DESTINATION_IDENTITY
+
+
+async def test_the_downgrade_refuses_two_placements_under_one_name(empty_database: str) -> None:
+    """One content object at two identities under one name cannot be keyed by the name."""
+    _alembic(empty_database, "upgrade", BEFORE_DESTINATION_IDENTITY)
+    ids = await _seed_redefinition(empty_database)
+    _alembic(empty_database, "upgrade", DESTINATION_IDENTITY)
+    await _execute(
+        empty_database,
+        "INSERT INTO placements (id, content_object_id, destination_id, destination_name, "
+        "locator, template_version, state) SELECT :id, content_object_id, :elsewhere, 'lib', "
+        "locator, 'seed-1', 'absent' FROM placements WHERE id = :between",
+        id=uuid4(),
+        elsewhere=_ACCOUNT_2,
+        between=ids["between"],
+    )
+
+    reported = _alembic_fails(empty_database, "downgrade", BEFORE_DESTINATION_IDENTITY)
+
+    assert "cannot be restored" in reported
+    assert (await _views_and_head(empty_database))[1] == DESTINATION_IDENTITY

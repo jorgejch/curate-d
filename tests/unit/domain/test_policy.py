@@ -17,6 +17,8 @@ from curate_d.domain import (
     Provider,
     RetentionRule,
     VerificationLevel,
+    check_destinations,
+    derive_destination_id,
 )
 from curate_d.reconciliation.retention import RetentionDecision, RetentionOutcome
 from curate_d.rendering.templates import PORTABLE_PROFILE, PROFILES
@@ -364,3 +366,114 @@ def test_a_pickled_rule_with_the_retired_field_still_loads() -> None:
     assert "source_counts_as_copy" not in decision.audit_details()
     assert "source_counts_as_copy" not in decision.model_dump(mode="json")
     assert "source_counts_as_copy" not in decision.model_dump_json(exclude_unset=True)
+
+
+def _destinations(*specs: tuple[str, str, str]) -> dict[str, object]:
+    """Return a policy change defining destinations from (name, account, root) triples."""
+    return {
+        "rules": [],
+        "retention": [],
+        "destinations": [
+            {"name": name, "provider": "pcloud", "account": account, "root_path": root}
+            for name, account, root in specs
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    ("specs", "problem"),
+    [
+        ((("a", "1", "/Library"), ("b", "1", "/Library")), "'a' and 'b' are the same place"),
+        ((("a", "1", "/Library"), ("b", "1", "/Library/")), "'a' and 'b' are the same place"),
+        ((("a", "1", "/Library"), ("b", "1", "/Library/Photos")), "'a' .* and 'b' .* overlap"),
+        ((("a", "1", "/Library/Photos"), ("b", "1", "/Library")), "'a' .* and 'b' .* overlap"),
+        ((("a", "1", "/"), ("b", "1", "/Anything")), "'a' .* and 'b' .* overlap"),
+    ],
+)
+def test_destinations_sharing_files_are_refused(
+    specs: tuple[tuple[str, str, str], ...], problem: str
+) -> None:
+    """Two names for one place, or one root inside another in one account, would count twice."""
+    document = _POLICY | _destinations(*specs)
+    with pytest.raises(ValidationError, match=problem):
+        parse_policy(document)
+
+
+@pytest.mark.parametrize(
+    "specs",
+    [
+        (("a", "1", "/Library"), ("b", "2", "/Library")),
+        (("a", "1", "/a"), ("b", "1", "/ab")),
+        (("a", "1", "/Library/Photos"), ("b", "1", "/Library/Video")),
+    ],
+)
+def test_distinct_places_are_accepted(specs: tuple[tuple[str, str, str], ...]) -> None:
+    """One root in two accounts, or sibling roots in one, are separate destinations."""
+    policy = parse_policy(_POLICY | _destinations(*specs))
+    assert len({d.id for d in policy.destinations}) == len(specs)
+
+
+@pytest.mark.parametrize("root", ["Library", "/a//b", "/a/../b", "/a/./b"])
+def test_a_root_that_does_not_normalize_is_refused_naming_the_destination(root: str) -> None:
+    """A relative root, or one with an empty, "." or ".." segment, does not name one place."""
+    document = _POLICY | _destinations(("a", "1", root))
+    with pytest.raises(ValidationError, match="destination 'a': root path"):
+        parse_policy(document)
+
+
+def test_a_root_is_held_in_canonical_form() -> None:
+    """A trailing slash is dropped, so the stored policy names the root one way."""
+    policy = parse_policy(_POLICY | _destinations(("a", "1", "/Library/")))
+    assert policy.destinations[0].root_path == "/Library"
+
+
+def test_the_identity_is_derived_not_stored() -> None:
+    """The stored document has no identity fields, so older documents and inputs still parse."""
+    destination = _policy().destinations[0]
+    assert set(destination.model_dump(mode="json")) == {
+        "name",
+        "provider",
+        "account",
+        "root_path",
+        "profile",
+    }
+    assert destination.id == derive_destination_id("pcloud", "1", "/Organized")
+
+
+def test_a_name_moved_to_another_account_parses_as_another_identity() -> None:
+    """Redefining a name is allowed; the name is a label, the account is the identity."""
+    before = parse_policy(_POLICY | _destinations(("a", "1", "/Library")))
+    after = parse_policy(_POLICY | _destinations(("a", "2", "/Library")))
+    assert before.destinations[0].id != after.destinations[0].id
+
+
+def test_a_rename_keeps_the_identity() -> None:
+    """Only provider, account and root decide the identity."""
+    before = parse_policy(_POLICY | _destinations(("a", "1", "/Library")))
+    after = parse_policy(_POLICY | _destinations(("b", "1", "/Library")))
+    assert before.destinations[0].id == after.destinations[0].id
+
+
+def test_destinations_by_id_maps_each_identity_to_its_name() -> None:
+    """The policy's current name is what a decision reports a counted copy under."""
+    assert _policy().destinations_by_id() == {
+        derive_destination_id("pcloud", "1", "/Organized"): "archive",
+        derive_destination_id("pcloud", "2", "/Backup"): "backup",
+    }
+
+
+def test_check_destinations_refuses_a_repeated_name_naming_it() -> None:
+    """A repeated name is refused with the name in the message."""
+    first = DestinationConfig(name="a", provider=Provider.PCLOUD, account="1", root_path="/x")
+    second = DestinationConfig(name="a", provider=Provider.PCLOUD, account="2", root_path="/y")
+    with pytest.raises(ValueError, match=r"repeated: \['a'\]"):
+        check_destinations((first, second))
+
+
+def test_check_destinations_refuses_an_unvalidated_root_naming_it() -> None:
+    """A config built without validation still has its root checked."""
+    unchecked = DestinationConfig.model_construct(
+        name="a", provider=Provider.PCLOUD, account="1", root_path="/a/../b", profile="pcloud"
+    )
+    with pytest.raises(ValueError, match="destination 'a': root path"):
+        check_destinations((unchecked,))

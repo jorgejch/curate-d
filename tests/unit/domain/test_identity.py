@@ -14,8 +14,10 @@ from curate_d.domain import (
     SourceObject,
     StrongFingerprint,
     VerificationLevel,
+    derive_destination_id,
     derive_placement_id,
     derive_source_object_id,
+    normalize_root,
 )
 
 _WHEN = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
@@ -102,20 +104,23 @@ def test_one_content_object_supports_placements_at_several_destinations() -> Non
     content = ContentObject.build(
         fingerprint=_fingerprint("c"), size_bytes=1, media_type="image/png"
     )
+    archive_id = derive_destination_id("pcloud", "acct-1", "/Archive")
     archive = Placement.build(
         content_object_id=content.id,
+        destination_id=archive_id,
         destination_name="archive",
         locator="/Archive/x.png",
         template_version="v1",
     )
     working = Placement.build(
         content_object_id=content.id,
+        destination_id=derive_destination_id("pcloud", "acct-1", "/Working"),
         destination_name="working",
         locator="/Working/x.png",
         template_version="v1",
     )
     assert archive.id != working.id
-    assert archive.id == derive_placement_id(content.id, "archive")
+    assert archive.id == derive_placement_id(content.id, archive_id)
 
 
 @pytest.mark.parametrize(
@@ -140,8 +145,61 @@ def test_a_placement_starts_unverified_and_not_present() -> None:
         content_object_id=ContentObject.build(
             fingerprint=_fingerprint("d"), size_bytes=1, media_type="image/png"
         ).id,
+        destination_id=derive_destination_id("pcloud", "acct-1", "/Archive"),
         destination_name="archive",
         locator="/Archive/x.png",
         template_version="v1",
     )
     assert not placement.verification_level.permits_source_release
+
+
+def test_a_renamed_destination_keeps_its_identity() -> None:
+    """The name is no input: one provider, account and root derive one identifier."""
+    assert derive_destination_id("pcloud", "acct-1", "/Library") == derive_destination_id(
+        "pcloud", "acct-1", "/Library"
+    )
+
+
+@pytest.mark.parametrize(
+    ("provider", "account", "root"),
+    [("other", "acct-1", "/Library"), ("pcloud", "acct-2", "/Library"), ("pcloud", "acct-1", "/X")],
+)
+def test_each_part_of_a_destination_identity_distinguishes_it(
+    provider: str, account: str, root: str
+) -> None:
+    """Provider, account and root each change the destination identifier."""
+    assert derive_destination_id(provider, account, root) != derive_destination_id(
+        "pcloud", "acct-1", "/Library"
+    )
+
+
+def test_a_trailing_slash_names_the_same_destination() -> None:
+    """ "/Library/" and "/Library" are one root."""
+    assert derive_destination_id("pcloud", "a", "/Library/") == derive_destination_id(
+        "pcloud", "a", "/Library"
+    )
+
+
+@pytest.mark.parametrize(
+    ("root", "canonical"), [("/", "/"), ("///", "/"), ("/a/", "/a"), ("/a/b//", "/a/b")]
+)
+def test_roots_normalize_to_one_form(root: str, canonical: str) -> None:
+    """Trailing slashes are dropped, except on the root of the account."""
+    assert normalize_root(root) == canonical
+
+
+@pytest.mark.parametrize("root", ["a/b", "/a//b", "/a/./b", "/a/../b", "/.."])
+def test_ambiguous_or_relative_roots_are_refused(root: str) -> None:
+    """A root that is relative, or has an empty, "." or ".." segment, is refused."""
+    with pytest.raises(ValueError, match="root path"):
+        normalize_root(root)
+
+
+def test_one_name_in_two_accounts_derives_two_placements() -> None:
+    """A placement belongs to the destination identity, not the name it was placed under."""
+    content = ContentObject.build(
+        fingerprint=_fingerprint("e"), size_bytes=1, media_type="image/png"
+    )
+    first = derive_placement_id(content.id, derive_destination_id("pcloud", "a", "/Library"))
+    second = derive_placement_id(content.id, derive_destination_id("pcloud", "b", "/Library"))
+    assert first != second

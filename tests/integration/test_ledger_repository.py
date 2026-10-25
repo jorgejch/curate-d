@@ -7,6 +7,7 @@ repository.
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import text
@@ -16,6 +17,8 @@ from curate_d.domain import (
     AuditEntry,
     AuditEntryType,
     ContentObject,
+    DestinationConfig,
+    DestinationIdentity,
     HashAlgorithm,
     PerceptualFingerprint,
     Placement,
@@ -30,6 +33,7 @@ from curate_d.ledger import (
     AuditRepository,
     ChangeVerdict,
     ContentObjectRepository,
+    DestinationRepository,
     ListedFile,
     PlacementRepository,
     SourceObjectRepository,
@@ -39,6 +43,9 @@ from curate_d.ledger import (
 pytestmark = pytest.mark.integration
 
 _WHEN = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
+_ARCHIVE = DestinationConfig(
+    name="archive", provider=Provider.PCLOUD, account="acct-1", root_path="/Archive"
+)
 
 
 @pytest.fixture
@@ -260,9 +267,11 @@ async def test_a_placement_is_found_by_content_object_and_by_locator(
     content = await contents.upsert(
         ContentObject.build(fingerprint=_fingerprint("d"), size_bytes=1, media_type="image/png")
     )
+    await DestinationRepository(connection).ensure(_ARCHIVE.identity)
     stored = await placements.upsert(
         Placement.build(
             content_object_id=content.id,
+            destination_id=_ARCHIVE.id,
             destination_name="archive",
             locator="/Archive/x.png",
             template_version="v1",
@@ -270,12 +279,19 @@ async def test_a_placement_is_found_by_content_object_and_by_locator(
     )
 
     assert await placements.get(stored.id) == stored
+    assert await placements.find(content.id, _ARCHIVE.id) == stored
     assert await placements.find_for_content_object(content.id) == [stored]
     assert (
-        await placements.find_at_locator(destination_name="archive", locator="/Archive/x.png")
+        await placements.find_at_locator(destination_id=_ARCHIVE.id, locator="/Archive/x.png")
         == stored
     )
-    assert await placements.find_at_locator(destination_name="archive", locator="/nope") is None
+    assert await placements.find_at_locator(destination_id=_ARCHIVE.id, locator="/nope") is None
+    elsewhere = _ARCHIVE.model_copy(update={"account": "acct-2"})
+    assert (
+        await placements.find_at_locator(destination_id=elsewhere.id, locator="/Archive/x.png")
+        is None
+    )
+    assert await placements.find(content.id, elsewhere.id) is None
 
 
 async def test_re_executing_a_placement_updates_one_row_rather_than_duplicating_it(
@@ -287,8 +303,10 @@ async def test_re_executing_a_placement_updates_one_row_rather_than_duplicating_
     content = await contents.upsert(
         ContentObject.build(fingerprint=_fingerprint("e"), size_bytes=1, media_type="image/png")
     )
+    await DestinationRepository(connection).ensure(_ARCHIVE.identity)
     pending = Placement.build(
         content_object_id=content.id,
+        destination_id=_ARCHIVE.id,
         destination_name="archive",
         locator="/Archive/x.png",
         template_version="v1",
@@ -306,6 +324,44 @@ async def test_re_executing_a_placement_updates_one_row_rather_than_duplicating_
 
     assert registered.id == pending.id
     assert await placements.find_for_content_object(content.id) == [registered]
+
+
+async def test_a_rename_relabels_the_placement_and_keeps_its_identifier(
+    connection: AsyncConnection,
+) -> None:
+    """Placed again under a new name at one identity, the row keeps its id and takes the name."""
+    contents = ContentObjectRepository(connection)
+    placements = PlacementRepository(connection)
+    content = await contents.upsert(
+        ContentObject.build(fingerprint=_fingerprint("9"), size_bytes=1, media_type="image/png")
+    )
+    await DestinationRepository(connection).ensure(_ARCHIVE.identity)
+    first = await placements.upsert(
+        Placement.build(
+            content_object_id=content.id,
+            destination_id=_ARCHIVE.id,
+            destination_name="archive",
+            locator="/Archive/x.png",
+            template_version="v1",
+        )
+    )
+    renamed = await placements.upsert(
+        first.model_copy(update={"id": uuid4(), "destination_name": "vault"})
+    )
+    assert (renamed.id, renamed.destination_name) == (first.id, "vault")
+
+
+async def test_a_destination_identity_is_recorded_once(connection: AsyncConnection) -> None:
+    """Ensuring an identity twice leaves one row, and it reads back as recorded."""
+    destinations = DestinationRepository(connection)
+    identity = _ARCHIVE.model_copy(update={"account": f"acct-{uuid4().hex[:8]}"}).identity
+    assert await destinations.find_many([identity.id]) == {}
+    assert await destinations.ensure(identity) == identity.id
+    assert await destinations.ensure(identity) == identity.id
+    rebuilt = DestinationIdentity(
+        provider=Provider.PCLOUD, account=identity.account, root_path="/Archive/"
+    )
+    assert await destinations.find_many([identity.id, rebuilt.id]) == {identity.id: rebuilt}
 
 
 async def test_audit_history_comes_back_in_order(connection: AsyncConnection) -> None:

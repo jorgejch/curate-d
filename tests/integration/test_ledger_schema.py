@@ -12,6 +12,8 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from curate_d.domain import derive_destination_id
+
 pytestmark = pytest.mark.integration
 
 _WHEN = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
@@ -148,23 +150,45 @@ async def test_a_duplicate_content_fingerprint_is_rejected(ledger_engine: AsyncE
         await _insert_content(ledger_engine, digest="b" * 64)
 
 
+async def _insert_destination(
+    engine: AsyncEngine, *, account: str = "acct-1", root: str = "/Library"
+) -> uuid.UUID:
+    """Insert a destinations row for an identity unless it exists, returning its id."""
+    destination_id = derive_destination_id("pcloud", account, root)
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO destinations (id, provider, account, root_path)"
+                " VALUES (:id, 'pcloud', :account, :root) ON CONFLICT DO NOTHING"
+            ),
+            {"id": destination_id, "account": account, "root": root},
+        )
+    return destination_id
+
+
+_INSERT_PLACEMENT = text(
+    "INSERT INTO placements (id, content_object_id, destination_id, destination_name, locator,"
+    " template_version) VALUES (:id, :cid, :did, :dest, :locator, 'v1')"
+)
+
+
 async def test_one_content_object_supports_several_concurrent_placements(
     ledger_engine: AsyncEngine,
 ) -> None:
     """A content object may have one placement per destination simultaneously."""
     content_id = await _insert_content(ledger_engine, digest="c" * 64)
+    archive = await _insert_destination(ledger_engine, root="/archive")
+    working = await _insert_destination(ledger_engine, root="/working")
     async with ledger_engine.begin() as connection:
-        for destination in ("archive", "working"):
+        for name, destination_id in (("archive", archive), ("working", working)):
             await connection.execute(
-                text(
-                    "INSERT INTO placements (id, content_object_id, destination_name, locator,"
-                    " template_version) VALUES (:id, :cid, :dest, :locator, 'v1')"
-                ),
+                _INSERT_PLACEMENT,
                 {
                     "id": uuid.uuid4(),
                     "cid": content_id,
-                    "dest": destination,
-                    "locator": f"/{destination}/x.png",
+                    "did": destination_id,
+                    "dest": name,
+                    "locator": f"/{name}/x.png",
                 },
             )
         count = await connection.scalar(
@@ -177,24 +201,31 @@ async def test_one_content_object_supports_several_concurrent_placements(
 async def test_a_second_placement_at_the_same_destination_is_rejected(
     ledger_engine: AsyncEngine,
 ) -> None:
-    """A second placements row for the same content object and destination is rejected."""
+    """A second placements row for the same content object and destination identity is rejected."""
     content_id = await _insert_content(ledger_engine, digest="d" * 64)
+    archive = await _insert_destination(ledger_engine)
     async with ledger_engine.begin() as connection:
         await connection.execute(
-            text(
-                "INSERT INTO placements (id, content_object_id, destination_name, locator,"
-                " template_version) VALUES (:id, :cid, 'archive', '/a/x.png', 'v1')"
-            ),
-            {"id": uuid.uuid4(), "cid": content_id},
+            _INSERT_PLACEMENT,
+            {
+                "id": uuid.uuid4(),
+                "cid": content_id,
+                "did": archive,
+                "dest": "archive",
+                "locator": "/a/x.png",
+            },
         )
     with pytest.raises(IntegrityError):
         async with ledger_engine.begin() as connection:
             await connection.execute(
-                text(
-                    "INSERT INTO placements (id, content_object_id, destination_name, locator,"
-                    " template_version) VALUES (:id, :cid, 'archive', '/a/other.png', 'v1')"
-                ),
-                {"id": uuid.uuid4(), "cid": content_id},
+                _INSERT_PLACEMENT,
+                {
+                    "id": uuid.uuid4(),
+                    "cid": content_id,
+                    "did": archive,
+                    "dest": "renamed",
+                    "locator": "/a/other.png",
+                },
             )
 
 
@@ -204,15 +235,94 @@ async def test_two_content_objects_at_one_locator_are_rejected(
     """A destination path belongs to one content object."""
     first = await _insert_content(ledger_engine, digest="e" * 64)
     second = await _insert_content(ledger_engine, digest="f" * 64)
-    insert = text(
-        "INSERT INTO placements (id, content_object_id, destination_name, locator,"
-        " template_version) VALUES (:id, :cid, 'archive', '/a/x.png', 'v1')"
-    )
+    archive = await _insert_destination(ledger_engine)
+    values = {"did": archive, "dest": "archive", "locator": "/a/x.png"}
     async with ledger_engine.begin() as connection:
-        await connection.execute(insert, {"id": uuid.uuid4(), "cid": first})
+        await connection.execute(_INSERT_PLACEMENT, {"id": uuid.uuid4(), "cid": first, **values})
     with pytest.raises(IntegrityError):
         async with ledger_engine.begin() as connection:
-            await connection.execute(insert, {"id": uuid.uuid4(), "cid": second})
+            await connection.execute(
+                _INSERT_PLACEMENT, {"id": uuid.uuid4(), "cid": second, **values}
+            )
+
+
+async def test_one_name_and_locator_at_two_identities_are_two_placements(
+    ledger_engine: AsyncEngine,
+) -> None:
+    """Uniqueness is per destination identity: one name in two accounts holds one path twice."""
+    first = await _insert_content(ledger_engine, digest="1" * 64)
+    second = await _insert_content(ledger_engine, digest="2" * 64)
+    async with ledger_engine.begin() as connection:
+        for content_id, account in ((first, "acct-a"), (second, "acct-b")):
+            await connection.execute(
+                _INSERT_PLACEMENT,
+                {
+                    "id": uuid.uuid4(),
+                    "cid": content_id,
+                    "did": await _insert_destination(ledger_engine, account=account),
+                    "dest": "library",
+                    "locator": "/Library/x.png",
+                },
+            )
+        count = await connection.scalar(
+            text("SELECT count(*) FROM placements WHERE locator = '/Library/x.png'")
+        )
+    assert count == 2
+
+
+async def test_one_content_under_one_name_at_two_identities_is_two_placements(
+    ledger_engine: AsyncEngine,
+) -> None:
+    """A name pointed at another account holds a second placement of the same content."""
+    content_id = await _insert_content(ledger_engine, digest="4" * 64)
+    async with ledger_engine.begin() as connection:
+        for account in ("acct-old", "acct-new"):
+            await connection.execute(
+                _INSERT_PLACEMENT,
+                {
+                    "id": uuid.uuid4(),
+                    "cid": content_id,
+                    "did": await _insert_destination(ledger_engine, account=account),
+                    "dest": "library",
+                    "locator": "/Library/x.png",
+                },
+            )
+        count = await connection.scalar(
+            text("SELECT count(*) FROM placements WHERE content_object_id = :cid"),
+            {"cid": content_id},
+        )
+    assert count == 2
+
+
+async def test_a_placement_needs_a_recorded_destination(ledger_engine: AsyncEngine) -> None:
+    """A placement cannot refer to a destination identity the ledger has no row for."""
+    content_id = await _insert_content(ledger_engine, digest="3" * 64)
+    with pytest.raises(IntegrityError):
+        async with ledger_engine.begin() as connection:
+            await connection.execute(
+                _INSERT_PLACEMENT,
+                {
+                    "id": uuid.uuid4(),
+                    "cid": content_id,
+                    "did": uuid.uuid4(),
+                    "dest": "library",
+                    "locator": "/Library/x.png",
+                },
+            )
+
+
+async def test_a_destination_identity_is_recorded_once(ledger_engine: AsyncEngine) -> None:
+    """Two rows for one provider, account and root are rejected."""
+    await _insert_destination(ledger_engine, account="acct-once")
+    with pytest.raises(IntegrityError):
+        async with ledger_engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO destinations (id, provider, account, root_path)"
+                    " VALUES (:id, 'pcloud', 'acct-once', '/Library')"
+                ),
+                {"id": uuid.uuid4()},
+            )
 
 
 async def test_a_placement_cannot_be_present_without_verification(
@@ -220,15 +330,16 @@ async def test_a_placement_cannot_be_present_without_verification(
 ) -> None:
     """The zero-loss guarantee rests on this: a finished copy is not a checked copy."""
     content_id = await _insert_content(ledger_engine, digest="e" * 64)
+    archive = await _insert_destination(ledger_engine)
     with pytest.raises(IntegrityError):
         async with ledger_engine.begin() as connection:
             await connection.execute(
                 text(
-                    "INSERT INTO placements (id, content_object_id, destination_name, locator,"
-                    " template_version, state) VALUES (:id, :cid, 'archive', '/a/x.png',"
-                    " 'v1', 'present')"
+                    "INSERT INTO placements (id, content_object_id, destination_id,"
+                    " destination_name, locator, template_version, state) VALUES (:id, :cid,"
+                    " :did, 'archive', '/a/x.png', 'v1', 'present')"
                 ),
-                {"id": uuid.uuid4(), "cid": content_id},
+                {"id": uuid.uuid4(), "cid": content_id, "did": archive},
             )
 
 

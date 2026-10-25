@@ -1,0 +1,102 @@
+# Spec Delta
+
+## MODIFIED Requirements
+
+### Requirement: Convergence loop
+
+The system SHALL periodically evaluate, for every content object, the difference between its desired placements and its observed placements, and SHALL issue actions that reduce that difference. Evaluation SHALL be repeatable and SHALL NOT depend on having observed a prior evaluation. A desired placement SHALL be paired with the observed placement at the same destination identity, never by the destination's name.
+
+#### Scenario: Missing placement created
+- **WHEN** a content object's desired placements include one that does not exist
+- **THEN** work is created to establish that placement
+
+#### Scenario: Satisfied state produces no action
+- **WHEN** a content object's observed placements already satisfy its desired placements
+- **THEN** no work is created
+
+#### Scenario: Policy changed after placement
+- **WHEN** the policy governing a content object changes to require additional copies
+- **THEN** the next evaluation creates work for the additional placements
+- **AND** existing placements are left intact
+
+#### Scenario: Overlapping evaluations
+- **WHEN** two evaluations run concurrently over the same content object
+- **THEN** duplicate work is not performed
+- **AND** the ledger records a single set of placements
+
+#### Scenario: Destination name pointed at another account
+- **WHEN** the policy keeps a destination's name but points it at another account or root path
+- **THEN** the next evaluation creates work to place content at the new account or root path, at the locators it renders there
+- **AND** placements made at the previous account or root path are left intact and do not satisfy the new destination
+
+#### Scenario: Destination renamed
+- **WHEN** the policy renames a destination without changing its provider, account or root path
+- **THEN** its existing placements satisfy it and no work is created
+
+#### Scenario: Two destinations in two accounts under one template
+- **WHEN** the policy defines two destinations on one provider in different accounts with the same root path, and a rule selects both for a content object
+- **THEN** work is created for a placement at each, both at the plain rendered locator
+
+### Requirement: Destination loss repair
+
+The system SHALL detect when a previously registered placement is no longer present at its destination and SHALL re-establish it. A destination check SHALL compare the destination's listing with the placements registered at that destination's identity only.
+
+#### Scenario: Placement disappeared
+- **WHEN** a registered placement is found absent at its destination
+- **THEN** the placement is marked absent
+- **AND** work is created to re-establish it
+
+#### Scenario: Destination unreachable
+- **WHEN** a destination cannot be reached during evaluation
+- **THEN** its placements are not marked absent
+- **AND** the evaluation records that the destination could not be checked
+
+#### Scenario: Placements at a destination's previous account
+- **WHEN** a destination is checked after its name was pointed at another account or root path
+- **THEN** only placements made at the account and root path it now has are looked for there
+- **AND** placements made at the previous account or root path are neither marked absent nor copied again because of that check
+
+#### Scenario: Check recorded per identity
+- **WHEN** two destinations are checked in one cycle
+- **THEN** each check is recorded against its destination's identity, with the policy's name for it at the time
+- **AND** a later check of a renamed destination replaces the record of the same identity
+
+### Requirement: Verification gate on source release
+
+A source SHALL NOT be released unless the governing policy is satisfied by placements at one of the two strong verification levels (in-transit or common-hash). Placements at weaker verification levels SHALL NOT count toward that requirement. Neither SHALL placements at destination identities that the policy in force does not define, because no destination check verifies them any more. Every destination identity the policy defines counts, whether or not a rule currently selects it for that content, and whatever name the policy now gives it.
+
+#### Scenario: Requirement met by strongly verified copies
+- **WHEN** the policy permits release and enough strongly verified placements exist
+- **THEN** the source may be released
+
+#### Scenario: Requirement met only by weakly verified copies
+- **WHEN** the policy permits release but the existing placements are only weakly verified
+- **THEN** the source is retained
+- **AND** the reason for retention is recorded
+
+#### Scenario: Verification level downgraded
+- **WHEN** a placement's verification level is later found to be weaker than recorded
+- **THEN** the source release decision is re-evaluated against the corrected levels
+
+#### Scenario: Copy at a destination no longer in the policy
+- **WHEN** a present placement is at a destination identity the policy in force no longer defines, so no destination check verifies it
+- **THEN** it does not count toward the requirement, whatever its verification level
+- **AND** the decision, its reason and its audit entry name that copy, by the name it was placed under and its provider, account and root path, among the copies that did not count
+
+#### Scenario: Dropping a destination withdraws a release
+- **GIVEN** a rule that permits release and requires two copies, and strongly verified copies at destinations `a` and `b`, so the recorded decision is release permitted
+- **WHEN** `b` is removed from the policy and the content is evaluated again
+- **THEN** the new decision is retain
+- **AND** it names `b` as a copy that did not count
+
+#### Scenario: Copy at a name's previous account
+- **GIVEN** a strongly verified copy made under destination name `a` at one account
+- **WHEN** the policy points `a` at another account and the content is evaluated again
+- **THEN** that copy does not count toward the requirement
+- **AND** the decision names it among the copies that did not count, with the account it is at
+
+#### Scenario: Copy at a renamed destination
+- **GIVEN** a strongly verified copy made under destination name `a`
+- **WHEN** the policy renames that destination `b` without changing its provider, account or root path
+- **THEN** the copy counts toward the requirement
+- **AND** the decision names it as `b`
