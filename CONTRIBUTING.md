@@ -77,6 +77,13 @@ cleanup of unrelated code.
   tests/integration/test_<area>.py --no-cov -m integration --staging-backend=rustfs`; without
   the flag, staging tests also need the OVH fixture's credentials); a pull request that
   changes a path the suite depends on runs the full suite.
+- **The pull request runs the suite in shards**, four by default (the repository variable
+  `INTEGRATION_SHARDS` changes the count without a commit), each on its own runner against
+  its own stack. To rerun one shard as CI ran it, run
+  `make test-stack && make test-integration GROUP=<n>`; `SPLITS` defaults to CI's four. Run
+  `make test-durations` against a `make test-stack` stack and commit `.test_durations` when
+  you add or remove a slow test, or when the shard times in the `Integration tests` summary
+  drift apart.
 - **Don't run them against `make stack-up`.** Its workers apply the persisted schedules, and
   the suite's own DBOS process then fires them: a recovery or refresh tick runs against the
   test rows. `make test-stack` runs `make stack-reset` first, which destroys the
