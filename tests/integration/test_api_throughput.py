@@ -17,7 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from curate_d.api.app import create_app
 from curate_d.config import Settings
-from curate_d.runtime.queues import QueueName
+from curate_d.runtime.dbos_app import client
+from curate_d.runtime.queues import QUEUE_SPECS, QueueName, _registration_kwargs
 from tests.integration.pipeline_harness import running_pipeline
 
 pytestmark = pytest.mark.integration
@@ -40,7 +41,24 @@ def http(settings: Settings) -> Iterator[TestClient]:
 
 
 @pytest.fixture
-def restore_verify(http: TestClient) -> Iterator[None]:
+async def registered_stages(settings: Settings) -> None:
+    """Register the stage queues with the limits a worker's launch registers.
+
+    The route lists registered stages only, and on a fresh database nothing registers
+    them until a worker launches: in a CI shard this module may run first. A client
+    writes the rows without launching an executor that would dequeue or tick anything.
+    Registration is `never_update`, so a limit an earlier test left stays as it was.
+    """
+    workflows = client(settings)
+    try:
+        for spec in QUEUE_SPECS:
+            await workflows.register_queue_async(spec.name.value, **_registration_kwargs(spec))  # type: ignore[arg-type]
+    finally:
+        workflows.destroy()
+
+
+@pytest.fixture
+def restore_verify(http: TestClient, registered_stages: None) -> Iterator[None]:
     """Put back the verify stage's worker limit."""
     [before] = [s for s in http.get("/throughput").json() if s["stage"] == "verify"]
     yield
