@@ -36,10 +36,6 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 
-          # Branches the action creates (issue-triggered runs) start from dev, the active
-          # branch, not from the repository default. See CONTRIBUTING.md.
-          base_branch: dev
-
           # This is an optional setting that allows Claude to read CI results on PRs
           additional_permissions: |
             actions: read
