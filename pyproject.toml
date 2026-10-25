@@ -147,7 +147,6 @@ known-first-party = ["curate_d", "tests"]
 "dbos._context".msg = "Private DBOS module; use the public context managers in `dbos` (SetWorkflowID, ...)."
 "dbos._registrations".msg = "Private DBOS module; refer to workflows by function or registered name through the public API."
 "dbos._schemas".msg = "Private DBOS module; read DBOS state through DBOS or DBOSClient methods."
-"dbos._conductor".msg = "Private DBOS module, moving to dbos-enterprise; curate.d does not use Conductor."
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101"]
