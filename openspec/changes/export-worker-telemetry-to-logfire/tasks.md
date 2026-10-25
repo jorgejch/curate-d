@@ -135,7 +135,7 @@ PR targets `dev`. Integration tests need `make test-stack` once before the first
 
 ## 7. Integration check
 
-- [ ] 7.1 Run the whole gate; verify with `make check` green (lint, typecheck, unit suite
+- [x] 7.1 Run the whole gate; verify with `make check` green (lint, typecheck, unit suite
   with the coverage floor),
   `uv run pytest tests/integration/test_workflow_telemetry.py --no-cov -m integration`
   green against the stack, and

@@ -201,7 +201,7 @@ include a `PropagateOtelContext(...)` call is a violation, reported like the raw
 so a future site cannot regress silently. Alternatives: a wrapper function
 (`runtime/enqueue.py`) that every site calls (hides the DBOS API behind one more layer and
 the sites already compose two context managers; the audit gives the same guarantee without
-it); leaving it to review (the first 14 sites show that does not hold). Owner decision
+it); leaving it to review (the first 13 sites show that does not hold). Owner decision
 2026-10-25: all sites plus the rule, in this change.
 
 ## Risks / Trade-offs
