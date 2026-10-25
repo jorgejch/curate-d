@@ -31,7 +31,7 @@ classifiers = [
 dependencies = [
     # Durable execution. Brings sqlalchemy[asyncio] and psycopg[binary] with it;
     # both are declared explicitly below because we import and configure them directly.
-    "dbos>=3.2,<3.4",
+    "dbos>=3.3,<3.4",
     "sqlalchemy~=2.1.1",
     "psycopg[binary]~=3.3.6",
     "alembic~=1.20",
