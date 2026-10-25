@@ -51,11 +51,6 @@ concurrency:
   group: integration-${{ github.ref }}
   cancel-in-progress: true
 
-permissions:
-  contents: read
-  # dorny/paths-filter lists a pull request's changed files through the API.
-  pull-requests: read
-
 env:
   # Compose interpolates it for every application service, and the suite encrypts and
   # decrypts provider tokens with it. A public dummy Fernet key: nothing here is real.
@@ -65,6 +60,11 @@ jobs:
   plan:
     name: Plan the integration run
     runs-on: ubuntu-26.04
+    # Per job, each the least its steps need. dorny/paths-filter lists a pull request's
+    # changed files through the API.
+    permissions:
+      contents: read
+      pull-requests: read
     # Detection, two guards and, when selected, an install and a collection: minutes.
     timeout-minutes: 10
     outputs:
@@ -234,6 +234,8 @@ jobs:
     needs: plan
     if: needs.plan.outputs.suite == 'true'
     runs-on: ubuntu-26.04
+    permissions:
+      contents: read
     # A quarter of a nine-minute suite plus two to three minutes of setup, three times
     # over: room for a slow runner without letting a hung test hold the PR.
     timeout-minutes: 15
@@ -310,6 +312,8 @@ jobs:
     needs: plan
     if: needs.plan.outputs.suite == 'true'
     runs-on: ubuntu-26.04
+    permissions:
+      contents: read
     # An image build, a stack and two worker waits of at most two minutes each.
     timeout-minutes: 15
     steps:
@@ -405,6 +409,9 @@ jobs:
     # and decide even when a dependency failed or was skipped.
     if: always()
     runs-on: ubuntu-26.04
+    # No checkout; the shard reports are this run's own artifacts.
+    permissions:
+      actions: read
     # Reads results and reports, nothing else.
     timeout-minutes: 5
     steps:
