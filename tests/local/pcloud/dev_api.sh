@@ -13,8 +13,23 @@ set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../../.." && pwd)
-# Deployment-specific values come from the gitignored .env (see .env.example).
-if [[ -f $REPO/.env ]]; then set -a; source "$REPO/.env"; set +a; fi
+# Export the KEY=VALUE lines of $1, skipping comments and keys the environment already sets.
+# Values are taken literally, one pair of surrounding quotes stripped, never evaluated.
+load_env() {
+  local line key value skip='^[[:space:]]*(#|$)' name='^[A-Za-z_][A-Za-z0-9_]*$'
+  local quoted='^"(.*)"$' single="^'(.*)'$"
+  while IFS= read -r line; do
+    if [[ $line =~ $skip || $line != *=* ]]; then continue; fi
+    key=${line%%=*} value=${line#*=}
+    if [[ ! $key =~ $name ]]; then continue; fi
+    if [[ $value =~ $quoted || $value =~ $single ]]; then value=${BASH_REMATCH[1]}; fi
+    if [[ -z ${!key+x} ]]; then export "$key=$value"; fi
+  done <<<"$1"
+}
+# Deployment-specific values come from the gitignored .env (see .env.example), which may be
+# a 1Password Environment mounted as a named pipe: not a regular file (-f fails), served
+# afresh on every read, and empty to bash 3.2's `source`. So read it once, whole, and parse it.
+if [[ -e $REPO/.env ]]; then load_env "$(<"$REPO/.env")"; fi
 BASE=${CURATE_D_URL:?set CURATE_D_URL (the deployed control plane URL) in .env}
 NAMESPACE=${CURATE_D_NAMESPACE:?set CURATE_D_NAMESPACE (the Kubernetes namespace) in .env}
 TEST_ROOT=${CURATE_D_TEST_ROOT:?set CURATE_D_TEST_ROOT (the pCloud test folder) in .env}
