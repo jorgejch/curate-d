@@ -8,8 +8,6 @@ Timestamps are all timezone-aware. A naive timestamp on a file's modification ti
 silent correctness bug the moment two providers disagree about local time.
 """
 
-from typing import Final
-
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -29,7 +27,6 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
-    literal_column,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -315,20 +312,6 @@ Index(
     "ix_audit_entries_entry_type_occurred_at",
     audit_entries.c.entry_type,
     audit_entries.c.occurred_at,
-)
-
-# At most one operator-command entry per Conductor request. Historical: Conductor is
-# read-only now and nothing writes these entries, but migration 0018 created the index from
-# these two expressions and the metadata still describes the schema it built.
-COMMAND_REQUEST_ID: Final = literal_column("(details ->> 'request_id')", Text())
-COMMAND_ENTRIES: Final = text(f"entry_type = '{AuditEntryType.WORKFLOW_COMMAND_ISSUED.value}'")
-audit_entries.append_constraint(
-    Index(
-        "uq_audit_entries_command_request_id",
-        COMMAND_REQUEST_ID,
-        unique=True,
-        postgresql_where=COMMAND_ENTRIES,
-    )
 )
 
 # The staging cache index. Shares this metadata so autogenerate sees the real schema,

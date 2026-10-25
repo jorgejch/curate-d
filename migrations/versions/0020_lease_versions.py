@@ -7,7 +7,7 @@ its target, so a build that predates the lease, or the newer build a rollback re
 is never treated as dead.
 
 Revision ID: 0020_lease_versions
-Revises: 0019_command_completed_audit
+Revises: 0016_dry_run_item_locators
 Create Date: 2026-10-12
 """
 
@@ -17,7 +17,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0020_lease_versions"
-down_revision: str | None = "0019_command_completed_audit"
+down_revision: str | None = "0016_dry_run_item_locators"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
