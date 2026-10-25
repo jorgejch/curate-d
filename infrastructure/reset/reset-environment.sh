@@ -133,12 +133,16 @@ local_reset() {
 
 # Run `$1` with sh in a one-off pod: the I/O worker's pod template (image, environment,
 # service account, staging writer identity), its worker container only, under a label no
-# Service selects, with `reset.py` in the environment.
+# Service selects, with `reset.py` in the environment. Kubernetes expands `$(VAR)` and
+# reduces `$$` to `$` in a container's command and env values, so both are escaped: unescaped,
+# reset.py's `DO $$` reached Postgres as `DO $`.
 dev_helper() {
   "${K[@]}" delete pod "$HELPER_POD" --ignore-not-found --wait >/dev/null
   "${K[@]}" get "$WORKER_IO" -o json | jq \
     --arg name "$HELPER_POD" --arg steps "$1" --arg code "$RESET_PY" '
-    .spec.template as $t | {
+    def k8s_literal: gsub("\\$"; "$$");
+    ($steps | k8s_literal) as $steps | ($code | k8s_literal) as $code
+    | .spec.template as $t | {
       apiVersion: "v1",
       kind: "Pod",
       metadata: {name: $name, labels: {app: "curate-d", component: "reset"}},
