@@ -23,7 +23,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Final
 
-from dbos import DBOS, SetEnqueueOptions, SetWorkflowID
+from dbos import DBOS, PropagateOtelContext, SetEnqueueOptions, SetWorkflowID
 from pydantic import Field
 
 from curate_d.domain import (
@@ -132,7 +132,9 @@ async def enqueue_placement(request: PlacementRequest) -> None:
     """Enqueue a placement on its size class's queue; a repeated request collapses."""
     threshold = current().settings.transfer_large_threshold_bytes
     queue = size_class(request.size_bytes, large_threshold=threshold).queue
+    # Carries this span to the dequeued child; without it the child roots its own trace.
     with (
+        PropagateOtelContext(),
         SetWorkflowID(placement_workflow_for(request)),
         SetEnqueueOptions(queue_partition_key=request.destination.provider.value),
     ):
@@ -389,7 +391,10 @@ async def place_content(request: PlacementRequest) -> PlaceOutcome:
             "placement.superseded", placement_id=str(placement.id), attempt=placement.attempts
         )
         return PlaceOutcome.SUPERSEDED
-    with SetWorkflowID(verification_workflow_for(placement.id, placement.attempts)):
+    with (
+        PropagateOtelContext(),
+        SetWorkflowID(verification_workflow_for(placement.id, placement.attempts)),
+    ):
         await DBOS.enqueue_workflow_async(
             QueueName.VERIFY.value, verify_placement, placement.id, placement.attempts
         )

@@ -1,8 +1,15 @@
-"""Request tracing, exported to Logfire.
+"""Process telemetry, exported to Logfire.
+
+Every long-running process (the API and the I/O and CPU workers) calls `configure_tracing`
+once at startup, before DBOS is constructed. It installs Logfire's tracer and logger
+providers, which then carry the process's structured log events (`logging.configure_logging`
+with `to_logfire`), the API's request spans, and DBOS's workflow and step spans and log
+lines. The resource names the service, its version, its environment and, for a worker, the
+pod it runs in.
 
 Export needs a token: `LOGFIRE_TOKEN` in a deployment, or `.logfire/` written by the
-Logfire CLI on a developer's machine. Without one, spans are created and dropped, so a
-process with no token behaves exactly as it did before tracing existed.
+Logfire CLI on a developer's machine. Without one, spans and records are created and
+dropped, so a process with no token behaves exactly as it did before export existed.
 
 Logfire's own scrubbing is extended to the key fragments `redaction.py` masks in logs, and
 two things its defaults would send are kept out:
@@ -74,15 +81,19 @@ def configure_tracing(
     service_name: str,
     service_version: str,
     environment: str | None = None,
+    instance_id: str | None = None,
     local_processor: SpanProcessor | None = None,
 ) -> None:
-    """Configure the process's Logfire exporter. Call once, before instrumenting.
+    """Configure the process's Logfire exporter. Call once, before instrumenting or DBOS.
 
     Args:
         service_name: The `service.name` resource attribute.
         service_version: The `service.version` resource attribute.
         environment: The `deployment.environment.name` resource attribute. None leaves it
             to `LOGFIRE_ENVIRONMENT`, and unset when that is too.
+        instance_id: The `service.instance.id` resource attribute. A worker passes its
+            executor id, so its records match DBOS's `dbos.executor.id`. None leaves
+            Logfire's random per-process id.
         local_processor: Receives every span instead of the Logfire exporter, which is
             then disabled. Tests pass one over an in-memory exporter.
     """
@@ -91,6 +102,9 @@ def configure_tracing(
         service_name=service_name,
         service_version=service_version,
         environment=environment,
+        resource_attributes=(
+            {"service.instance.id": instance_id} if instance_id is not None else None
+        ),
         # structlog already writes this process's output to stderr.
         console=False,
         scrubbing=logfire.ScrubbingOptions(extra_patterns=list(_EXTRA_SCRUB_PATTERNS)),

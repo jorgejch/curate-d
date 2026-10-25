@@ -348,14 +348,171 @@ kubectl logs -n <namespace> -l <io-selector> --since=24h --tail=-1 --prefix \
 
 An empty selection makes the grouped queries print `[]`, and the duty-cycle query print
 `{"holdings": 0, "duty_cycle": 0, "busiest_hour": null}`. `kubectl logs` reaches back
-only as far as the container's current log, so a reading that spans restarts needs the
-log shipper's store. The fields and filters are the same there.
+only as far as the container's current log, so a reading that spans restarts takes the
+SQL in [Reading the same events in Logfire](#reading-the-same-events-in-logfire).
 
 The queries predate the two-holding reservation and run unchanged; what they measure
 narrowed with it. The by-caller query now lists `occupancy.register` and
 `occupancy.abandon` beside the others, and its `occupancy.reserve` row is admission alone.
 The duty cycle no longer includes transfers, and the entry-lock query's `held_p95` is a
 reclamation's, not an upload's.
+
+### Reading the same events in Logfire
+
+Every worker pod with a `LOGFIRE_TOKEN` also exports each event as one row of Logfire's
+`records` table, which keeps it across restarts. The row has `kind = 'log'`, the event
+name in `span_name`, the line's `timestamp` in `start_timestamp`, the profile in
+`service_name` (`curate-d-worker-io` or `curate-d-worker-cpu`), the environment in
+`deployment_environment`, and the pod name in `service_instance_id`. Every field is under
+`attributes` as text: `attributes->>'caller'`, cast where numeric,
+`(attributes->>'wait_seconds')::double`. Cast to `double`, not `float`, which is 32-bit
+here. `registered` reads `'true'` or `'false'`, and a `null` field reads as SQL `NULL`,
+which aggregates skip. The engine is Apache DataFusion: percentiles are interpolated
+estimates (`approx_percentile_cont`), not the `jq` rank pick, and every grouped expression
+is repeated in `GROUP BY`. Each query reads seven days of `dev`. Set the window in the
+`start_timestamp` filter; it narrows the time range the Explore page or `query_run` is
+given and never widens it. The `jq` pipelines above stay for a pod without a token.
+
+```sql
+-- Writer-lock wait and hold by caller (I/O pods).
+SELECT attributes->>'caller' AS caller, count(*) AS count,
+  approx_percentile_cont((attributes->>'wait_seconds')::double, 0.5) AS wait_p50,
+  approx_percentile_cont((attributes->>'wait_seconds')::double, 0.95) AS wait_p95,
+  max((attributes->>'wait_seconds')::double) AS wait_max,
+  approx_percentile_cont((attributes->>'held_seconds')::double, 0.5) AS held_p50,
+  approx_percentile_cont((attributes->>'held_seconds')::double, 0.95) AS held_p95,
+  max((attributes->>'held_seconds')::double) AS held_max
+FROM records
+WHERE kind = 'log' AND span_name = 'staging.writer_lock_held'
+  AND service_name = 'curate-d-worker-io' AND deployment_environment = 'dev'
+  AND start_timestamp >= now() - interval '7 days'
+GROUP BY attributes->>'caller'
+ORDER BY caller
+LIMIT 50
+```
+
+```sql
+-- Reservation phases by outcome (I/O pods). A phase that never ran is left out of its
+-- distribution, so a phase with no samples has a zero count and nulls.
+SELECT attributes->>'outcome' AS outcome, count(*) AS count,
+  count(attributes->>'admission_seconds') AS admission_count,
+  approx_percentile_cont((attributes->>'admission_seconds')::double, 0.5) AS admission_p50,
+  approx_percentile_cont((attributes->>'admission_seconds')::double, 0.95) AS admission_p95,
+  max((attributes->>'admission_seconds')::double) AS admission_max,
+  count(attributes->>'upload_seconds') AS upload_count,
+  approx_percentile_cont((attributes->>'upload_seconds')::double, 0.5) AS upload_p50,
+  approx_percentile_cont((attributes->>'upload_seconds')::double, 0.95) AS upload_p95,
+  max((attributes->>'upload_seconds')::double) AS upload_max,
+  count(attributes->>'registration_seconds') AS registration_count,
+  approx_percentile_cont((attributes->>'registration_seconds')::double, 0.5)
+    AS registration_p50,
+  approx_percentile_cont((attributes->>'registration_seconds')::double, 0.95)
+    AS registration_p95,
+  max((attributes->>'registration_seconds')::double) AS registration_max,
+  count(attributes->>'commit_seconds') AS commit_count,
+  approx_percentile_cont((attributes->>'commit_seconds')::double, 0.5) AS commit_p50,
+  approx_percentile_cont((attributes->>'commit_seconds')::double, 0.95) AS commit_p95,
+  max((attributes->>'commit_seconds')::double) AS commit_max
+FROM records
+WHERE kind = 'log' AND span_name = 'staging.reservation_phases'
+  AND service_name = 'curate-d-worker-io' AND deployment_environment = 'dev'
+  AND start_timestamp >= now() - interval '7 days'
+GROUP BY attributes->>'outcome'
+ORDER BY outcome
+LIMIT 50
+```
+
+```sql
+-- Holdings that took entry locks: the window #1 describes (I/O pods).
+SELECT attributes->>'caller' AS caller, count(*) AS count,
+  approx_percentile_cont((attributes->>'entry_claims')::int, 0.5) AS claims_p50,
+  max((attributes->>'entry_claims')::int) AS claims_max,
+  approx_percentile_cont((attributes->>'held_seconds')::double, 0.95) AS held_p95
+FROM records
+WHERE kind = 'log' AND span_name = 'staging.writer_lock_held'
+  AND service_name = 'curate-d-worker-io' AND deployment_environment = 'dev'
+  AND start_timestamp >= now() - interval '7 days'
+  AND attributes->>'caller' IN ('occupancy.reserve', 'occupancy.sweep')
+  AND (attributes->>'entry_claims')::int > 0
+GROUP BY attributes->>'caller'
+ORDER BY caller
+LIMIT 50
+```
+
+```sql
+-- Writer-lock duty cycle across every I/O pod: the share of the window the global lock
+-- was held, overall and for the busiest hour. `7 * 86400` is the window in seconds;
+-- change it with the interval. The event is logged as the holding ends, so a holding
+-- counts wholly in the clock hour it ended instead of being split across every hour it
+-- overlaps, as the `jq` version does. Holdings last seconds and an hour 3600, so the
+-- approximation moves only the holdings that straddle an hour boundary. The one row is
+-- the busiest hour, with the window's `holdings` and `duty_cycle` beside it.
+SELECT date_trunc('hour', start_timestamp) AS busiest_hour,
+  count(*) AS hour_holdings,
+  sum((attributes->>'held_seconds')::double) / 3600 AS hour_duty_cycle,
+  sum(count(*)) OVER () AS holdings,
+  sum(sum((attributes->>'held_seconds')::double)) OVER () / (7 * 86400) AS duty_cycle
+FROM records
+WHERE kind = 'log' AND span_name = 'staging.writer_lock_held'
+  AND service_name = 'curate-d-worker-io' AND deployment_environment = 'dev'
+  AND start_timestamp >= now() - interval '7 days'
+GROUP BY date_trunc('hour', start_timestamp)
+ORDER BY hour_duty_cycle DESC
+LIMIT 1
+```
+
+```sql
+-- Reader shared-lock wait, split into registered reads and misses (CPU pods).
+-- `blocked_1s` counts the reads that waited a second or more.
+SELECT attributes->>'registered' AS registered, count(*) AS count,
+  approx_percentile_cont((attributes->>'wait_seconds')::double, 0.5) AS wait_p50,
+  approx_percentile_cont((attributes->>'wait_seconds')::double, 0.95) AS wait_p95,
+  max((attributes->>'wait_seconds')::double) AS wait_max,
+  count(*) FILTER (WHERE (attributes->>'wait_seconds')::double >= 1) AS blocked_1s
+FROM records
+WHERE kind = 'log' AND span_name = 'staging.reader_lock_wait'
+  AND service_name = 'curate-d-worker-cpu' AND deployment_environment = 'dev'
+  AND start_timestamp >= now() - interval '7 days'
+GROUP BY attributes->>'registered'
+ORDER BY registered
+LIMIT 50
+```
+
+```sql
+-- Transfer deadline hits by direction (either profile).
+SELECT split_part(attributes->>'transfer', ' ', 1) AS direction, count(*) AS count,
+  array_agg(DISTINCT (attributes->>'deadline_seconds')::double) AS deadline_seconds
+FROM records
+WHERE kind = 'log' AND span_name = 'staging.transfer_deadline_hit'
+  AND service_name IN ('curate-d-worker-io', 'curate-d-worker-cpu')
+  AND deployment_environment = 'dev'
+  AND start_timestamp >= now() - interval '7 days'
+GROUP BY split_part(attributes->>'transfer', ' ', 1)
+ORDER BY direction
+LIMIT 50
+```
+
+```sql
+-- Lost reservations and failed abandonments across every I/O pod, by event, with the
+-- pods and keys they came from. Both should be rare: see "Lost or expired reservation"
+-- under Recovery.
+SELECT span_name AS event, count(*) AS count,
+  sum((attributes->>'reserved_bytes')::bigint) AS reserved_bytes,
+  array_agg(DISTINCT service_instance_id) AS pods,
+  array_agg(DISTINCT attributes->>'staging_key') AS keys,
+  array_agg(DISTINCT attributes->>'error_type')
+    FILTER (WHERE attributes->>'error_type' IS NOT NULL) AS errors
+FROM records
+WHERE kind = 'log'
+  AND span_name IN ('staging.reservation_lost', 'staging.reservation_abandon_failed')
+  AND service_name = 'curate-d-worker-io' AND deployment_environment = 'dev'
+  AND start_timestamp >= now() - interval '7 days'
+GROUP BY span_name
+ORDER BY event
+LIMIT 50
+```
+
+An empty selection returns no rows, the duty-cycle query included.
 
 ### Lock contention alarms
 
@@ -374,7 +531,9 @@ alarms: one firing now means the narrowing regressed or a reclamation holding gr
 that a deferred fix is due.
 
 These are proposed defaults, open to change in review. Read them over at least seven days
-of real ingest in one environment. An alarm fires when any of these holds:
+of real ingest in one environment. Take that reading across every pod with the queries in
+[Reading the same events in Logfire](#reading-the-same-events-in-logfire); the `jq`
+pipelines remain for a pod without a token. An alarm fires when any of these holds:
 
 - `occupancy.reserve` `wait_seconds` p95 is 30 seconds or more. That is 10% of the default
   300-second `CURATE_D_STAGING_TRANSFER_TIMEOUT_SECONDS`, so writers queue for a

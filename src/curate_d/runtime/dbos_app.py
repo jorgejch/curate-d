@@ -11,7 +11,10 @@ Exactly-once ledger writes are a different mechanism: the datasource's tracking 
 commits in the same transaction as the ledger row (see datasource.py).
 
 Configuration is built here and constructed by an entry point, never at import time: a
-module-level DBOS() would connect during test collection.
+module-level DBOS() would connect during test collection. An entry point that exports
+telemetry configures Logfire (`configure_tracing`) before constructing DBOS: DBOS attaches
+its log handler to the logger provider installed at construction, so DBOS constructed first
+still runs but exports no DBOS log lines.
 """
 
 import os
@@ -109,6 +112,14 @@ def build_dbos_config(settings: Settings, *, executor_id: str | None = None) -> 
         # in each process's memory. A shared identity lets one pod's restart recover
         # workflows a live peer is running — see identity.py.
         executor_id=executor_id or resolve_executor_id(),
+        # No OTLP endpoints, so DBOS creates no provider of its own: workflow and step
+        # spans go to the global tracer provider at each span start, and its log handler to
+        # the logger provider installed when DBOS() is constructed. Hence entry points
+        # configure Logfire first. Unconfigured, DBOS warns and its spans are no-ops.
+        enable_otlp=True,
+        # `dbos.*` attribute names (dbos.operation.workflow_id, dbos.executor.id, ...)
+        # rather than the legacy camelCase ones.
+        otel_attribute_format="semconv",
     )
 
 

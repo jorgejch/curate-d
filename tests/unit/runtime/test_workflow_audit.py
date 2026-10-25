@@ -112,6 +112,87 @@ def test_the_violation_message_explains_the_consequence() -> None:
     assert "datasource transaction" in str(violation)
 
 
+def test_a_bare_enqueue_inside_a_workflow_is_caught() -> None:
+    """Flag an enqueue from a workflow body whose `with` carries no PropagateOtelContext."""
+    assert _audit(
+        """
+        @DBOS.workflow()
+        async def classify() -> None:
+            with SetWorkflowID(child_id):
+                await DBOS.enqueue_workflow_async(queue, classify_remote, request)
+        """
+    ) == ["DBOS.enqueue_workflow_async()"]
+
+
+def test_a_bare_enqueue_outside_any_workflow_is_caught() -> None:
+    """Flag a synchronous enqueue in a plain helper with no `with` at all."""
+    assert _audit(
+        """
+        def enqueue_scan(request) -> None:
+            dbos.DBOS.enqueue_workflow(queue, scan_root, request)
+        """
+    ) == ["DBOS.enqueue_workflow()"]
+
+
+def test_an_enqueue_under_propagate_otel_context_is_not_flagged() -> None:
+    """The traced form must stay quiet."""
+    assert (
+        _audit(
+            """
+            async def enqueue_scan(request) -> None:
+                with PropagateOtelContext():
+                    await DBOS.enqueue_workflow_async(queue, scan_root, request)
+            """
+        )
+        == []
+    )
+
+
+def test_an_enqueue_under_a_combined_with_is_not_flagged() -> None:
+    """PropagateOtelContext composed with SetWorkflowID in one `with` counts."""
+    assert (
+        _audit(
+            """
+            async def enqueue_ingest(request) -> None:
+                with (
+                    PropagateOtelContext(),
+                    SetWorkflowID(workflow_id),
+                    SetEnqueueOptions(queue_partition_key=provider),
+                ):
+                    await DBOS.enqueue_workflow_async(queue, ingest_source, request)
+            """
+        )
+        == []
+    )
+
+
+def test_a_with_around_a_nested_def_does_not_cover_its_body() -> None:
+    """A function defined under PropagateOtelContext runs later, outside it."""
+    assert _audit(
+        """
+        with PropagateOtelContext():
+            async def later(request) -> None:
+                await DBOS.enqueue_workflow_async(queue, scan_root, request)
+        """
+    ) == ["DBOS.enqueue_workflow_async()"]
+
+
+def test_the_bare_enqueue_message_names_the_consequence() -> None:
+    """The message says the child roots its own trace and names the fix."""
+    violation = audit_source(
+        dedent(
+            """
+            async def enqueue_scan(request) -> None:
+                await DBOS.enqueue_workflow_async(queue, scan_root, request)
+            """
+        ),
+        _PATH,
+    )[0]
+    assert violation.function == "enqueue_scan"
+    assert "would start a trace of its own" in str(violation)
+    assert "PropagateOtelContext()" in str(violation)
+
+
 def test_the_application_source_tree_is_clean() -> None:
     """The check that actually protects the codebase."""
     root = Path(curate_d.__file__).parent

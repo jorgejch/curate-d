@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from curate_d.classification.remote import OpenRouterClassifier
 from curate_d.config import Settings, StagingRole, get_settings
 from curate_d.domain import Provider
-from curate_d.observability import configure_logging, get_logger
+from curate_d.observability import configure_logging, configure_tracing, get_logger
 from curate_d.placement.admission import TransferAdmission
 from curate_d.placement.remotes import ConnectedRemotes, RcloneAccess
 from curate_d.providers.access import ConnectedAccounts
@@ -738,18 +738,33 @@ def run(
 
 
 def main() -> int:
-    """Configure logging and run the worker for the profile named in the environment.
+    """Configure telemetry and run the worker for the profile named in the environment.
 
-    A lost executor lease exits immediately with `EXIT_LEASE_LOST` through `os._exit`: a
-    normal exit would join DBOS's executor threads and so keep running workflows under
-    an identity another process may now hold.
+    Logging and tracing are configured before `run`, because `run` constructs DBOS, and
+    DBOS attaches its log handler to the providers installed at construction. A lost
+    executor lease exits immediately with `EXIT_LEASE_LOST` through `os._exit`: a normal
+    exit would join DBOS's executor threads and so keep running workflows under an
+    identity another process may now hold.
 
     Returns:
         0 once `run` returns after a signalled drain.
+
+    Raises:
+        ExecutorIdentityError: No executor identity is configured; nothing is exported.
     """
-    configure_logging(level=logging.INFO)
+    profile = resolve_profile()
+    settings = get_settings()
+    executor_id = resolve_executor_id()
+    # Before run(): DBOS binds its log handler to the providers present when it is built.
+    configure_logging(level=logging.INFO, to_logfire=True)
+    configure_tracing(
+        service_name=f"curate-d-worker-{profile.value}",
+        service_version=dbos_app.APPLICATION_VERSION,
+        environment=settings.environment,
+        instance_id=executor_id,
+    )
     try:
-        run(get_settings(), resolve_profile())
+        run(settings, profile)
     except ExecutorLeaseLostError as error:
         logger.critical("worker.lease_lost_exiting", error=str(error), status=EXIT_LEASE_LOST)
         sys.stderr.flush()

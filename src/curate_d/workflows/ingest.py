@@ -23,7 +23,7 @@ from enum import StrEnum
 from typing import Final
 from uuid import UUID
 
-from dbos import DBOS, SetEnqueueOptions, SetWorkflowID
+from dbos import DBOS, PropagateOtelContext, SetEnqueueOptions, SetWorkflowID
 from pydantic import Field
 
 from curate_d.domain import AuditEntryType, DomainModel, Provider, SourceObject, SourceObjectId
@@ -119,7 +119,9 @@ async def enqueue_ingest(requests: tuple[IngestRequest, ...] | list[IngestReques
             str(request.source_object_id),
             _version_tag(request.observed, request.attempt, request.generation),
         )
+        # Carries this span to the dequeued child; without it the child roots its own trace.
         with (
+            PropagateOtelContext(),
             SetWorkflowID(workflow_id),
             SetEnqueueOptions(queue_partition_key=request.provider.value),
         ):
@@ -292,7 +294,7 @@ async def ingest_source(
         )
         return IngestOutcome.SOURCE_CHANGED
     tag = _version_tag(observed, attempt, generation)
-    with SetWorkflowID(f"{FINGERPRINT_PREFIX}:{source_object_id}:{tag}"):
+    with PropagateOtelContext(), SetWorkflowID(f"{FINGERPRINT_PREFIX}:{source_object_id}:{tag}"):
         await DBOS.enqueue_workflow_async(
             QueueName.FINGERPRINT.value,
             fingerprint_source,

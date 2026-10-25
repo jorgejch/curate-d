@@ -23,7 +23,7 @@ from typing import Final
 from urllib.parse import quote
 from uuid import UUID
 
-from dbos import DBOS, ScheduleInput, SetEnqueueOptions, SetWorkflowID
+from dbos import DBOS, PropagateOtelContext, ScheduleInput, SetEnqueueOptions, SetWorkflowID
 from pydantic import AwareDatetime, Field
 
 from curate_d.config import Settings
@@ -347,7 +347,12 @@ async def enqueue_scan(
     workflow_id = scan_workflow_id(
         provider.value, account, quote(root, safe="/"), f"{cycle}+{part}"
     )
-    with SetWorkflowID(workflow_id), SetEnqueueOptions(queue_partition_key=provider.value):
+    # Carries this span to the dequeued child; without it the child roots its own trace.
+    with (
+        PropagateOtelContext(),
+        SetWorkflowID(workflow_id),
+        SetEnqueueOptions(queue_partition_key=provider.value),
+    ):
         await DBOS.enqueue_workflow_async(
             QueueName.SCAN.value, scan_root, provider.value, account, root, cycle, part
         )

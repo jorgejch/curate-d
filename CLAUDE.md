@@ -82,6 +82,12 @@ how it is made idempotent, whether it belongs in a workflow — against the `dbo
 - Construct DBOS only through `runtime/dbos_app.py`, from an entry point, never at import
   time. Register queues through `runtime/queues.py`: `never_update` keeps limits changed at
   runtime across restarts.
+- Workflow and step spans and DBOS's own log lines export through `enable_otlp`
+  (`build_dbos_config`) onto the process's Logfire providers; DBOS sets up no exporter of
+  its own. An entry point that exports calls `configure_tracing` before
+  `dbos_app.configure`: DBOS attaches its log handler at construction, so DBOS constructed
+  first still runs but exports no DBOS log lines. The `dbos[otel]` extra supplies that
+  handler. This is a setting the skill lists, not a departure.
 - Workflow IDs are deterministic (`runtime/workflow_ids.py`) so duplicate enqueues
   collapse. Don't substitute random IDs.
 - The DBOS system tables live in the ledger database (schema `dbos`), and separating them

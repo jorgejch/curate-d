@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Final
 from uuid import UUID
 
-from dbos import DBOS, SetWorkflowID
+from dbos import DBOS, PropagateOtelContext, SetWorkflowID
 
 from curate_d.classification.taxonomy import SEEDED_BY, active_taxonomy
 from curate_d.configuration.consistency import check_against
@@ -86,7 +86,8 @@ class DryRunPage(DomainModel):
 async def start_dry_run(request: DryRunRequest) -> str:
     """Enqueue a dry run and return its workflow id; a repeated request collapses."""
     workflow_id = dry_run_workflow_id(str(request.run_id))
-    with SetWorkflowID(workflow_id):
+    # Carries this span to the dequeued child; without it the child roots its own trace.
+    with PropagateOtelContext(), SetWorkflowID(workflow_id):
         await DBOS.enqueue_workflow_async(QueueName.MAINTENANCE.value, dry_run, request)
     return workflow_id
 
