@@ -10,3 +10,10 @@ One work stream: the guard and the test that runs it land together (design.md, P
 ## 2. Integration check
 
 - [x] 2.1 Run `npx -y @fission-ai/openspec@1.15.0 validate --all --strict` and verify it passes
+
+## Workflow follow-up
+
+- Synced into `openspec/specs/release-pipeline/spec.md` and archived in the same pull request as
+  the workflow change and its test (issue #66), with `openspec validate --all --strict` passing.
+- After it merges, the first pull request with 3,000 or more changed files fails
+  `Integration tests` at "Refuse an undecided detection" whichever result the detection gives.
