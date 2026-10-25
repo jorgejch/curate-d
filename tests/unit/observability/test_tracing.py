@@ -5,8 +5,9 @@ nothing is sent (`capture.traced_to`). The exporter also receives the pending sp
 emits when a span starts, which is where a value set before any hook runs would show up.
 """
 
+import logging
 import uuid
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 
 import logfire
 import pytest
@@ -16,11 +17,12 @@ from logfire.testing import TestExporter
 from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
 
-from curate_d.observability import configure_logging, get_logger, trace_requests
+from curate_d.observability import MASK, configure_logging, get_logger, trace_requests
 from curate_d.observability.tracing import validation_errors_only
-from tests.unit.observability.capture import stderr_captured, traced_to
+from tests.unit.observability.capture import json_lines, stderr_captured, traced_to
 
 SECRET = "s3cr3t-code"
+BEARER = "s3cr3t-token-value"
 
 
 @pytest.fixture
@@ -209,3 +211,37 @@ def test_a_raising_span_processor_leaves_logging_intact() -> None:
     written = _log_exported_event(raising)
     assert raising.ended >= 1
     assert '"event": "staging.writer_lock_held"' in written
+
+
+@pytest.mark.parametrize(
+    "processor",
+    [
+        pytest.param(lambda: SimpleSpanProcessor(_RaisingExporter()), id="exporter"),
+        pytest.param(_RaisingProcessor, id="span_processor"),
+    ],
+)
+def test_a_telemetry_failure_while_logging_an_exception_leaks_nothing(
+    processor: Callable[[], SpanProcessor],
+) -> None:
+    """A telemetry failure inside an except block prints the handled exception masked."""
+    with (
+        pytest.MonkeyPatch.context() as patch,
+        traced_to(processor()),
+        stderr_captured() as stderr,
+    ):
+        patch.delenv("PYTEST_CURRENT_TEST")
+        # pytest's root handlers capture what a process without them prints through
+        # `logging.lastResort`, the path a deployed worker's library diagnostics take.
+        patch.setattr(logging.getLogger(), "handlers", [])
+        configure_logging(to_logfire=True)
+        try:
+            raise RuntimeError(f"upstream refused Bearer {BEARER}")
+        except RuntimeError:
+            get_logger("curate_d.test.failing_export").exception("provider.call_failed")
+    assert BEARER not in stderr.getvalue()
+    records = json_lines(stderr)
+    (event,) = [record for record in records if record["event"] == "provider.call_failed"]
+    assert f"Bearer {MASK}" in str(event["exception"])
+    (diagnostic,) = [record for record in records if record is not event]
+    assert str(diagnostic["logger"]).startswith(("logfire", "opentelemetry"))
+    assert f"Bearer {MASK}" in str(diagnostic["exception"])

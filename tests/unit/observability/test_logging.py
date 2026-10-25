@@ -123,3 +123,37 @@ def test_logging_without_the_flag_exports_nothing(exporter: TestExporter) -> Non
         get_logger("curate_d.test.unexported").info(EVENT, **FIELDS)
     assert records_named(exporter, EVENT) == []
     assert [line["event"] for line in json_lines(stderr)] == [EVENT]
+
+
+@pytest.mark.parametrize("name", ["logfire", "opentelemetry.sdk.trace.export"])
+def test_a_telemetry_library_record_is_written_masked_once(name: str) -> None:
+    """Repeated configuration keeps one route: a library record reaches stderr once, masked."""
+    with stderr_captured() as stderr:
+        configure_logging()
+        configure_logging(to_logfire=True)
+        logging.getLogger(name).warning("export refused token=%s", SECRET)
+    (line,) = json_lines(stderr)
+    assert line["logger"] == name
+    assert line["event"] == f"export refused token={MASK}"
+    assert SECRET not in stderr.getvalue()
+
+
+def test_an_unformattable_telemetry_record_writes_a_fixed_line() -> None:
+    """A record that fails to format is reported by logger name, without its arguments."""
+    logger = logging.getLogger("logfire")
+    with pytest.MonkeyPatch.context() as patch, stderr_captured() as stderr:
+        configure_logging()
+        # pytest also captures non-propagating loggers, and its handler fails the test on
+        # a record that does not format.
+        patch.setattr(
+            logger,
+            "handlers",
+            [
+                handler
+                for handler in logger.handlers
+                if type(handler).__module__ != "_pytest.logging"
+            ],
+        )
+        logger.warning("%d", SECRET)
+    assert json_lines(stderr) == [{"event": "logging.diagnostic_unrenderable", "logger": "logfire"}]
+    assert SECRET not in stderr.getvalue()
