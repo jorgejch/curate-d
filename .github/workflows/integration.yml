@@ -367,21 +367,36 @@ jobs:
       # A worker serves no HTTP. It logs `worker.ready` once DBOS has launched, its queues
       # are registered and its schedules applied (curate_d/worker/main.py), so a worker
       # that hangs anywhere in startup never logs it. worker-cpu may restart until
-      # worker-io has seeded the staging marker (compose.yaml), hence the wait.
+      # worker-io has seeded the staging marker (compose.yaml), hence the wait. A restart
+      # keeps the container and its log, so only the running incarnation's log counts
+      # (`--since` its start), and it must be the same incarnation, still running, once
+      # the event is seen: a worker that logged ready and then crashed or restarted is not.
       - name: Wait for the workers to be ready
         run: |
+          incarnation() {
+            docker inspect --format '{{.State.Running}} {{.State.StartedAt}} {{.RestartCount}}' "$1"
+          }
           for service in worker-io worker-cpu; do
-            if ! timeout 120 sh -c "until docker compose logs --no-color $service | grep -q '\"event\": \"worker.ready\"'; do sleep 2; done"; then
-              echo "::error::$service did not log worker.ready within 120 seconds"
+            deadline=$((SECONDS + 120))
+            ready=false
+            while [ "$SECONDS" -lt "$deadline" ]; do
+              container=$(docker compose ps --quiet --all "$service")
+              if [ -n "$container" ]; then
+                before=$(incarnation "$container")
+                started=${before#* }; started=${started%% *}
+                if docker logs --since "$started" "$container" 2>&1 | grep -q '"event": "worker.ready"' \
+                  && [ "$(incarnation "$container")" = "$before" ] && [ "${before%% *}" = "true" ]; then
+                  ready=true
+                  break
+                fi
+              fi
+              sleep 2
+            done
+            if [ "$ready" != "true" ]; then
+              echo "::error::$service did not log worker.ready and stay up, in one incarnation, within 120 seconds"
+              [ -n "${container:-}" ] && incarnation "$container"
               exit 1
             fi
-          done
-          # Ready, and still up: a worker that logged ready and then exited is not.
-          for service in worker-io worker-cpu; do
-            docker compose ps --status running --services | grep -qx "$service" || {
-              echo "::error::$service is not running after it logged worker.ready"
-              exit 1
-            }
           done
 
       # `worker.ready` follows the schedule apply whether or not it wrote anything: a worker
