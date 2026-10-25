@@ -116,7 +116,7 @@ PR targets `dev`. Integration tests need `make test-stack` once before the first
 
 ## 6. Stream F: propagate the trace at every enqueue (after stream E; design.md D13)
 
-- [ ] 6.1 Extend `src/curate_d/runtime/workflow_audit.py` with a second rule: any
+- [x] 6.1 Extend `src/curate_d/runtime/workflow_audit.py` with a second rule: any
   `DBOS.enqueue_workflow_async` or `DBOS.enqueue_workflow` call in the tree, inside a
   workflow or not, whose enclosing `with` statements' items contain no
   `PropagateOtelContext(...)` call is a `Violation` whose message says the dequeued
@@ -125,8 +125,8 @@ PR targets `dev`. Integration tests need `make test-stack` once before the first
   inside and outside a workflow; an enqueue under `with PropagateOtelContext():` and one
   under a combined `with (PropagateOtelContext(), SetWorkflowID(...)):` are not; the
   message names the consequence) green, and `uv run python -m curate_d.runtime.workflow_audit src/curate_d`
-  reporting exactly the 14 existing sites before 6.2 lands
-- [ ] 6.2 Wrap each of the 14 enqueue sites (`workflows/ingest.py` ×2, `classify.py` ×4,
+  reporting exactly the 13 existing sites before 6.2 lands
+- [x] 6.2 Wrap each of the 13 enqueue sites (`workflows/ingest.py` ×2, `classify.py` ×4,
   `placement.py` ×2, `scan.py`, `rescan.py`, `reconcile.py` ×2, `dry_run.py`) in
   `PropagateOtelContext()`, added as the first item of the existing `with` where there is
   one, with a one-line why-comment at the first site of each module; verify with

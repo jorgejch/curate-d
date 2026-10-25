@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Final
 
-from dbos import DBOS, ScheduleInput, SetEnqueueOptions, SetWorkflowID
+from dbos import DBOS, PropagateOtelContext, ScheduleInput, SetEnqueueOptions, SetWorkflowID
 from pydantic import AwareDatetime
 
 from curate_d.config import Settings
@@ -268,7 +268,9 @@ async def full_rescan(provider_value: str, account: str, cycle: str, part: int =
 
 async def enqueue_full_rescan(provider: Provider, account: str, cycle: str, part: int = 0) -> None:
     """Enqueue one full-rescan run of an account on the provider's scan partition."""
+    # Carries this span to the dequeued child; without it the child roots its own trace.
     with (
+        PropagateOtelContext(),
         SetWorkflowID(full_rescan_workflow_id(provider.value, account, f"{cycle}+{part}")),
         SetEnqueueOptions(queue_partition_key=provider.value),
     ):

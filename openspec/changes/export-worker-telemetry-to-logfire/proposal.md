@@ -71,7 +71,7 @@ are documentation, not behaviour.
   `observability/tracing.py` (no behaviour change; docstring widens from "request
   tracing" to process telemetry), `worker/main.py:main()` (configure tracing before
   `run`), `runtime/dbos_app.py:build_dbos_config` (`enable_otlp`, semconv attribute
-  names), `api/__main__.py` (`to_logfire=True` on its logging call), the 14
+  names), `api/__main__.py` (`to_logfire=True` on its logging call), the 13
   `DBOS.enqueue_workflow_async` sites under `workflows/` (wrapped in
   `PropagateOtelContext`), `runtime/workflow_audit.py` (the enqueue rule).
 - Dependencies: `pyproject.toml` `dbos[otel]>=3.3,<3.4` (adds

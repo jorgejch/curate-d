@@ -17,7 +17,7 @@ be listed is recorded as unchecked, and nothing about its placements changes.
 from datetime import datetime
 from typing import Final
 
-from dbos import DBOS, ScheduleInput, SetWorkflowID
+from dbos import DBOS, PropagateOtelContext, ScheduleInput, SetWorkflowID
 from pydantic import Field
 
 from curate_d.classification.store import ReviewRepository
@@ -116,7 +116,8 @@ class ReconcileSummary(DomainModel):
 async def enqueue_reconcile(request: ReconcileRequest) -> str:
     """Enqueue one part of a run; a repeated request collapses."""
     workflow_id = reconcile_workflow_id(request.run, request.part)
-    with SetWorkflowID(workflow_id):
+    # Carries this span to the dequeued child; without it the child roots its own trace.
+    with PropagateOtelContext(), SetWorkflowID(workflow_id):
         await DBOS.enqueue_workflow_async(QueueName.MAINTENANCE.value, reconcile, request)
     return workflow_id
 
@@ -410,7 +411,10 @@ async def check_destinations(scheduled_time: datetime, context: object) -> None:
     policy = (await current().datasource.run_tx_step_async({"name": "open_check"}, _open_tx)).policy
     cycle = scheduled_time.strftime("%Y%m%dT%H%M%S")
     for destination in policy.destinations:
-        with SetWorkflowID(destination_check_workflow_id(destination.name, cycle)):
+        with (
+            PropagateOtelContext(),
+            SetWorkflowID(destination_check_workflow_id(destination.name, cycle)),
+        ):
             await DBOS.enqueue_workflow_async(
                 QueueName.MAINTENANCE.value, check_destination, destination, cycle
             )

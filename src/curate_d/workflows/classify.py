@@ -26,7 +26,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import BinaryIO, Final
 
-from dbos import DBOS, ScheduleInput, SetWorkflowID
+from dbos import DBOS, PropagateOtelContext, ScheduleInput, SetWorkflowID
 
 from curate_d.classification.deterministic import TierResult
 from curate_d.classification.gating import (
@@ -303,7 +303,8 @@ async def enqueue_classification(
     fingerprint: StrongFingerprint, content_object_id: ContentObjectId, staged: StagedRef
 ) -> None:
     """Enqueue classification of one content fingerprint; repeat content collapses."""
-    with SetWorkflowID(classification_workflow_id(fingerprint)):
+    # Carries this span to the dequeued child; without it the child roots its own trace.
+    with PropagateOtelContext(), SetWorkflowID(classification_workflow_id(fingerprint)):
         await DBOS.enqueue_workflow_async(
             QueueName.CLASSIFY_CHEAP.value, classify_content, content_object_id, staged
         )
@@ -330,7 +331,7 @@ async def classify_content(
     decision = prepared.decision
     if decision.verdict is GateVerdict.ESCALATE and prepared.remote is not None:
         suffix = f":{generation}" if generation else ""
-        with SetWorkflowID(f"{REMOTE_PREFIX}:{content_object_id}{suffix}"):
+        with PropagateOtelContext(), SetWorkflowID(f"{REMOTE_PREFIX}:{content_object_id}{suffix}"):
             await DBOS.enqueue_workflow_async(
                 QueueName.CLASSIFY_LLM.value,
                 classify_remote,
@@ -452,7 +453,10 @@ async def release_holds(scheduled_time: datetime, context: object) -> None:
     datasource = current().datasource
     period = spend_period(await _classify_now_step())
     for hold in await datasource.run_tx_step_async({"name": "due_holds"}, _due_holds_tx, period):
-        with SetWorkflowID(f"{REMOTE_PREFIX}:{hold.content_object_id}:{period}"):
+        with (
+            PropagateOtelContext(),
+            SetWorkflowID(f"{REMOTE_PREFIX}:{hold.content_object_id}:{period}"),
+        ):
             await DBOS.enqueue_workflow_async(
                 QueueName.CLASSIFY_LLM.value,
                 classify_remote,
@@ -522,7 +526,10 @@ async def reclassify_rejected(taxonomy_version: int) -> int:
     generation = f"taxonomy-{taxonomy_version}"
     candidates = await _reclassifiable_step(taxonomy)
     for candidate in candidates:
-        with SetWorkflowID(f"{RECLASSIFY_PREFIX}:{candidate.fingerprint.digest}:{generation}"):
+        with (
+            PropagateOtelContext(),
+            SetWorkflowID(f"{RECLASSIFY_PREFIX}:{candidate.fingerprint.digest}:{generation}"),
+        ):
             await DBOS.enqueue_workflow_async(
                 QueueName.CLASSIFY_CHEAP.value,
                 classify_content,

@@ -189,7 +189,7 @@ the child on the same trace, `dbos.operation.workflow_id` and `dbos.executor.id`
 (the dependency) runs before everything; B and D start at once with the rest of A; C
 waits on A's signature tasks; E waits on A and B; F waits on E.
 
-**D13. Every enqueue propagates the trace, and `make lint` enforces it.** Each of the 14
+**D13. Every enqueue propagates the trace, and `make lint` enforces it.** Each of the 13
 `DBOS.enqueue_workflow_async` calls in `src/curate_d` (`workflows/ingest.py` ×2,
 `classify.py` ×4, `placement.py` ×2, `scan.py`, `rescan.py`, `reconcile.py` ×2,
 `dry_run.py`) runs inside `with PropagateOtelContext():`, combined with the `SetWorkflowID`
