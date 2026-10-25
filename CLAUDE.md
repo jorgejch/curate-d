@@ -7,7 +7,8 @@
 > (`.claude/skills/dbos-python` links to it) and pinned in `skills-lock.json`. A change that
 > bumps the `dbos` package version refreshes the skill from upstream (`dbos-inc/agent-skills`)
 > and its `skills-lock.json` hash in the same change, so the guidance matches the DBOS in use.
-> Keep it whole, as upstream ships it: don't trim it by hand, Conductor references included.
+> Keep it whole, as upstream ships it: don't trim it by hand, references to DBOS products
+> curate.d does not use included.
 
 ## Changes
 

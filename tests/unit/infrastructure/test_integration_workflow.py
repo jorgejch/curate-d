@@ -1,11 +1,14 @@
 """The integration workflow's shape: its jobs, required check, path gate, shards and boot."""
 
 import json
+import os
 import posixpath
 import re
+import subprocess
 from pathlib import Path
 from typing import cast
 
+import pytest
 import yaml
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -114,6 +117,7 @@ SELECTED = "needs.plan.outputs.suite == 'true'"
 NOT_SELECTED = "needs.plan.outputs.suite == 'false'"
 
 STACK_STEP = "Start PostgreSQL, RustFS and rclone, and apply migrations"
+DETECTION_GUARD = "Refuse an undecided detection"
 BUDGET_GUARD = "Refuse a CI-sized observation budget"
 SHARD_COUNT_GUARD = "Refuse an invalid shard count"
 BUDGET_VARIABLE = "CURATE_D_TEST_STAGING_LIFECYCLE_TIMEOUT_SECONDS"
@@ -194,6 +198,27 @@ def _text(step: Document) -> str:
 def _fails_loudly(script: str) -> bool:
     """Return whether a step's script annotates an error and exits non-zero, in shell or Python."""
     return "::error::" in script and re.search(r"\bexit(?: |\()1\b", script) is not None
+
+
+def _run_detection_guard(suite: str, changed_files: str | None) -> subprocess.CompletedProcess[str]:
+    """Run the detection guard's script as GitHub Actions runs a `run` step.
+
+    Args:
+        suite: The `changes` step's `suite` output.
+        changed_files: The pull request's changed-file count; `None` leaves it unset.
+    """
+    env = {"PATH": os.environ["PATH"], "SUITE": suite}
+    if changed_files is not None:
+        env["CHANGED_FILES"] = changed_files
+    script = cast(str, _step(_plan(), DETECTION_GUARD)["run"])
+    return subprocess.run(
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script],
+        cwd=REPOSITORY_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def _suite_command() -> str:
@@ -521,7 +546,7 @@ def test_the_plan_detects_changes_before_installing_anything() -> None:
     assert "steps.changes.outputs.suite" in _text(guard), guard["name"]
     assert "::error::" in run and "exit 1" in run, guard["name"]
     assert "if" not in guard, guard["name"]
-    # A `false` from a truncated file list may have missed a declared path.
+    # A truncated file list may have missed a declared path, whatever the detection answered.
     env = cast(Document, guard["env"])
     assert env["CHANGED_FILES"] == "${{ github.event.pull_request.changed_files }}"
     assert f"-ge {PULL_REQUEST_FILE_LIMIT}" in run, guard["name"]
@@ -548,6 +573,33 @@ def test_the_plan_detects_changes_before_installing_anything() -> None:
         # An `||` would let the step run whatever the detection reported.
         assert "||" not in condition, step["name"]
         assert DETECTED in condition, step["name"]
+
+
+@pytest.mark.parametrize("suite", ["true", "false"])
+@pytest.mark.parametrize("changed_files", [str(PULL_REQUEST_FILE_LIMIT), "4500", "", None])
+def test_the_detection_guard_fails_a_possibly_truncated_list_whatever_it_selected(
+    suite: str, changed_files: str | None
+) -> None:
+    """A file count at GitHub's listing limit, or a missing one, fails the plan on either result."""
+    result = _run_detection_guard(suite, changed_files)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert f"changes {changed_files or ''} files" in result.stdout
+    assert "Split the pull request." in result.stdout
+
+
+@pytest.mark.parametrize("suite", ["", "maybe"])
+def test_the_detection_guard_refuses_a_result_neither_true_nor_false(suite: str) -> None:
+    """A detection result other than true or false fails the plan, naming the detection."""
+    result = _run_detection_guard(suite, "10")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert f"step 'changes') reported suite='{suite}'" in result.stdout
+
+
+@pytest.mark.parametrize("suite", ["true", "false"])
+def test_the_detection_guard_passes_a_complete_list(suite: str) -> None:
+    """A pull request under GitHub's listing limit passes the guard on either result."""
+    result = _run_detection_guard(suite, str(PULL_REQUEST_FILE_LIMIT - 1))
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_the_gate_fails_closed() -> None:
