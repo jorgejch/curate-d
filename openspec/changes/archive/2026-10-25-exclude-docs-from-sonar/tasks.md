@@ -10,5 +10,5 @@ One work stream: both files land in one commit (design.md, Parallelism).
 
 ## Workflow follow-up
 
-- Open the PR against `dev`; after it merges, verify with `curl -s 'https://sonarcloud.io/api/issues/search?componentKeys=jorgejch_curate-d&organization=jorge-haddad-oss&issueStatuses=OPEN,CONFIRMED&ps=1&facets=directories'` that no `docs/` or `openspec/` directory remains.
-- Sync the delta into `openspec/specs/release-pipeline/spec.md`, archive the change, and run `openspec validate --all --strict` on the archive PR.
+- Merged in pull request #95. `dev`'s first analysis after it (revision `90a8e2c`) reports 77 open issues, down from 1,963, with no `docs/` or `openspec/` directory left.
+- Synced into `openspec/specs/release-pipeline/spec.md` and archived in pull request #96, with `openspec validate --all --strict` passing.
