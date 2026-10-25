@@ -175,6 +175,5 @@ B and C can be written against the same contract. Group 4 waits on everything.
 - After the merge into `dev`, confirm on the next docs-only pull request that `Integration
   tests` passes in about a minute with the shard and boot jobs skipped and the summary
   naming the declared paths.
-- Sync the delta into `openspec/specs/release-pipeline/spec.md` (`openspec-sync-specs`).
-- Archive the change (`openspec-archive-change`) and run
-  `openspec validate --all --strict` on the archive pull request.
+- Synced into `openspec/specs/release-pipeline/spec.md` and archived in pull request #94,
+  with `openspec validate --all --strict` passing.
