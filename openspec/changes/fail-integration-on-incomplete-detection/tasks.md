@@ -9,4 +9,4 @@ One work stream: the guard and the test that runs it land together (design.md, P
 
 ## 2. Integration check
 
-- [ ] 2.1 Run `npx -y @fission-ai/openspec@1.15.0 validate --all --strict` and verify it passes
+- [x] 2.1 Run `npx -y @fission-ai/openspec@1.15.0 validate --all --strict` and verify it passes
