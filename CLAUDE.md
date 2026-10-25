@@ -23,6 +23,10 @@ depend on which and which can start at once, and keep shared edits (a migration,
 settings field, this file) in one stream or one up-front task the others wait on. Say so
 in the design when a change can't be split.
 
+## Debugging
+
+IMPORTANT: When debugging, prefer using pycharm-debugger MCP tools to interact with the IDE debugger.
+
 ## Docstrings
 
 Google-style. One-line imperative summary first, period-terminated ("Return the...",
