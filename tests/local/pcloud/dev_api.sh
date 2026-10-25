@@ -6,7 +6,8 @@
 #   <root>/source      the fixture library, scanned
 #   <root>/organized   the policy's only destination
 #
-# Requires CURATE_D_URL, CURATE_D_NAMESPACE, CURATE_D_POD and CURATE_D_TEST_ROOT (see .env.example).
+# Requires CURATE_D_URL, CURATE_D_NAMESPACE and CURATE_D_TEST_ROOT (see .env.example). The I/O
+# worker pod is found by its labels (app=curate-d, component=worker-io).
 #
 # Usage: tests/local/pcloud/dev_api.sh COMMAND [ARGS]   (run with no command for the list)
 set -euo pipefail
@@ -36,7 +37,7 @@ TEST_ROOT=${CURATE_D_TEST_ROOT:?set CURATE_D_TEST_ROOT (the pCloud test folder) 
 SOURCE=$TEST_ROOT/source
 ORGANIZED=$TEST_ROOT/organized
 DESTINATION=test-organized
-POD=${CURATE_D_POD:?set CURATE_D_POD (the I/O worker pod name) in .env}
+POD=
 STATE=${XDG_CACHE_HOME:-$HOME/.cache}/curate-d-local
 JAR=$STATE/cookies.txt
 mkdir -p "$STATE"
@@ -63,7 +64,17 @@ account() {
   esac
 }
 
+# Set POD to the I/O worker's running pod, found once by the worker-io StatefulSet's labels.
+find_io_pod() {
+  [[ -z $POD ]] || return 0
+  POD=$(kubectl -n "$NAMESPACE" get pods -l app=curate-d,component=worker-io \
+    --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}') || exit 1
+  POD=${POD%% *}
+  [[ -n $POD ]] || { echo "no running I/O worker pod (component=worker-io) in $NAMESPACE" >&2; exit 1; }
+}
+
 in_pod() {
+  find_io_pod
   kubectl -n "$NAMESPACE" exec -i "$POD" -c worker -- python - "$@" <"$HERE/in_pod.py"
 }
 
@@ -135,6 +146,7 @@ case $command in
     acct=$(account)
     library=$(mktemp -d)/curate-d-library
     (cd "$REPO" && uv run python -m tests.local.pcloud.write_library "$library" ${1:+"$1"})
+    find_io_pod
     kubectl -n "$NAMESPACE" exec -i "$POD" -c worker -- python -c '
 import shutil, sys, tarfile
 shutil.rmtree("/scratch/curate-d-seed", ignore_errors=True)
