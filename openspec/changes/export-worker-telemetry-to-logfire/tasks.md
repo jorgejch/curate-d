@@ -140,7 +140,7 @@ PR targets `dev`. Integration tests need `make test-stack` once before the first
   `uv run pytest tests/integration/test_workflow_telemetry.py --no-cov -m integration`
   green against the stack, and
   `openspec validate export-worker-telemetry-to-logfire --strict` passing
-- [ ] 7.2 Open the pull request against `dev` titled
+- [x] 7.2 Open the pull request against `dev` titled
   `feat(observability): export worker events and workflow spans to Logfire`, body naming
   #72 and #4, the owner decision on exported fields, the `otel` extra and the dev
   acceptance steps from design.md's Migration Plan; verify every required check is green
