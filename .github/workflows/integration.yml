@@ -187,7 +187,7 @@ jobs:
       - name: Refuse an invalid shard count
         id: shards
         env:
-          INTEGRATION_SHARDS: ${{ vars.INTEGRATION_SHARDS || 0 }}
+          INTEGRATION_SHARDS: ${{ vars.INTEGRATION_SHARDS || 4 }}
         run: |
           case "$INTEGRATION_SHARDS" in
             '' | *[!0-9]*) valid=false ;;
