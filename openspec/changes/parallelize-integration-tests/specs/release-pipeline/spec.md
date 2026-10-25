@@ -130,12 +130,11 @@ status checks, and the pull request MUST be up to date with its base when the ch
 
 ### Requirement: Integration suite runs whole, against the full stack
 The integration run MUST run every test under `tests/integration` exactly once, split
-across shards that each run on their own runner against their own stack holding
-PostgreSQL with the applied migrations, RustFS with the staging provisioning and the
-rclone daemon, with Tesseract available to the test process and RustFS as the only
-selected staging backend. Each shard MUST run its tests serially in one process. The gate
-MUST fail when the shards' reports together do not account for every collected test. A
-shard MUST fail if a job-wide lifecycle observation budget is set.
+across shards that each run serially, in one process, on their own runner against their
+own full stack (migrated PostgreSQL, provisioned RustFS, rclone, Tesseract) with RustFS
+as the only selected staging backend. The gate MUST fail when the shards' reports do not
+together account for every collected test, and the plan MUST fail if a job-wide
+lifecycle observation budget is set.
 
 #### Scenario: Suite runs on a pull request
 - **WHEN** the integration run is selected
