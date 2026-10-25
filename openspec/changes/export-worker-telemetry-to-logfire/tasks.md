@@ -80,7 +80,7 @@ PR targets `dev`. Integration tests need `make test-stack` once before the first
 
 ## 4. Stream D: `docs/staging.md` Logfire queries
 
-- [ ] 4.1 Under "Lock contention events", after the `jq` block, add a "Reading the same
+- [x] 4.1 Under "Lock contention events", after the `jq` block, add a "Reading the same
   events in Logfire" subsection with one SQL query per `jq` query (writer-lock wait and
   hold by caller; reservation phases by outcome; entry-claim holdings; writer-lock duty
   cycle across I/O pods, per clock hour of the holding's end, with the approximation
@@ -93,7 +93,7 @@ PR targets `dev`. Integration tests need `make test-stack` once before the first
   pointer to the subsection; verify by running each query against the dev project through
   the Logfire MCP (`query_run`) with a 7-day window: every query executes without error
   (empty results are expected before the change deploys)
-- [ ] 4.2 Add one sentence to "Lock contention alarms" saying the seven-day reading is
+- [x] 4.2 Add one sentence to "Lock contention alarms" saying the seven-day reading is
   taken with the Logfire queries across every pod, the `jq` pipelines remaining for a pod
   without a token; verify with `grep -n "Reading the same events in Logfire" docs/staging.md`
   returning the heading and one reference from the alarms subsection

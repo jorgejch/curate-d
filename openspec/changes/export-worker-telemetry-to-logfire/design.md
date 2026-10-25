@@ -47,7 +47,7 @@ See proposal.md for motivation. Current state on `dev` (`6728069`), verified 202
 - Logfire's query engine promotes `service.name`, `service.version`,
   `deployment.environment.name` and `service.instance.id` to flat columns on `records`;
   event fields live under `attributes` (`attributes->>'caller'`,
-  `(attributes->>'wait_seconds')::float`); percentiles are `approx_percentile_cont`.
+  `(attributes->>'wait_seconds')::double`); percentiles are `approx_percentile_cont`.
 - Both worker StatefulSets already set `LOGFIRE_TOKEN`, `CURATE_D_WORKER_PROFILE` and
   `POD_NAME`; the dev overlay sets `CURATE_D_ENVIRONMENT=dev` for every container.
 
