@@ -37,7 +37,13 @@ the files this change edits:
   - With no Logfire configured, DBOS logs one warning each for tracer and logger provider
     and creates no-op spans. Nothing fails.
   - DBOS 3.3 parents a queued workflow's span to the enqueuer's trace through a carrier
-    stored on the workflow row, so an ingest→classification handoff stays one trace.
+    stored on the workflow row, but only writes that carrier when the enqueue runs inside
+    its public `PropagateOtelContext` context manager (`from dbos import
+    PropagateOtelContext`); a bare `enqueue_workflow_async` roots the dequeued child on a
+    trace of its own (found by the span integration test on 2026-10-25; the first draft
+    of this bullet assumed propagation was automatic). `PropagateOtelContext()` with no
+    active span writes nothing and needs no launched DBOS, so it is safe at an API or
+    scheduler enqueue and in unit tests.
   - `logfire.StructlogProcessor(console_log=False)` emits each event as a Logfire log with
     `event` as message template and the remaining fields (minus `level`, `event`,
     `timestamp`, `exc_info` and stdlib-reserved keys) as attributes, and returns the event
@@ -168,7 +174,8 @@ change deploys it returns no rows, which verifies syntax and column names, not v
 **D11. The span integration test launches DBOS the way `test_recovery_schedule.py` does.**
 `configure_tracing(service_name="test", service_version="0", local_processor=
 SimpleSpanProcessor(TestExporter()))`, then `dbos_app.configure`, `DBOS.launch`, a test
-workflow with two steps that enqueues a child on a queue the test registers and listens to,
+workflow with two steps that enqueues a child, under `PropagateOtelContext`, on a queue the
+test registers and listens to,
 then assertions on `TestExporter.exported_spans`: three spans on one trace for the parent,
 the child on the same trace, `dbos.operation.workflow_id` and `dbos.executor.id` set.
 `logfire.configure(send_to_logfire=False, console=False, metrics=False)` in teardown, as
@@ -177,9 +184,25 @@ the child on the same trace, `dbos.operation.workflow_id` and `dbos.executor.id`
 **D12. Work streams.** A: dependency and `observability/` (logging flag, tracing
 `instance_id`, their unit tests). B: `runtime/dbos_app.py` and its test, plus the
 `CLAUDE.md` bullet. C: entry points (`worker/main.py`, `api/__main__.py`) and
-`test_worker_main.py`. D: `docs/staging.md`. E: the integration test. A's first task
+`test_worker_main.py`. D: `docs/staging.md`. E: the integration test. F (added
+2026-10-25 after E's finding, D13): the enqueue sites and the audit rule. A's first task
 (the dependency) runs before everything; B and D start at once with the rest of A; C
-waits on A's signature tasks; E waits on A and B.
+waits on A's signature tasks; E waits on A and B; F waits on E.
+
+**D13. Every enqueue propagates the trace, and `make lint` enforces it.** Each of the 14
+`DBOS.enqueue_workflow_async` calls in `src/curate_d` (`workflows/ingest.py` ×2,
+`classify.py` ×4, `placement.py` ×2, `scan.py`, `rescan.py`, `reconcile.py` ×2,
+`dry_run.py`) runs inside `with PropagateOtelContext():`, combined with the `SetWorkflowID`
+/ `SetEnqueueOptions` items already there. Without it, ingest, classification and
+placement export as three traces per file, which defeats the reading #72 asks for.
+`runtime/workflow_audit.py` gains a second rule: a `DBOS.enqueue_workflow_async` or
+`DBOS.enqueue_workflow` call anywhere in the tree whose enclosing `with` items do not
+include a `PropagateOtelContext(...)` call is a violation, reported like the raw-call one,
+so a future site cannot regress silently. Alternatives: a wrapper function
+(`runtime/enqueue.py`) that every site calls (hides the DBOS API behind one more layer and
+the sites already compose two context managers; the audit gives the same guarantee without
+it); leaving it to review (the first 14 sites show that does not hold). Owner decision
+2026-10-25: all sites plus the rule, in this change.
 
 ## Risks / Trade-offs
 
@@ -208,6 +231,9 @@ waits on A's signature tasks; E waits on A and B.
   production] → the processor-failure test clears that variable inside its body
   (`tests/unit/observability/test_tracing.py`, `_log_exported_event`). Undocumented Logfire
   behaviour: re-check it on every Logfire upgrade.
+- [A `PropagateOtelContext` around an enqueue captures whatever span is current: inside a
+  workflow that is the workflow span; in the API it is the request span] → wanted in
+  both cases; an enqueue with no span writes no carrier, so nothing is mis-parented.
 - [Logfire's scrubber runs after ours and replaces `[REDACTED]` on a key it also matches
   (`refresh_token`) with its own marker] → harmless, the secret is gone either way; the spec
   scenario accepts either mask, and the order proof uses a bearer-token text field Logfire

@@ -30,6 +30,9 @@ nothing reads it.
   skill lists `enable_otlp` as a supported option and the DBOS Logfire integration
   documents exactly this arrangement (Logfire SDK configured first, no OTLP endpoints).
   The ordering constraint it creates is recorded in `CLAUDE.md`.
+- Every workflow enqueue in `src/curate_d` runs under DBOS's `PropagateOtelContext`, which
+  is what makes a dequeued child join the enqueuer's trace (DBOS does not do it by
+  itself), and `make lint`'s workflow audit fails on an enqueue outside it.
 - The `dbos` dependency gains its `otel` extra. DBOS attaches an OpenTelemetry logging
   handler to its logger when `enable_otlp` is on and a logger provider is installed, and
   that handler lives in `opentelemetry-instrumentation-logging`, which only the extra
@@ -68,7 +71,9 @@ are documentation, not behaviour.
   `observability/tracing.py` (no behaviour change; docstring widens from "request
   tracing" to process telemetry), `worker/main.py:main()` (configure tracing before
   `run`), `runtime/dbos_app.py:build_dbos_config` (`enable_otlp`, semconv attribute
-  names), `api/__main__.py` (`to_logfire=True` on its logging call).
+  names), `api/__main__.py` (`to_logfire=True` on its logging call), the 14
+  `DBOS.enqueue_workflow_async` sites under `workflows/` (wrapped in
+  `PropagateOtelContext`), `runtime/workflow_audit.py` (the enqueue rule).
 - Dependencies: `pyproject.toml` `dbos[otel]>=3.3,<3.4` (adds
   `opentelemetry-instrumentation-logging`), `uv.lock`.
 - Tests: `tests/unit/observability/test_tracing.py` (instance id, failing exporter and

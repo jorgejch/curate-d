@@ -3,7 +3,7 @@
 Five streams (design.md D12). Task 1.1 is the shared dependency bump and runs first, alone.
 Then streams A (1.2–1.5), B (2.x) and D (4.x) start at once: they touch disjoint files.
 Stream C (3.x) waits on 1.2 and 1.3, whose signatures it calls. Stream E (5.x) waits on
-streams A and B. Group 6 waits on everything. Work on one branch cut from `origin/dev`; the
+streams A and B. Stream F (6.x) waits on E; group 7 waits on everything. Work on one branch cut from `origin/dev`; the
 PR targets `dev`. Integration tests need `make test-stack` once before the first run.
 
 ## 1. Stream A: dependency and `observability/`
@@ -114,12 +114,33 @@ PR targets `dev`. Integration tests need `make test-stack` once before the first
   `uv run pytest tests/integration/test_recovery_schedule.py --no-cov -m integration`
   green and its captured log showing `OTLP is enabled but` warnings only
 
-## 6. Integration check
+## 6. Stream F: propagate the trace at every enqueue (after stream E; design.md D13)
 
-- [ ] 6.1 Run the whole gate; verify with `make check` green (lint, typecheck, unit suite
-  with the coverage floor) and
+- [ ] 6.1 Extend `src/curate_d/runtime/workflow_audit.py` with a second rule: any
+  `DBOS.enqueue_workflow_async` or `DBOS.enqueue_workflow` call in the tree, inside a
+  workflow or not, whose enclosing `with` statements' items contain no
+  `PropagateOtelContext(...)` call is a `Violation` whose message says the dequeued
+  workflow would root a trace of its own; keep the existing raw-call rule as it is; verify
+  with new tests in `tests/unit/runtime/test_workflow_audit.py` (a bare enqueue is caught
+  inside and outside a workflow; an enqueue under `with PropagateOtelContext():` and one
+  under a combined `with (PropagateOtelContext(), SetWorkflowID(...)):` are not; the
+  message names the consequence) green, and `uv run python -m curate_d.runtime.workflow_audit src/curate_d`
+  reporting exactly the 14 existing sites before 6.2 lands
+- [ ] 6.2 Wrap each of the 14 enqueue sites (`workflows/ingest.py` ×2, `classify.py` ×4,
+  `placement.py` ×2, `scan.py`, `rescan.py`, `reconcile.py` ×2, `dry_run.py`) in
+  `PropagateOtelContext()`, added as the first item of the existing `with` where there is
+  one, with a one-line why-comment at the first site of each module; verify with
+  `uv run python -m curate_d.runtime.workflow_audit src/curate_d` clean,
+  `make lint typecheck` and `uv run pytest tests/unit/workflows --no-cov -q` green
+
+## 7. Integration check
+
+- [ ] 7.1 Run the whole gate; verify with `make check` green (lint, typecheck, unit suite
+  with the coverage floor),
+  `uv run pytest tests/integration/test_workflow_telemetry.py --no-cov -m integration`
+  green against the stack, and
   `openspec validate export-worker-telemetry-to-logfire --strict` passing
-- [ ] 6.2 Open the pull request against `dev` titled
+- [ ] 7.2 Open the pull request against `dev` titled
   `feat(observability): export worker events and workflow spans to Logfire`, body naming
   #72 and #4, the owner decision on exported fields, the `otel` extra and the dev
   acceptance steps from design.md's Migration Plan; verify every required check is green
