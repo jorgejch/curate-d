@@ -49,7 +49,7 @@ jobs:
     # The ruleset requires this check by name: renaming it leaves every pull request
     # waiting on a check that never reports. Pinned by test_integration_workflow.py.
     name: Integration tests
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     # The first full run took about 10 minutes, 9 of them the suite; three times that is
     # room for a slow runner without letting a hung test hold the PR for the 6-hour default.
     timeout-minutes: 30
