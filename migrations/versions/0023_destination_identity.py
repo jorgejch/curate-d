@@ -341,9 +341,10 @@ def _backfill(bind: sa.Connection) -> None:
         claimed[(destination_id, f"locator {locator}")].append(label)
     if unresolved:
         raise UnresolvedPlacementsError(
-            f"{len(unresolved)} placements have no recorded location and name a destination "
-            "no policy version in force when they were started defines, e.g. "
-            f"{', '.join(unresolved[:_REPORTED])}; nothing was changed"
+            f"{len(unresolved)} placements have no usable recorded location or policy "
+            "definition: none names their destination, or the root found does not normalize, "
+            f"e.g. {', '.join(unresolved[:_REPORTED])}; delete them (docs/recovery.md, "
+            "Breaking deploys); nothing was changed"
         )
     shared = [
         f"{what} at {identities[destination_id]}: {', '.join(labels)}"
