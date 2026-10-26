@@ -6,7 +6,7 @@
     "repository": {
       "url": "git@github.com:jorgejch/curate-d.git",
       "link_mode": "local-only",
-      "revision": "6c231b40fcd1b3df3f5f06e69909d2816482e883"
+      "revision": "2a943ca03a0698aa438cd936154182d18c808fae"
     },
     "locale": "en",
     "quality_profile": "showcase",
@@ -205,8 +205,8 @@
         },
         {
           "path": "src/curate_d/workflows/scan.py",
-          "line": 356,
-          "end_line": 372,
+          "line": 361,
+          "end_line": 377,
           "label": "scan_all schedule"
         }
       ]
@@ -222,14 +222,14 @@
       "sources": [
         {
           "path": "src/curate_d/workflows/ingest.py",
-          "line": 242,
-          "end_line": 305,
+          "line": 244,
+          "end_line": 307,
           "label": "ingest_source workflow"
         },
         {
           "path": "src/curate_d/workflows/ingest.py",
           "line": 115,
-          "end_line": 133,
+          "end_line": 135,
           "label": "enqueue_ingest"
         }
       ]
@@ -246,8 +246,8 @@
       "sources": [
         {
           "path": "src/curate_d/workflows/classify.py",
-          "line": 351,
-          "end_line": 446,
+          "line": 352,
+          "end_line": 447,
           "label": "classify_remote workflow"
         },
         {
@@ -270,14 +270,14 @@
       "sources": [
         {
           "path": "src/curate_d/workflows/reconcile.py",
-          "line": 283,
-          "end_line": 351,
+          "line": 308,
+          "end_line": 381,
           "label": "reconcile, reconcile_all"
         },
         {
           "path": "src/curate_d/reconciliation/convergence.py",
           "line": 1,
-          "end_line": 14,
+          "end_line": 18,
           "label": "desired vs observed"
         }
       ]
@@ -293,20 +293,20 @@
       "sources": [
         {
           "path": "src/curate_d/workflows/placement.py",
-          "line": 237,
-          "end_line": 288,
+          "line": 331,
+          "end_line": 405,
           "label": "place_content workflow"
         },
         {
           "path": "src/curate_d/workflows/placement.py",
-          "line": 107,
-          "end_line": 115,
+          "line": 135,
+          "end_line": 145,
           "label": "size-class queue"
         },
         {
           "path": "src/curate_d/workflows/placement.py",
-          "line": 136,
-          "end_line": 166,
+          "line": 166,
+          "end_line": 196,
           "label": "_copy_step, provider to provider"
         }
       ]
@@ -322,8 +322,8 @@
       "sources": [
         {
           "path": "src/curate_d/workflows/placement.py",
-          "line": 291,
-          "end_line": 324,
+          "line": 408,
+          "end_line": 461,
           "label": "verify_placement workflow"
         }
       ],
@@ -340,20 +340,20 @@
       "sources": [
         {
           "path": "src/curate_d/ledger/tables.py",
-          "line": 73,
-          "end_line": 100,
+          "line": 71,
+          "end_line": 98,
           "label": "source_objects"
         },
         {
           "path": "src/curate_d/ledger/tables.py",
-          "line": 165,
-          "end_line": 192,
+          "line": 163,
+          "end_line": 190,
           "label": "content_objects"
         },
         {
           "path": "src/curate_d/ledger/tables.py",
-          "line": 382,
-          "end_line": 440,
+          "line": 447,
+          "end_line": 505,
           "label": "scans, scan_folders"
         }
       ]
@@ -370,8 +370,8 @@
         {
           "path": "src/curate_d/staging/publish.py",
           "line": 1,
-          "end_line": 14,
-          "label": "publish under writer lock"
+          "end_line": 16,
+          "label": "publish under a reservation"
         },
         {
           "path": "src/curate_d/staging/snapshots.py",
@@ -398,8 +398,8 @@
         },
         {
           "path": "src/curate_d/ledger/tables.py",
-          "line": 473,
-          "end_line": 592,
+          "line": 538,
+          "end_line": 673,
           "label": "classifications .. holds"
         }
       ]
@@ -416,13 +416,13 @@
         {
           "path": "src/curate_d/placement/pipeline.py",
           "line": 1,
-          "end_line": 15,
+          "end_line": 9,
           "label": "copy, verify, register"
         },
         {
           "path": "src/curate_d/placement/pipeline.py",
-          "line": 306,
-          "end_line": 365,
+          "line": 519,
+          "end_line": 645,
           "label": "conclude"
         }
       ]
@@ -438,8 +438,8 @@
       "sources": [
         {
           "path": "src/curate_d/workflows/ingest.py",
-          "line": 308,
-          "end_line": 372,
+          "line": 310,
+          "end_line": 374,
           "label": "fingerprint_source workflow"
         },
         {
@@ -462,8 +462,8 @@
       "sources": [
         {
           "path": "src/curate_d/workflows/classify.py",
-          "line": 312,
-          "end_line": 348,
+          "line": 313,
+          "end_line": 349,
           "label": "classify_content workflow"
         },
         {
@@ -544,7 +544,7 @@
         {
           "path": "src/curate_d/worker/main.py",
           "line": 740,
-          "end_line": 756,
+          "end_line": 771,
           "label": "exit 75 when lost"
         }
       ]
@@ -595,8 +595,8 @@
         },
         {
           "path": "src/curate_d/runtime/dbos_app.py",
-          "line": 88,
-          "end_line": 93,
+          "line": 91,
+          "end_line": 96,
           "label": "schema dbos, ledger URL"
         }
       ]
@@ -619,8 +619,8 @@
         },
         {
           "path": "src/curate_d/runtime/retention.py",
-          "line": 128,
-          "end_line": 178,
+          "line": 134,
+          "end_line": 199,
           "label": "list/delete + checkpoints"
         }
       ],
@@ -643,8 +643,8 @@
         },
         {
           "path": "src/curate_d/runtime/sweep.py",
-          "line": 801,
-          "end_line": 880,
+          "line": 813,
+          "end_line": 892,
           "label": "lease as liveness test"
         }
       ],
@@ -858,7 +858,7 @@
       "dot": "cyan",
       "title": "Deterministic workflow IDs",
       "items": [
-        "ingest:<source>:<version> \u00b7 classify:sha256:<digest> \u00b7 placement:sha256:<digest>:<destination>@<locator hash>#<attempt>",
+        "ingest:<source>:<version> \u00b7 classify:sha256:<digest> \u00b7 placement:sha256:<digest>:<destination id>@<locator hash>#<attempt>",
         "A repeated enqueue collapses, so reconcile can enqueue every missing placement on every pass",
         "Scan and reconcile hand over to continuation workflows after a bounded batch"
       ]

@@ -3,7 +3,7 @@
   "diagram_type": "architecture",
   "meta": {
     "title": "curate.d runtime architecture",
-    "repository": { "url": "git@github.com:jorgejch/curate-d.git", "link_mode": "local-only", "revision": "6c231b40fcd1b3df3f5f06e69909d2816482e883" },
+    "repository": { "url": "git@github.com:jorgejch/curate-d.git", "link_mode": "local-only", "revision": "2a943ca03a0698aa438cd936154182d18c808fae" },
     "output": "docs/diagrams/architecture/curate-d-architecture.html",
     "quality_profile": "showcase"
   },
@@ -32,7 +32,7 @@
       "sources": [
         { "path": "src/curate_d/domain/source.py", "line": 17, "end_line": 23, "label": "only provider" },
         { "path": "src/curate_d/providers/pcloud/files.py", "line": 1, "end_line": 11, "label": "listing and download" },
-        { "path": "src/curate_d/domain/policy.py", "line": 42, "end_line": 49, "label": "destinations" }
+        { "path": "src/curate_d/domain/policy.py", "line": 57, "end_line": 71, "label": "destinations" }
       ]
     },
     {
@@ -71,7 +71,7 @@
       "size": [180, 64],
       "sources": [
         { "path": "src/curate_d/staging/object_store.py", "line": 1, "end_line": 14, "label": "S3 adapter" },
-        { "path": "infrastructure/README.md", "line": 118, "end_line": 133, "label": "identities and lifecycle" }
+        { "path": "infrastructure/README.md", "line": 115, "end_line": 129, "label": "identities and lifecycle" }
       ]
     },
     {
@@ -118,12 +118,13 @@
       "id": "logfire",
       "type": "external",
       "label": "Logfire",
-      "sublabel": "request traces",
-      "pos": [1520, 600],
+      "sublabel": "traces · log events",
+      "pos": [1520, 80],
       "size": [150, 64],
       "sources": [
-        { "path": "src/curate_d/observability/tracing.py", "line": 1, "end_line": 5, "label": "export" },
-        { "path": "src/curate_d/api/__main__.py", "line": 39, "end_line": 57, "label": "API only" }
+        { "path": "src/curate_d/observability/tracing.py", "line": 1, "end_line": 12, "label": "export from every process" },
+        { "path": "src/curate_d/api/__main__.py", "line": 39, "end_line": 57, "label": "API" },
+        { "path": "src/curate_d/worker/main.py", "line": 758, "end_line": 765, "label": "workers, before DBOS" }
       ]
     },
     {
@@ -137,7 +138,7 @@
       "sources": [
         { "path": "src/curate_d/api/connections.py", "line": 1, "end_line": 10, "label": "authorize accounts" },
         { "path": "src/curate_d/api/review.py", "line": 1, "end_line": 7, "label": "review queue" },
-        { "path": "src/curate_d/api/configuration.py", "line": 35, "end_line": 37, "label": "authenticating reverse proxy identity" }
+        { "path": "src/curate_d/api/configuration.py", "line": 55, "end_line": 57, "label": "authenticating reverse proxy identity" }
       ]
     }
   ],
@@ -169,7 +170,9 @@
     { "id": "io-openrouter", "from": "io", "to": "openrouter", "label": "classify-llm", "fromSide": "top", "toSide": "right" },
     { "id": "api-pg", "from": "api", "to": "pg", "label": "ledger · enqueue", "fromSide": "top", "toSide": "bottom" },
     { "id": "api-pcloud", "from": "api", "to": "pcloud", "label": "OAuth code exchange", "fromSide": "left", "toSide": "bottom" },
-    { "id": "api-logfire", "from": "api", "to": "logfire", "label": "spans", "variant": "dashed" },
+    { "id": "api-logfire", "from": "api", "to": "logfire", "label": "spans · logs", "variant": "dashed", "fromSide": "right", "toSide": "bottom" },
+    { "id": "cpu-logfire", "from": "cpu", "to": "logfire", "label": "spans · logs", "variant": "dashed", "fromSide": "top", "toSide": "left" },
+    { "id": "io-logfire", "from": "io", "to": "logfire", "label": "spans · logs", "variant": "dashed", "fromSide": "top", "toSide": "top" },
     { "id": "operator-api", "from": "operator", "to": "api", "label": "HTTP · authenticating reverse proxy", "fromSide": "top", "toSide": "bottom" }
   ],
   "cards": [
@@ -207,7 +210,7 @@
       "dot": "amber",
       "title": "Operations",
       "items": [
-        "The API traces requests to Logfire, health probes excepted",
+        "The API and both workers export spans and redacted log events to Logfire; the API leaves health probes untraced",
         "reset-environment.sh empties the local or dev ledger, dbos schema included, and content/ prefix",
         "The reset keeps pCloud connections unless --drop-connections is given"
       ]
