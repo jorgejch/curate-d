@@ -11,6 +11,17 @@ infrastructure/reset/reset-environment.sh local|dev [--execute [--yes]] [--drop-
 Without `--execute` it is a dry run: it prints the rows and objects a reset would remove and
 changes nothing. With `--execute` it asks you to type `reset <env>`, unless `--yes` is given.
 
+A dev run reads its target from environment variables:
+
+| Variable | Default | Names |
+| --- | --- | --- |
+| `CURATE_D_RESET_NAMESPACE` | none, required | the namespace to reset |
+| `CURATE_D_RESET_CONFIGMAP` | `curate-d-config` | the ConfigMap holding `CURATE_D_ENVIRONMENT` |
+| `CURATE_D_RESET_API`, `CURATE_D_RESET_WORKER_IO`, `CURATE_D_RESET_WORKER_CPU` | `deployment/curate-d-api`, `statefulset/curate-d-worker-io`, `statefulset/curate-d-worker-cpu` | the workloads stopped and restarted |
+| `CURATE_D_RESET_POOLER` | `deployment/curate-d-db-pooler-rw` | the pooler restarted after the wipe; empty skips it |
+| `CURATE_D_RESET_EGRESS_PROXY` | empty, skipped | an egress proxy restarted after the pooler |
+| `CURATE_D_RESET_PAUSE_ANNOTATION` | empty, skipped | an annotation that keeps the GitOps reconciler off the workloads, such as Flux's `kustomize.toolkit.fluxcd.io/reconcile` |
+
 Locally, `make stack-reset` (`docker compose down -v`) is the cruder alternative: it destroys
 every volume, provider connections included, and the next `make stack-up` comes up on empty volumes.
 
@@ -75,28 +86,29 @@ Each pod in `<namespace>` across the phases of `reset-environment.sh dev --execu
 | reset pod | reads only | – | – | **wipes** | – | – |
 | connection infrastructure | running | running | running | sessions cut | **restarted** | running |
 | database | running | running | running | running | running | running |
-| reconciler on the app | on | on | **off** | **off** | **off** | on again |
+| reconciler on the app (with a pause annotation) | on | on | **off** | **off** | **off** | on again |
 
-- **Stop the app.** Before scaling the API and workers to 0, the script annotates each one
-  `kustomize.toolkit.fluxcd.io/reconcile: disabled`, which keeps the reconciler from bringing them back
-  mid-wipe, and records its replica count in `curate-d/reset-replicas` on the same object. Phase
-  6 scales them back to those counts and removes both annotations.
+- **Stop the app.** Before scaling the API and workers to 0, the script records each one's
+  replica count in `curate-d/reset-replicas` on the same object and, when
+  `CURATE_D_RESET_PAUSE_ANNOTATION` is set, annotates it `<annotation>: disabled`, which keeps
+  the reconciler from bringing it back mid-wipe. Without one, nothing keeps the reconciler
+  off. Phase 6 scales them back to the recorded counts and removes the annotations.
 - **Wipe and migrate.** The reset pod is built from the I/O worker's pod template. It refuses
   while a worker still holds its executor lease, ends every other database session the
   application role holds (any connection pooler's included), then wipes and migrates.
-- **Restart infrastructure.** Connection infrastructure restarts so it drops server connections and prepared
-  statements that point at dropped objects. The database is
-  never restarted: the wipe is plain SQL and does not need it.
+- **Restart infrastructure.** The pooler restarts so it drops server connections and prepared
+  statements that point at dropped objects, then the egress proxy, if one is configured. The
+  database is never restarted: the wipe is plain SQL and does not need it.
 
 ## Local and dev side by side
 
 | | local | dev (Kubernetes) |
 | --- | --- | --- |
 | Runs the reset in | `docker compose run worker-io` | a one-off pod from the `worker-io` template |
-| Stops first | `api`, `worker-io`, `worker-cpu` | the same three, scaled to 0, the reconciler kept off them |
+| Stops first | `api`, `worker-io`, `worker-cpu` | the same three, scaled to 0, the reconciler kept off them when a pause annotation is set |
 | Restarts after | every service except `postgres` | connection infrastructure, then the API and workers |
 | Waits for | `docker compose up -d --wait` (healthy) | `rollout status` on every workload |
-| Needs on your machine | the stack's `CURATE_D_CREDENTIAL_ENCRYPTION_KEY` exported, as for `make stack-up` | a kubectl context for the cluster, and `jq` |
+| Needs on your machine | the stack's `CURATE_D_CREDENTIAL_ENCRYPTION_KEY` exported, as for `make stack-up` | a kubectl context for the cluster, `jq`, and `CURATE_D_RESET_NAMESPACE` exported |
 
 ## What it refuses
 
@@ -105,6 +117,7 @@ Each pod in `<namespace>` across the phases of `reset-environment.sh dev --execu
 | `prod`, or any environment but `local` or `dev` | usage, exit 2 |
 | The target is configured (`CURATE_D_ENVIRONMENT`) for a different environment | `refused: asked to reset dev, but this container is configured for …`; dev checks ConfigMap `curate-d-config` first: `namespace <namespace> is configured for …, not dev` |
 | local: `postgres` or `rustfs` not running, or `CURATE_D_CREDENTIAL_ENCRYPTION_KEY` not exported | stops before the plan; nothing changed |
+| dev: `CURATE_D_RESET_NAMESPACE` not set | stops before the plan; nothing changed |
 | A worker still holds its executor lease | `refused: workers still hold their leases` |
 | A table owned by another role would survive the wipe | `refused`, and the wipe rolls back |
 | `--execute` without a terminal and without `--yes` | stops; nothing changed |
@@ -115,15 +128,22 @@ Each pod in `<namespace>` across the phases of `reset-environment.sh dev --execu
 | Fails during | State afterwards | Recovery |
 | --- | --- | --- |
 | Plan or confirm | nothing changed | none needed |
-| Wipe or migrate (dev) | API and workers at 0, the reconciler kept off them | rerun the script: it restores the recorded replicas |
+| Wipe or migrate (dev) | API and workers at 0, the reconciler kept off them if a pause annotation is set | rerun the script: it restores the recorded replicas |
 | Wipe or migrate (local) | API and workers stopped | rerun the script |
 | Migrate, after the connections were set aside | connections held in `curate_d_reset` | the next run restores them |
 
-To hand the dev workloads back to the reconciler by hand instead of rerunning:
+To hand the dev workloads back by hand instead of rerunning, scale each to its recorded count,
+then remove the record and, if one was set, the pause annotation (Flux's here):
 
 ```bash
+for workload in deployment/curate-d-api statefulset/curate-d-worker-io statefulset/curate-d-worker-cpu; do
+  replicas=$(kubectl -n <namespace> get "$workload" -o jsonpath='{.metadata.annotations.curate-d/reset-replicas}')
+  kubectl -n <namespace> scale --replicas="${replicas:-1}" "$workload"
+done
 kubectl -n <namespace> annotate deployment/curate-d-api statefulset/curate-d-worker-io statefulset/curate-d-worker-cpu kustomize.toolkit.fluxcd.io/reconcile- curate-d/reset-replicas-
 ```
+
+Removing the record before scaling loses the counts.
 
 ## After the version lease first rolls out
 
@@ -139,13 +159,13 @@ also empties `lease_versions`, and the workers register again as they restart.
 Preview a dev reset (changes nothing):
 
 ```bash
-infrastructure/reset/reset-environment.sh dev
+CURATE_D_RESET_NAMESPACE=<namespace> infrastructure/reset/reset-environment.sh dev
 ```
 
 Reset dev, typing `reset dev` when asked:
 
 ```bash
-infrastructure/reset/reset-environment.sh dev --execute
+CURATE_D_RESET_NAMESPACE=<namespace> infrastructure/reset/reset-environment.sh dev --execute
 ```
 
 Reset the local stack without the prompt:

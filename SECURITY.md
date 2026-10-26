@@ -48,6 +48,7 @@ from automated scanners with no demonstrated impact.
 ## Deployment
 
 Deployment manifests live outside this repository. Running curate.d securely is the
-deploying operator's responsibility: keep the API off the public internet, give each worker
+deploying operator's responsibility: the API performs no authentication of its own, so deploy
+it only behind an authenticating reverse proxy or on a private network; give each worker
 profile only its own credentials, and store secrets in a secret manager rather than in
 manifests.

@@ -43,6 +43,13 @@ executor. Don't alert on it.
 Alert on these events:
 
 - `recovery_sweep.fork_failed`: one row could not be forked; see Triage.
+- `recovery_sweep.reenqueue_failed`: re-enqueueing one dead executor's row raised; the row is
+  in `failed`, and the next tick tries again while it is still PENDING under that executor.
+  If it repeats, read the error.
+- `recovery_sweep.queue_refused`: a row to fork or re-enqueue names no queue, or one no
+  curate.d worker dequeues, as after a hand resume or fork without `queue_name`. It fails
+  every tick. Resume or fork it by hand onto the queue its workflow runs on (Triage: Hand
+  resume and fork), or cancel it.
 - `recovery_sweep.unregistered_version`: rows of a build from before the version lease; see
   [reset.md](reset.md#after-the-version-lease-first-rolls-out).
 - `recovery_sweep.newer_than_target`: rows of a build newer than latest, after a rollback;
@@ -103,7 +110,9 @@ deployment repository's manifests and their tests pin session mode and the URL's
 through it. `compose.yaml` connects directly, with server-side `tcp_keepalives_*` set.
 
 For capacity, count one extra short-lived pooler client per I/O replica per reconciliation
-interval, on top of each worker's two long-lived lease sessions.
+interval, and the recovery sweep's short-lived fence, version-lock and executor-lease
+sessions while a tick runs, on top of each worker's one long-lived lease session (the
+executor lease, which also holds its version's lock).
 
 ## Before deploying
 
@@ -153,9 +162,10 @@ than the drain. The drain command, the wait cap and the pipeline gate are #74.
 A forked row is reconstructed by `DomainModel.__setstate__`: a field added since the row was
 pickled reads as its declared default, which must mean what the old build did; a required
 field the pickle lacks raises `StaleCheckpointError`, naming the model and the fields, and
-the row ends ERROR (Triage). A change that adds a required field to a pickled model, or
-retypes one, is therefore a breaking deploy: the drain must reach zero before the old workers
-stop. Say so in the PR.
+the row ends ERROR (Triage). A field the pickle holds that the model no longer declares is
+dropped. A change that adds a required field to a pickled model, or retypes or renames one,
+is therefore a breaking deploy: the drain must reach zero before the old workers stop. Say
+so in the PR.
 
 ### Breaking deploys
 
@@ -178,11 +188,17 @@ use the client of the Kill switch (Triage).
    1. Pause the `reconcile` and `check-destinations` schedules:
       `dbos.pause_schedule("reconcile")`, `dbos.pause_schedule("check-destinations")`.
    2. Let placements, verifications, reconciliations, destination checks and dry runs drain,
-      until this returns an empty list:
+      until both of these return an empty list. The second covers the two schedules' own
+      ticks, whose IDs carry none of these prefixes: one queued before the pause still
+      starts new work.
 
       ```python
       dbos.list_workflows(
           workflow_id_prefix=["placement:", "verify:", "reconcile:", "check:", "dry-run:"],
+          status=["ENQUEUED", "PENDING"],
+      )
+      dbos.list_workflows(
+          schedule_name=["reconcile", "check-destinations"],
           status=["ENQUEUED", "PENDING"],
       )
       ```
@@ -193,8 +209,9 @@ use the client of the Kill switch (Triage).
       and the work it enqueues: repeat step 2's check until it is empty again. It fails each
       placement whose workflow died (`STALE`), which the migration would otherwise refuse as
       in flight.
-   4. Stop the old workers and the API. Run `make migrate` (`alembic upgrade head`) from the
-      new image against the target database.
+   4. Stop the old workers and the API. Run `alembic upgrade head` from the new image
+      against the target database (`make migrate` from a checkout of the new build; the
+      image has no `make`).
    5. Roll out the new build, then resume both schedules (`dbos.resume_schedule(...)`). The
       migration empties `destination_checks`; the first `check-destinations` cycle refills it.
 
@@ -312,8 +329,9 @@ placement is started again by the next reconciliation pass; a reconcile part run
 its schedule; a dry run is started again by hand. Then find the field in the error and the
 build that added it without a default, since that is the bug.
 
-**Hand resume and fork.** Always pass `queue_name` (and `queue_partition_key` on a
-partitioned queue). Without one, DBOS assigns its internal queue, which every worker dequeues.
+**Hand resume and fork.** Always pass `queue_name`, and on a fork onto a partitioned queue
+`queue_partition_key` too; a resume takes no partition key and keeps the row's. Without a
+queue, DBOS assigns its internal queue, which every worker dequeues.
 The workflow could then run on the wrong profile, crossing the credential split, and the sweep
 refuses to recover such a row.
 

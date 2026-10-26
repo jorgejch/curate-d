@@ -85,7 +85,8 @@ Staging never authorizes source release.
 ## Startup, readiness and shutdown
 
 1. Provision RustFS with `make stack-up`, or provision the disposable OVH fixture separately.
-   Apply the cache-index migration before running staging workflows.
+   Apply the migrations (`make migrate`; the cache index is `0006_staged_objects` and
+   `0021_staging_reservations`) before running staging workflows.
 2. Run the [provisioning smoke command](../infrastructure/README.md#provisioning-smoke-check)
    with both identities, or start I/O first to create the readiness marker.
 3. Start CPU after the marker exists. A first concurrent startup can fail CPU readiness,
@@ -152,8 +153,8 @@ variables; credentials must be supplied through the secret-delivery mechanism.
 | `CURATE_D_STAGING_S3_ROLE` | `writer` for I/O, `reader` for CPU; default `reader` |
 | `CURATE_D_STAGING_S3_ACCESS_KEY_ID` | Required explicit role-specific access key |
 | `CURATE_D_STAGING_S3_SECRET_ACCESS_KEY` | Required explicit role-specific secret |
-| `CURATE_D_STAGING_S3_CONTENT_PREFIX` | Default `content/`; with S3 configured, validation requires a nonempty trailing-slash prefix |
-| `CURATE_D_STAGING_MAX_BYTES` | Completed active cache ceiling; default 100 GiB |
+| `CURATE_D_STAGING_S3_CONTENT_PREFIX` | Default `content/`; with S3 configured, validation requires a nonempty prefix ending in `/` and not starting with `/` |
+| `CURATE_D_STAGING_MAX_BYTES` | Ceiling on completed objects under the prefix plus live reservations; default 100 GiB |
 | `CURATE_D_STAGING_CAPACITY_RETRY_SECONDS` | First durable ingest wait when staging is full, doubling up to 15 times this; default 60 seconds |
 | `CURATE_D_STAGING_MAX_AGE_HOURS` | Completed-entry eviction age and explicit stale-upload cutoff; default 24 hours |
 | `CURATE_D_STAGING_TRANSFER_TIMEOUT_SECONDS` | Upload/download and startup readiness timeout; default 300 seconds. Also sets the reservation TTL, twice this (600 seconds by default): one deadline covers the upload, the second the lock waits and scheduling around it. Raising it raises the TTL, so a dead pod's headroom returns later |
@@ -167,7 +168,8 @@ fixtures enforce certificate verification. The CPU egress allowlist and the per-
 scratch requests and limits live in the deployment manifests; the
 endpoint-IP-change note is under [Recovery](#endpoint-ip-change).
 
-`CURATE_D_CONTENT_STAGING_ROOT` is not read anywhere. The retained historical filesystem
+`CURATE_D_CONTENT_STAGING_ROOT` (`content_staging_root`) is still a setting, but no code
+uses it. The retained historical filesystem
 API ([store.py](../src/curate_d/staging/store.py)) takes its root as an argument, no worker
 profile builds it, and worker factories never select it as an S3 fallback.
 
@@ -198,8 +200,9 @@ it registers nothing; no holding spans the upload, which runs between the first 
 lost reservation takes all three, `occupancy.abandon` after `occupancy.register`.
 `occupancy.reserve` therefore labels the admission alone: measuring, reclaiming, evicting
 and inserting the reservation, but not deleting the evicted bytes, which happens after
-its commit. `index.register`, `index.evict`, `index.reconcile` and `index.release` label
-the index's own acquisitions, which in production always re-enter an occupancy holding. A
+its commit. `index.reserve`, `index.consume_reservation`, `index.register`, `index.evict`,
+`index.reconcile` and `index.release` label the index's own acquisitions, which in
+production always re-enter an occupancy holding. A
 re-entrant acquisition emits nothing, because its time and its entry claims are already
 inside the outer holding.
 
@@ -208,7 +211,8 @@ four-byte lock ids collide, is one lock. Eviction and reconciliation both claim,
 claim counts even when the key turns out to have nothing registered, because the lock is
 held all the same. That is #1's case: collecting an orphan locks its key, and a reader of
 the key's registered winner waits until the holding ends. Only `occupancy.reserve` and
-`occupancy.sweep` holdings reclaim, so only they claim. A claim a reader refused is not
+`occupancy.sweep` holdings reclaim, and `occupancy.release` evicts the one key it releases,
+so only those three claim. A claim a reader refused is not
 counted. `entry_claims` together with `held_seconds` is the window #1 described; it no
 longer contains a transfer.
 
@@ -218,7 +222,8 @@ and it claims a live key whenever it deletes an orphan attempt under that key. E
 are also a four-byte hash of the key, so a writer that claimed only a colliding key holds
 the reader's lock too. A long `registered: true` wait on a key no worker evicted is one of
 those two cases, the coupling #1 tracked, and ends with the writer's transaction: an
-admission or a sweep, bounded by its listing pages and orphan deletes, never by an upload.
+admission or a sweep, bounded by its listing pages and orphan deletes, or a release,
+bounded by one eviction; never by an upload.
 
 `staging.reservation_phases` splits a reservation's lifetime. `admission_seconds` runs
 from acquiring the lock through the admission decision (measuring, reclaiming and
@@ -363,7 +368,8 @@ Every worker pod with a `LOGFIRE_TOKEN` also exports each event as one row of Lo
 `records` table, which keeps it across restarts. The row has `kind = 'log'`, the event
 name in `span_name`, the line's `timestamp` in `start_timestamp`, the profile in
 `service_name` (`curate-d-worker-io` or `curate-d-worker-cpu`), the environment in
-`deployment_environment`, and the pod name in `service_instance_id`. Every field is under
+`deployment_environment`, and the executor id in `service_instance_id` (the pod name,
+unless `CURATE_D_EXECUTOR_ID` overrides it). Every field is under
 `attributes` as text: `attributes->>'caller'`, cast where numeric,
 `(attributes->>'wait_seconds')::double`. Cast to `double`, not `float`, which is 32-bit
 here. `registered` reads `'true'` or `'false'`, and a `null` field reads as SQL `NULL`,
@@ -654,9 +660,11 @@ ceiling.
 `test_stale_multipart_is_reclaimed` (row 31) require an explicit
 `CURATE_D_TEST_STAGING_LIFECYCLE_TIMEOUT_SECONDS` observation budget. With it, each test
 creates its own object/upload, proves it exists, polls for service removal, and cleans up
-on success or failure. Without it, both skip on RustFS and OVH, citing the recorded
-observation (matrix rows 30/31); a backend with no recorded observation fails as PENDING
-with nonzero exit. Allow the
+on success or failure. Without it, both skip on RustFS, citing the recorded time-scaled
+observation (matrix rows 30/31). Any other backend fails as PENDING with nonzero exit; on
+OVH that includes the default, since the suite records no OVH observation of its own, and
+they skip there only when `CURATE_D_STAGING_LIFECYCLE_OBSERVATION` names a recorded one.
+Allow the
 configured retention period plus scanner delay, potentially multiple days; deletion is
 not promised at an exact hour. A timeout is a failed observation, never proof of cleanup.
 
@@ -826,7 +834,10 @@ is reclaimed automatically, by whichever comes first:
 
 - the I/O worker's idle cleanup (`staging.cleanup`, every 300 s), which aborts uploads
   older than `CURATE_D_STAGING_MAX_AGE_HOURS` (default 24 h);
-- the bucket lifecycle rule, after 7 days.
+- the bucket's `abort-incomplete-multipart-uploads` lifecycle rule, one day after
+  initiation as `rustfs-init` and the OVH fixture set it (`DaysAfterInitiation: 1`); on
+  RustFS its stale-upload loop applies it up to 6 h later. The 7-day rule is the
+  completed-object expiration, not the abort.
 
 `measure_occupancy` counts completed objects and live reservations only, so once a dead
 writer's reservation has expired it reports 0 while parts exist. Read

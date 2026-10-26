@@ -1,7 +1,7 @@
 # Infrastructure
 
-This repository holds the **container build**; the Kubernetes manifests live in the
-a separate deployment repository.
+This repository holds the **container build**; the Kubernetes manifests live in a
+separate deployment repository.
 
 ```
 docker/Dockerfile      one image, API and both worker profiles
@@ -22,7 +22,8 @@ infrastructure/
 ## One image, three roles
 
 The API and both worker profiles run the same image and differ only in `command:` and
-`CURATE_D_WORKER_PROFILE`. This is not only about build cost — layers are shared, so two
+environment: `CURATE_D_WORKER_PROFILE`, the executor identity and the staging role and
+credentials. This is not only about build cost — layers are shared, so two
 images would occupy the same space locally. It is because **DBOS pins in-flight workflows
 to an application version**: two independently-resolved image tags could leave the API
 enqueueing work on a version no worker is running, which surfaces as workflows sitting
@@ -55,14 +56,17 @@ timestamp ordering over `dev-*` tags for development. How a deployment selects a
 its own repository.
 
 The rule for production is **a semver tag whose commit is on `main`, and nothing else**.
-The flow is `dev` → merge to `main` → bump `version` in `pyproject.toml` → tag `vX.Y.Z`.
+The flow is: bump `version` in `pyproject.toml`, merge `dev` to `main`, then tag the
+merge commit on `main` `vX.Y.Z`.
 
 Nothing is published that has not passed the merge gate. `dev` and `main` change only by
-pull request, and a pull request merges only when lint, the in-workflow database-access audit,
-strict type checking, the unit suite and the full integration suite against the whole local
-stack pass on a head that is up to date with its base, so the tree an image is built from is
-the tree that was tested. The build does not test again: an image that fails its own tests
-only moves the discovery into the cluster, so the tests run before the merge.
+pull request, and a pull request merges only when its head is up to date with its base and
+lint, the in-workflow database-access audit, strict type checking and the unit suite pass
+(`checks.yml`). When it changes a path the integration suite depends on, the full
+integration suite against the `make test-stack` services and a boot of the image built from
+that commit must pass too (`integration.yml`); otherwise that check reports green with both
+skipped. The build does not test again: an image that fails its own tests only moves the
+discovery into the cluster, so the tests run before the merge.
 
 Three guards enforce it, because any one alone leaves a gap:
 
@@ -96,8 +100,8 @@ the new schema mid-rollout.
 ## Content staging on RustFS
 
 Local development and CI stage media in RustFS through the same S3 adapter the cluster
-uses against OVH Standard S3. Only the endpoint, addressing style, TLS trust and
-credentials differ, and all four are configuration. The S3 API is on
+uses against OVH Standard S3. Only the endpoint, signing region, addressing style, TLS
+trust and credentials differ, and all five are configuration. The S3 API is on
 `127.0.0.1:9100` and the console on `127.0.0.1:9101`, both loopback-only. RustFS replaced
 MinIO, whose upstream is archived; the reasons and engine notes are in
 [`docs/staging.md`](../docs/staging.md#local-engine-rustfs).
@@ -118,7 +122,7 @@ surfacing later as a staging failure.
 
 | Identity | Held by | May |
 | --- | --- | --- |
-| `curate-d-staging-writer` | `worker-io` | read, write, delete and manage multipart uploads under `content/` |
+| `curate-d-staging-writer` | `worker-io` | read, write, delete and manage multipart uploads under `content/`; list the bucket's objects and multipart uploads |
 | `curate-d-staging-reader` | `worker-cpu` | `GetObject` under `content/`, nothing else |
 
 Neither may create buckets or edit policies, and neither is the root identity. The
@@ -184,7 +188,7 @@ the deployment repository's checks have to hold to:
 | --- | --- |
 | Worker profile names in `CURATE_D_WORKER_PROFILE` | `curate_d.runtime.profiles` |
 | Executor identity in `CURATE_D_EXECUTOR_ID`, distinct and stable per pod | `curate_d.runtime.identity` |
-| Environment names in `CURATE_D_ENVIRONMENT` (`dev`, `prod`), naming the DBOS application `curate-d-<env>` on the API and both workers and labelling the API's telemetry | `curate_d.config.DeploymentEnvironment`, `curate_d.runtime.dbos_app.application_name` |
+| Environment names in `CURATE_D_ENVIRONMENT` (`dev`, `prod`), naming the DBOS application `curate-d-<env>` on the API and both workers and labelling each process's telemetry | `curate_d.config.DeploymentEnvironment`, `curate_d.runtime.dbos_app.application_name` |
 | Queues each profile serves | `curate_d.runtime.queues` (tested here; manifests carry only the profile) |
 | Dev image tag `dev-<UTC timestamp>-<sha>` | `.github/workflows/docker-publish.yml` (pinned by `test_release_pipeline.py`) |
 
@@ -261,7 +265,8 @@ uv run python -m curate_d.staging.smoke --cross-bucket curate-d-smoke-ungranted
 The unrelated bucket must already exist, be private and grant neither staging identity
 access. The smoke command never writes there. Remove this disposable bucket separately
 with the same local provisioning identity after checking (`rc bucket remove
-admin/curate-d-smoke-ungranted` in the same shell); no worker should gain that permission.
+admin/curate-d-smoke-ungranted`, run through `rustfs-init` as above); no worker should gain
+that permission.
 
 ### OVH invocation
 

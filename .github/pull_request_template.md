@@ -13,7 +13,7 @@
 <!-- The tests added, and the commands run with their outcome. -->
 
 - [ ] `make check` passes locally
-- [ ] Integration tests for the touched areas pass (`uv run pytest tests/integration/test_<area>.py --no-cov -m integration`), or none apply
+- [ ] Integration tests for the touched areas pass (`uv run pytest tests/integration/test_<area>.py --no-cov -m integration --staging-backend=rustfs`), or none apply
 
 ## Checklist
 

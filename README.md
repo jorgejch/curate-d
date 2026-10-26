@@ -83,7 +83,7 @@ Python application driving [rclone](https://rclone.org/) over its remote-control
 PostgreSQL doing considerably more than usual: ledger, work queue, durable-execution store
 and audit log all in one instance.
 
-Durable execution is [DBOS](https://docs.dbos.dev/) 3.2, chosen as a library rather than a
+Durable execution is [DBOS](https://docs.dbos.dev/) 3.3, chosen as a library rather than a
 service so that ledger writes go through a datasource transaction and are exactly-once
 across crashes and replays. A workflow rewound by hand needs its child workflows rewound
 after it ([guide](docs/rewind.md)).
@@ -103,7 +103,6 @@ Install these before `make install`; they're not pulled in by `uv`.
 | Python 3.12+ | runtime | `uv python install 3.12` (or via your OS package manager) |
 | Docker + Compose | local PostgreSQL/PostGIS, RustFS and rclone stack, container image build | [docs.docker.com](https://docs.docker.com/get-docker/) |
 | [`tesseract`](https://github.com/tesseract-ocr/tesseract) 5.5 | OCR path during classification | macOS: `brew install tesseract` · Debian/Ubuntu: pin `tesseract-ocr=5.5.*` from a compatible repository or build from source |
-| [`rclone`](https://rclone.org/) 1.75.1 | cloud provider transfers | macOS: `brew install rclone` · Debian/Ubuntu: install pinned upstream package `rclone-v1.75.1-linux-*.deb` |
 
 ## Development
 
@@ -121,7 +120,8 @@ make typecheck         # mypy, strict
 make test              # isolated unit tests + 80% coverage gate
 make coverage          # unit coverage data in curate-d.coverage, importable by PyCharm
 make test-stack        # reset the stack, then only PostgreSQL, RustFS and rclone, migrated, for integration tests
-make test-integration  # integration tests (needs make test-stack, not stack-up)
+make test-integration  # integration tests (needs make test-stack, not stack-up); GROUP=<n> reruns one CI shard
+make test-durations    # regenerate .test_durations for shard balancing (needs make test-stack)
 make check             # lint + typecheck + test; PRs touching the suite's inputs also run the full integration suite
 make image             # build the container image
 ```
@@ -159,9 +159,10 @@ readiness marker with provisioning smoke or I/O startup before starting CPU.
 
 See the [runtime and configuration guide](docs/staging.md),
 [provisioning smoke invocations](infrastructure/README.md#provisioning-smoke-check), and
-[compatibility evidence](infrastructure/staging-compatibility.md). The publishing workflow
-runs the shared contract suite, the backend checks and the time-scaled lifecycle check on
-RustFS; OVH is verified separately against the real buckets.
+[compatibility evidence](infrastructure/staging-compatibility.md). The integration workflow
+runs the shared contract suite and the backend checks on RustFS; `make lifecycle-check`
+re-observes lifecycle expiry and abort on a time-scaled RustFS by hand, on a pin bump. OVH
+is verified separately against the real buckets.
 
 ## Repository layout
 
@@ -171,10 +172,10 @@ RustFS; OVH is verified separately against the real buckets.
   tests/integration/  tests that need the local stack: Postgres, RustFS and the rclone sidecar
   migrations/       Alembic migrations for the ledger schema
   docker/           container image build
-  docs/             staging, reset and rewind guides, verification records, diagrams
+  docs/             staging, recovery, reset and rewind guides, diagrams
   infrastructure/   local stack config and operator scripts; deployment manifests
                     are kept outside this repository
-  .github/          image publishing and unit-test workflows
+  .github/          CI (checks, integration suite), image publishing, issue and PR templates
   openspec/
     config.yaml     project context and pinned tech stack
     specs/          current capability specifications
