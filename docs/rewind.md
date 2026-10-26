@@ -15,9 +15,13 @@ acted on what the parent decided before the rewind.
   launched DBOS through `runtime/dbos_app.py` with the ledger datasource registered, as a
   worker does. The rewind drops the datasource's checkpoints only for the datasources that
   process registered.
+- Give that process an executor identity no worker uses (`CURATE_D_EXECUTOR_ID`). Started
+  in a worker pod, it would otherwise take the pod's name (`POD_NAME`), and its launch would
+  recover that worker's PENDING workflows while the worker runs them.
 - Never `DBOSClient.rewind_workflow`: it passes no datasources, so the ledger datasource's
   checkpoints stay, and the re-run skips the transactions it was meant to repeat.
-- Never the synchronous `DBOS.rewind_workflow`: it refuses an async datasource.
+- The synchronous `DBOS.rewind_workflow` refuses to run while an event loop is running;
+  from async code, as below, use `rewind_workflow_async`.
 - Only a terminal workflow can be rewound. Cancel a running one first.
 - The rewound workflow keeps its application version, so only executors of that version
   run it. Pass `application_version=` to move it onto the version running now, but only
