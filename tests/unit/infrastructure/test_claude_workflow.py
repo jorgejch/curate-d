@@ -14,7 +14,7 @@ WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "claude.yml"
 type Document = dict[str, object]
 
 # Never allowed: these reach past the working copy and the `gh` writes the job is meant for.
-_FORBIDDEN = re.compile(r"^Bash(\((\*|:\*)?\))?$|^Bash\(gh api\b|^Bash\(gh pr merge\b")
+_FORBIDDEN_COMMANDS = ("gh api", "gh pr merge")
 
 # The read tools of each MCP server, by name prefix. A tool outside these may write.
 _READ_TOOLS = {
@@ -62,6 +62,29 @@ def _allowed_tools() -> list[str]:
     return [t.strip() for v in _flag_values("--allowedTools") for t in v.split(",") if t.strip()]
 
 
+def _is_forbidden(entry: str) -> bool:
+    """Return whether `entry` allows unrestricted shell or covers a forbidden command.
+
+    An entry covers a command when it names it, or a narrower form of it, or when its
+    wildcards (`*` anywhere, a trailing `:*` prefix) match it.
+    """
+    match = re.fullmatch(r"Bash(?:\((.*)\))?", entry)
+    if not match:
+        return False
+    rule = (match.group(1) or "").strip()
+    if not rule:
+        return True
+    pattern = re.escape(rule.removesuffix(":*")).replace(r"\*", ".*")
+    if rule.endswith(":*"):
+        pattern += ".*"
+    return any(
+        rule.startswith(command)
+        or re.fullmatch(pattern, command)
+        or re.fullmatch(pattern, f"{command} x")
+        for command in _FORBIDDEN_COMMANDS
+    )
+
+
 def _mcp_servers() -> dict[str, Document]:
     """Return the servers of the inline `--mcp-config` JSON."""
     (config,) = _flag_values("--mcp-config")
@@ -72,15 +95,28 @@ def test_the_allow_list_has_no_blanket_entry() -> None:
     """Unrestricted shell, `gh api` and `gh pr merge` are never on the list."""
     tools = _allowed_tools()
     assert tools
-    assert [t for t in tools if _FORBIDDEN.search(t)] == []
+    assert [t for t in tools if _is_forbidden(t)] == []
 
 
 def test_the_forbidden_pattern_catches_each_blanket_form() -> None:
     """The guard itself: each never-allowed form matches, a scoped command does not."""
-    for entry in ("Bash", "Bash()", "Bash(*)", "Bash(:*)", "Bash(gh api:*)", "Bash(gh pr merge:*)"):
-        assert _FORBIDDEN.search(entry), entry
-    assert not _FORBIDDEN.search("Bash(gh pr view:*)")
-    assert not _FORBIDDEN.search("Bash(make test)")
+    for entry in (
+        "Bash",
+        "Bash()",
+        "Bash(*)",
+        "Bash(:*)",
+        "Bash(gh api:*)",
+        "Bash(gh api repos/x:*)",
+        "Bash(gh pr merge:*)",
+        "Bash(gh pr merge 1)",
+        "Bash(gh:*)",
+        "Bash(gh pr:*)",
+        "Bash(gh *)",
+        "Bash(gh pr m*)",
+    ):
+        assert _is_forbidden(entry), entry
+    for entry in ("Bash(gh pr view:*)", "Bash(gh search:*)", "Bash(make test)", "WebFetch"):
+        assert not _is_forbidden(entry), entry
 
 
 def test_claude_can_run_the_checks() -> None:
