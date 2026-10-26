@@ -637,6 +637,73 @@ async def test_a_placement_under_a_name_in_no_version_stops_the_upgrade(
     assert "destination_id" not in await _columns(empty_database, "placements")
 
 
+async def test_a_root_that_does_not_normalize_is_not_resolved_from_an_earlier_version(
+    empty_database: str,
+) -> None:
+    """A copy sent to an unnormalizable root is reported, not given version 1's account."""
+    _alembic(empty_database, "upgrade", BEFORE_DESTINATION_IDENTITY)
+    await _seed_policies(
+        empty_database,
+        _document(("lib", "acct-1", "/Library")),
+        _document(("lib", "acct-2", "/Old/../New")),
+        _document(("lib", "acct-2", "/New")),
+    )
+    under_v2 = _T0 + timedelta(days=1, hours=1)
+    in_force = await _seed_placement(
+        empty_database, name="lib", locator="/Library/v.jpg", created=under_v2
+    )
+    recorded = await _seed_placement(
+        empty_database,
+        name="lib",
+        locator="/Library/r.jpg",
+        created=_T0 + timedelta(days=3),
+        started=(
+            _T0 + timedelta(days=3),
+            {
+                "destination_provider": "pcloud",
+                "destination_account": "acct-2",
+                "destination_root": "/Old/../New",
+            },
+        ),
+    )
+
+    reported = _alembic_fails(empty_database, "upgrade", DESTINATION_IDENTITY)
+
+    assert "UnresolvedPlacementsError" in reported
+    assert str(in_force) in reported
+    assert str(recorded) in reported
+    assert (await _views_and_head(empty_database))[1] == BEFORE_DESTINATION_IDENTITY
+
+
+async def test_deleting_an_unresolved_placement_lets_the_upgrade_through(
+    empty_database: str,
+) -> None:
+    """Failing an unresolved placement still refuses; deleting it lets the upgrade through."""
+    _alembic(empty_database, "upgrade", BEFORE_DESTINATION_IDENTITY)
+    ids = await _seed_redefinition(empty_database)
+    late = _T0 + timedelta(days=3)
+    ghost = await _seed_placement(
+        empty_database, name="ghost", locator="/Library/g.jpg", created=late, started=(late, {})
+    )
+    await _execute(
+        empty_database,
+        "UPDATE placements SET state = 'failed', failure_reason = 'unresolved' WHERE id = :id",
+        id=ghost,
+    )
+    assert str(ghost) in _alembic_fails(empty_database, "upgrade", DESTINATION_IDENTITY)
+
+    await _execute(empty_database, "DELETE FROM placements WHERE id = :id", id=ghost)
+    _alembic(empty_database, "upgrade", DESTINATION_IDENTITY)
+
+    assert {row[0] for row in await _rows(empty_database, "SELECT id FROM placements")} == set(
+        ids.values()
+    )
+    assert await _rows(
+        empty_database,
+        f"SELECT count(*) FROM audit_entries WHERE placement_id = '{ghost}'",
+    ) == [(1,)]
+
+
 async def test_two_placements_resolving_to_one_identity_and_locator_stop_the_upgrade(
     empty_database: str,
 ) -> None:

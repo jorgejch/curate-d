@@ -78,6 +78,11 @@ Upgrading a ledger whose placements are keyed by destination name SHALL assign e
 - **THEN** the upgrade fails naming the placement
 - **AND** nothing is changed
 
+#### Scenario: Root that does not normalize
+- **WHEN** a placement's latest recorded copy start, or the policy version its destination name resolves in, gives a root that does not normalize
+- **THEN** the upgrade fails naming the placement, rather than resolving the name in an earlier version
+- **AND** nothing is changed
+
 #### Scenario: Two placements resolve to one place
 - **WHEN** two placements under different names resolve to one identity with one content object or one locator
 - **THEN** the upgrade fails naming them

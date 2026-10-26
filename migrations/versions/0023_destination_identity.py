@@ -16,9 +16,11 @@ latest `placement_started` audit entry left, first that applies:
    created if it has no entry.
 
 A name missing from the version found is looked up in the versions before it, latest
-first, for an attempt enqueued just before a policy change. The upgrade never guesses a
-location: it fails, naming them, when any placement cannot be resolved, or when two would
-land on one identity with one content object or one locator.
+first, for an attempt enqueued just before a policy change. A recorded root, or the root of
+the version that defines the name, that does not normalize leaves the placement
+unresolved: an earlier version's definition is not where the copy went. The upgrade never
+guesses a location: it fails, naming them, when any placement cannot be resolved, or when
+two would land on one identity with one content object or one locator.
 
 It also refuses, before changing anything:
 
@@ -86,11 +88,15 @@ type Identity = tuple[str, str, str]
 
 @dataclass(frozen=True)
 class PolicyVersion:
-    """One stored policy version: its number, activation time and destinations by name."""
+    """One stored policy version: its number, activation time and destinations by name.
+
+    A destination whose root does not normalize maps to None: the version defines the name,
+    so it is not looked up in earlier versions, but it gives no identity either.
+    """
 
     version: int
     created_at: datetime
-    destinations: Mapping[str, Identity]
+    destinations: Mapping[str, Identity | None]
 
 
 class UnresolvedPlacementsError(RuntimeError):
@@ -178,7 +184,11 @@ def policy_conflicts(destinations: Sequence[Mapping[str, object]]) -> list[str]:
 
 
 def _recorded_location(details: Mapping[str, object]) -> Identity | None:
-    """Return the location a `placement_started` entry recorded, if it recorded one."""
+    """Return the location a `placement_started` entry recorded, if it recorded one.
+
+    Raises:
+        ValueError: it recorded every part, but a root that does not normalize.
+    """
     parts = (
         details.get("destination_provider"),
         details.get("destination_account"),
@@ -187,14 +197,15 @@ def _recorded_location(details: Mapping[str, object]) -> Identity | None:
     if not all(isinstance(part, str) and part for part in parts):
         return None
     provider, account, root = (str(part) for part in parts)
-    try:
-        return (provider, account, normalize_root(root))
-    except ValueError:
-        return None
+    return (provider, account, normalize_root(root))
 
 
 def _latest_defining(versions: Sequence[PolicyVersion], name: str) -> Identity | None:
-    """Return the identity `name` has in the latest of `versions` that defines it."""
+    """Return the identity `name` has in the latest of `versions` that defines it.
+
+    None when no version defines it, or when the latest that does gives it a root that does
+    not normalize: an earlier version's definition is not where that one sent the copy.
+    """
     return next((v.destinations[name] for v in reversed(versions) if name in v.destinations), None)
 
 
@@ -212,7 +223,11 @@ def resolve(
         started: When its latest copy started, or when it was created without one.
         details: That start's audit details; empty when it has none.
     """
-    recorded = _recorded_location(details)
+    try:
+        recorded = _recorded_location(details)
+    except ValueError:
+        # The start named its location: no policy version can say better where it went.
+        return None
     if recorded is not None:
         return recorded
     named = details.get("policy_version")
@@ -226,8 +241,8 @@ def resolve(
 def _policies(bind: sa.Connection) -> list[PolicyVersion]:
     """Return every stored policy version, oldest first.
 
-    A destination whose root does not normalize is left out, so a placement under it is
-    reported unresolved rather than given a guessed identity.
+    A destination whose root does not normalize is kept as None, so a placement under it is
+    reported unresolved rather than given an earlier version's identity.
     """
     rows = bind.execute(
         sa.text(
@@ -237,12 +252,12 @@ def _policies(bind: sa.Connection) -> list[PolicyVersion]:
     )
     versions: list[PolicyVersion] = []
     for version, created_at, document in rows:
-        destinations: dict[str, Identity] = {}
+        destinations: dict[str, Identity | None] = {}
         for destination in _listed(document):
             try:
                 destinations[str(destination["name"])] = _identity(destination)
             except ValueError:
-                continue
+                destinations[str(destination["name"])] = None
         versions.append(PolicyVersion(version, created_at, destinations))
     return versions
 

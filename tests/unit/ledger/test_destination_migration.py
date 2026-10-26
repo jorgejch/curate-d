@@ -38,7 +38,7 @@ def migration() -> ModuleType:
 
 
 def _versions(
-    migration: ModuleType, *destinations: dict[str, tuple[str, str, str]]
+    migration: ModuleType, *destinations: dict[str, tuple[str, str, str] | None]
 ) -> list[object]:
     """Return policy versions 1, 2, ... activated a day apart from `_T0`."""
     return [
@@ -131,6 +131,27 @@ def test_a_start_before_any_version_or_an_unknown_name_is_unresolved(
     versions = _versions(migration, {"lib": _AT_A})
     assert migration.resolve(versions, "lib", _T0 - timedelta(seconds=1), {}) is None
     assert migration.resolve(versions, "nowhere", _T0 + timedelta(days=1), {}) is None
+
+
+@pytest.mark.parametrize("details", [{}, {"policy_version": 2}])
+def test_a_definition_that_does_not_normalize_is_not_resolved_from_an_earlier_one(
+    migration: ModuleType, details: dict[str, object]
+) -> None:
+    """Version 2 sent the copy to an unusable root: version 1's account is not where it went."""
+    versions = _versions(migration, {"lib": _AT_A}, {"lib": None})
+    assert migration.resolve(versions, "lib", _T0 + timedelta(days=2), details) is None
+
+
+def test_a_recorded_root_that_does_not_normalize_is_unresolved(migration: ModuleType) -> None:
+    """A start that named its location is never re-sent to the policy's."""
+    versions = _versions(migration, {"lib": _AT_A})
+    details = {
+        "destination_provider": "pcloud",
+        "destination_account": "b",
+        "destination_root": "/Old/../New",
+        "policy_version": 1,
+    }
+    assert migration.resolve(versions, "lib", _T0 + timedelta(hours=1), details) is None
 
 
 def test_an_incomplete_recorded_location_is_not_used(migration: ModuleType) -> None:

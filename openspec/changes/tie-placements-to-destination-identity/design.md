@@ -210,8 +210,10 @@ never changes with the application. Order:
    2. the policy version the entry's `policy_version` names, by `configurations.version`;
    3. the latest policy version with `created_at <= started`;
    searching earlier versions, latest first, when the version found lacks the name (an
-   attempt enqueued just before a policy change). Unresolved placements abort the upgrade,
-   naming them. Then, before writing, two placements resolving to one identity with one
+   attempt enqueued just before a policy change). A root that does not normalize, recorded
+   or in the version that defines the name, leaves the placement unresolved: an earlier
+   version is not where that copy went. Unresolved placements abort the upgrade, naming
+   them. Then, before writing, two placements resolving to one identity with one
    content object or one locator abort it, naming them. Insert the identities, update the
    placements.
 5. Set NOT NULL, add the foreign key, drop the two name constraints, add the two identity
