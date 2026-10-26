@@ -25,7 +25,7 @@ context: |
 
   ### Application
   - **Python 3.12** - single backend application, deployed as separate I/O-bound and CPU-bound worker profiles
-  - **DBOS 3.2** - durable execution as a library, not a service. Every in-workflow ledger write MUST go through an `AsyncSQLAlchemyDatasource` transaction targeting the ledger database: the datasource commits its tracking record alongside the row, which is what makes the write exactly-once on replay. A raw database call from a workflow is not tracked and will re-execute.
+  - **DBOS 3.3** - durable execution as a library, not a service. Every in-workflow ledger write MUST go through an `AsyncSQLAlchemyDatasource` transaction targeting the ledger database: the datasource commits its tracking record alongside the row, which is what makes the write exactly-once on replay. A raw database call from a workflow is not tracked and will re-execute.
     DBOS's own tables (workflow checkpoints, queue config, version registration) live in the ledger database, in the `dbos` schema; separating them is not supported. That co-location is not the source of the exactly-once guarantee, but it is what makes one dump the whole state, and it keeps a ledger write and a workflow enqueue able to commit in one transaction (unused today; the executor management layer of #5 may need it).
     Prefer per-worker concurrency limits over global ones: pending workflows from previous application versions count toward a global limit.
 
