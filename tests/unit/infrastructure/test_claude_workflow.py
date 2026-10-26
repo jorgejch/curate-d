@@ -157,7 +157,7 @@ def test_the_sonarqube_server_is_read_only_and_pinned() -> None:
     assert env["SONARQUBE_READ_ONLY"] == "true"
     assert env["SONARQUBE_TOKEN"] == "${SONAR_TOKEN}"
     args = cast(list[str], server["args"])
-    assert "SONARQUBE_READ_ONLY" in args
+    assert args[args.index("SONARQUBE_READ_ONLY") - 1] == "-e"
     image = args[-1]
     assert re.fullmatch(r"sonarsource/sonarqube-mcp:[\w.]+@sha256:[0-9a-f]{64}", image)
     assert _step("Pull the SonarQube MCP image")["run"] == f"docker pull {image}"
