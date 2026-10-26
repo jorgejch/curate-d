@@ -67,7 +67,7 @@ The system SHALL detect when a previously registered placement is no longer pres
 
 ### Requirement: Verification gate on source release
 
-A source SHALL NOT be released unless the governing policy is satisfied by placements at one of the two strong verification levels (in-transit or common-hash). Placements at weaker verification levels SHALL NOT count toward that requirement. Neither SHALL placements at destination identities that the policy in force does not define, because no destination check verifies them any more. Every destination identity the policy defines counts, whether or not a rule currently selects it for that content, and whatever name the policy now gives it.
+A source SHALL NOT be released unless the governing policy is satisfied by placements at one of the two strong verification levels (in-transit or common-hash). Placements at weaker levels SHALL NOT count toward it. Neither SHALL placements at destination identities the policy in force does not define, since no destination check verifies them now. Every destination identity the policy defines counts, whether or not a rule selects it for that content, and whatever name the policy now gives it.
 
 #### Scenario: Requirement met by strongly verified copies
 - **WHEN** the policy permits release and enough strongly verified placements exist
