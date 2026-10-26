@@ -168,20 +168,29 @@ use the client of the Kill switch (Triage).
    account, root) instead of name. The old build's placement workflows are keyed by the name,
    so the new reconciler would not find one and would start a second copy beside it. Their
    `Placement` checkpoints also lack the required `destination_id`, so a fork of one raises
-   `StaleCheckpointError`.
+   `StaleCheckpointError`. A reconciliation's batches checkpoint the placements they found,
+   so one recovered on the new build raises it too. A dry run continued across the deploy
+   would not see the proposals it saved before the migration, which carry no identity, and
+   could propose one locator twice.
 
    1. Pause the `reconcile` and `check-destinations` schedules:
       `dbos.pause_schedule("reconcile")`, `dbos.pause_schedule("check-destinations")`.
-   2. Let `transfer-small`, `transfer-large` and `verify` drain, until this returns an empty
-      list:
+   2. Let placements, reconciliations, destination checks and dry runs drain, until this
+      returns an empty list:
 
       ```python
-      dbos.list_workflows(workflow_id_prefix="placement:", status=["ENQUEUED", "PENDING"])
+      dbos.list_workflows(
+          workflow_id_prefix=["placement:", "reconcile:", "check:", "dry-run:"],
+          status=["ENQUEUED", "PENDING"],
+      )
       ```
 
+      A dry run that need not finish now can be cancelled (`dbos.cancel_workflow(<id>)`)
+      and started again after the deploy.
    3. Run one reconciliation by hand, `dbos.trigger_schedule("reconcile")`, and wait for it
-      and the work it enqueues. It fails each placement whose workflow died (`STALE`), which
-      the migration would otherwise refuse as in flight.
+      and the work it enqueues: repeat step 2's check until it is empty again. It fails each
+      placement whose workflow died (`STALE`), which the migration would otherwise refuse as
+      in flight.
    4. Stop the old workers and the API. Run `make migrate` (`alembic upgrade head`) from the
       new image against the target database.
    5. Roll out the new build, then resume both schedules (`dbos.resume_schedule(...)`). The
@@ -192,10 +201,14 @@ use the client of the Kill switch (Triage).
 
    | Error | Meaning | Recovery |
    | --- | --- | --- |
-   | `UnloadablePolicyError` | The active policy puts one place under two names, nests one root inside another in an account, or has a root that does not normalize. The new build would not load it. | `PUT` a corrected policy through the old build's control plane. |
+   | `UnloadablePolicyError` | The active policy puts one place under two names, nests one root inside another in an account, or has a root that does not normalize. The new build would not load it. | Start the old build's API alone, `PUT` a corrected policy through it, and stop it again. |
    | `InFlightPlacementsError` | Placements are still `pending`, `copying` or `verifying`; up to five are named. | Wait for step 2, or repeat step 3 for one whose workflow is gone. |
-   | `UnresolvedPlacementsError` | No recorded location, named policy version or version in force names the placement's destination. | Decide per placement, and record each decision in the issue tracking the deploy: set it `failed` with a `failure_reason`, or delete the row. |
-   | `SharedIdentityError` | Two placements resolve to one identity with one content object or one locator. | As for `UnresolvedPlacementsError`: fail or delete one of each pair by a recorded decision. |
+   | `UnresolvedPlacementsError` | No recorded location, named policy version or version in force names the placement's destination, or the root found does not normalize. | Delete the placement row, recording each decision in the issue tracking the deploy. Setting it `failed` does not help: the backfill resolves every placement, whatever its state. |
+   | `SharedIdentityError` | Two placements resolve to one identity with one content object or one locator. | Delete one placement of each pair, recording each decision as for `UnresolvedPlacementsError`. |
+
+   Nothing references a placement row, and its audit entries stay. The ledger forgets that
+   copy: it stops counting towards retention, which only ever holds an original longer, and
+   the next reconciliation may place the content again.
 
    **Rollback boundary.** Until the new build places content, roll back with
    `alembic downgrade 0022_dry_run_drafts` and redeploy the old build. The downgrade also
