@@ -16,7 +16,7 @@ what follows serves that one guarantee.
 ## Setup
 
 Install the [system dependencies](README.md#system-dependencies) (uv, Python 3.12, Docker,
-tesseract, rclone), then:
+tesseract), then:
 
 ```bash
 make install      # project + dev group
@@ -51,14 +51,15 @@ cleanup of unrelated code.
   deployed branch; `main` only receives releases, and a semver tag on `main` publishes the
   production image.
 - **Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/)**:
-  `feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `chore:`, `spec:`, with a scope where one
-  helps (`fix(recovery): ...`). Summaries are imperative and lower-case.
+  `feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `build:`, `ci:`, `chore:`, `spec:`, with a
+  scope where one helps (`fix(recovery): ...`). Summaries are imperative and lower-case.
 - **Run `make check` before pushing.** It runs the same lint, type check and unit commands
-  as CI, so green locally means green there. Every push to a branch runs them and uploads
-  the unit coverage to SonarQube Cloud. A pull request into `dev` or `main` must pass them
-  and, when it changes a path the suite depends on, the full integration suite against the
-  local stack, and be up to date with its base, before it merges; a merge runs no tests
-  again, only the image build on `dev` and the SonarQube coverage refresh.
+  as CI, so green locally means green there. Every push to a feature branch runs them and
+  uploads the unit coverage to SonarQube Cloud. A pull request into `dev` or `main` must
+  pass them and, when it changes a path the suite depends on, the full integration suite
+  and a boot of the application image built from it, and be up to date with its base,
+  before it merges. A merge re-runs nothing that gates: only the image build on `dev` and
+  the SonarQube coverage refresh, which re-runs the unit suite for coverage alone.
 - **Gitar reviews pull requests.** [`.gitar/config/apply.md`](.gitar/config/apply.md)
   bounds which of its code-review findings it may fix by itself, on top of the organization's
   criteria. Gitar reads it from `dev`, so a pull request can't change the criteria for its own
@@ -88,7 +89,8 @@ cleanup of unrelated code.
 - **The pull request runs the suite in shards**, four by default (the repository variable
   `INTEGRATION_SHARDS` changes the count without a commit), each on its own runner against
   its own stack. To rerun one shard as CI ran it, run
-  `make test-stack && make test-integration GROUP=<n>`; `SPLITS` defaults to CI's four. Run
+  `make test-stack && make test-integration GROUP=<n>`; `SPLITS` defaults to CI's four, so
+  pass `SPLITS=<count>` when `INTEGRATION_SHARDS` is set to another. Run
   `make test-durations` against a `make test-stack` stack and commit `.test_durations` when
   you add or remove a slow test, or when the shard times in the `Integration tests` summary
   drift apart.
