@@ -119,6 +119,12 @@ def test_the_forbidden_pattern_catches_each_blanket_form() -> None:
         assert not _is_forbidden(entry), entry
 
 
+def test_claude_args_keep_permission_checks() -> None:
+    """No argument skips permission checks, which would admit tools off the list."""
+    bypasses = ("dangerously-skip-permissions", "bypassPermissions")
+    assert [a for a in _claude_args() if any(b in a for b in bypasses)] == []
+
+
 def test_claude_can_run_the_checks() -> None:
     """Lint, type check and the unit suite are allowed, on the locked dependencies."""
     tools = _allowed_tools()
