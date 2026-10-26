@@ -28,11 +28,43 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
-          fetch-depth: 1
+          # Full history: Claude reads `git log` and `git blame` for the reasons behind code.
+          fetch-depth: 0
+
+      # The checks job's install, so `make lint`, `make typecheck` and `make test` run here as
+      # they do in CI.
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+
+      # `--no-build`: dependencies install from the lockfile's wheels, never by running a
+      # source distribution's build scripts.
+      - name: Install dependencies
+        run: uv sync --locked --no-build
+
+      - name: Install Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      # The OpenSpec CLI at the version the repository's `openspec-*` skills are written for.
+      - name: Install OpenSpec
+        run: npm install --global --ignore-scripts @fission-ai/openspec@1.14.1
+
+      # Pulled ahead so the server starts within Claude Code's MCP start-up timeout.
+      - name: Pull the SonarQube MCP image
+        run: docker pull sonarsource/sonarqube-mcp:1.30.0.4763@sha256:a85875c818d6235fee1ec815e29b0a33a6ef3dd9ef43c63fb4bc018a3bd9443c
 
       - name: Run Claude Code
         id: claude
         uses: anthropics/claude-code-action@ae68417a745a5df4b2124873632bd73a2255e6f6 # v1
+        env:
+          # Read by the MCP servers through `${...}` in --mcp-config below. An unset one leaves
+          # its server unavailable for the run; the run goes on without it.
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          # A Logfire API key scoped to project:read and project:read_alert, nothing else.
+          LOGFIRE_MCP_API_KEY: ${{ secrets.LOGFIRE_MCP_API_KEY }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 
@@ -43,8 +75,47 @@ jobs:
           # Optional: Give a custom prompt to Claude. If this is not specified, Claude will perform the instructions specified in the comment that tagged it.
           # prompt: 'Update the pull request description to include a summary of changes.'
 
-          # GitHub write scopes also need matching Claude tool permissions.
+          # No one approves a tool here, so any tool not listed is refused. Never list
+          # unrestricted Bash, `gh api` or `gh pr merge` (test_claude_workflow.py). The action
+          # drops full-line comments and accumulates every --allowedTools.
           claude_args: |
-            --allowedTools "Bash(gh issue view:*),Bash(gh issue edit:*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(gh pr create:*)"
-            --append-system-prompt "When requested, edit issue bodies with gh issue edit and create pull requests with gh pr create. For requested PR creation, push the changes first, check for an existing PR for the branch, target dev, follow the repository PR template, and return the created PR URL instead of a pre-filled creation link."
-
+            # Web
+            --allowedTools "WebSearch,WebFetch"
+            # GitHub; the write scopes above need these to be used
+            --allowedTools "Bash(gh issue view:*),Bash(gh issue edit:*),Bash(gh issue list:*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(gh pr create:*),Bash(gh pr diff:*),Bash(gh pr checks:*),Bash(gh run view:*),Bash(gh search:*)"
+            # Git history
+            --allowedTools "Bash(git log:*),Bash(git blame:*),Bash(git show:*)"
+            # The checks a pull request must pass, but the integration suite (it needs the stack)
+            --allowedTools "Bash(make lint),Bash(make typecheck),Bash(make test),Bash(make format),Bash(uv run pytest:*)"
+            # OpenSpec, by subcommand: a blanket entry would admit one that reaches the network
+            --allowedTools "Bash(openspec validate:*),Bash(openspec list:*),Bash(openspec show:*),Bash(openspec status:*),Bash(openspec instructions:*),Bash(openspec context:*),Bash(openspec new change:*),Bash(openspec archive:*)"
+            # SonarQube Cloud, read tools only
+            --allowedTools "mcp__sonarqube__search_sonar_issues_in_projects,mcp__sonarqube__get_project_quality_gate_status,mcp__sonarqube__show_rule,mcp__sonarqube__get_component_measures,mcp__sonarqube__search_files_by_coverage,mcp__sonarqube__get_file_coverage_details,mcp__sonarqube__search_duplicated_files,mcp__sonarqube__get_duplications,mcp__sonarqube__search_security_hotspots,mcp__sonarqube__show_security_hotspot,mcp__sonarqube__list_pull_requests,mcp__sonarqube__list_branches,mcp__sonarqube__search_my_sonarqube_projects"
+            # Logfire, read tools only
+            --allowedTools "mcp__logfire__query_run,mcp__logfire__query_schema_reference,mcp__logfire__query_find_exceptions_in_file,mcp__logfire__project_list,mcp__logfire__project_logfire_link,mcp__logfire__issue_list,mcp__logfire__issue_get"
+            # Inline: the action drops a --mcp-config file path when it adds its own servers.
+            --mcp-config '{
+              "mcpServers": {
+                "sonarqube": {
+                  "command": "docker",
+                  "args": [
+                    "run", "--init", "-i", "--rm",
+                    "-e", "SONARQUBE_TOKEN", "-e", "SONARQUBE_ORG",
+                    "-e", "SONARQUBE_TOOLSETS", "-e", "SONARQUBE_READ_ONLY",
+                    "sonarsource/sonarqube-mcp:1.30.0.4763@sha256:a85875c818d6235fee1ec815e29b0a33a6ef3dd9ef43c63fb4bc018a3bd9443c"
+                  ],
+                  "env": {
+                    "SONARQUBE_TOKEN": "${SONAR_TOKEN}",
+                    "SONARQUBE_ORG": "jorge-haddad-oss",
+                    "SONARQUBE_TOOLSETS": "issues,quality-gates,rules,measures,coverage,duplications,security-hotspots",
+                    "SONARQUBE_READ_ONLY": "true"
+                  }
+                },
+                "logfire": {
+                  "type": "http",
+                  "url": "https://logfire-us.pydantic.dev/mcp",
+                  "headers": {"Authorization": "Bearer ${LOGFIRE_MCP_API_KEY:-}"}
+                }
+              }
+            }'
+            --append-system-prompt "Before pushing a code change, run make lint, make typecheck and make test, fix what fails, and report each outcome; never report a check you could not run as passing. When requested, edit issue bodies with gh issue edit and create pull requests with gh pr create. For requested PR creation, push the changes first, check for an existing PR for the branch, target dev, follow the repository PR template, and return the created PR URL instead of a pre-filled creation link."
