@@ -43,14 +43,17 @@ from curate_d.domain.fingerprint import (
 from curate_d.domain.ids import (
     CURATE_D_NAMESPACE,
     ContentObjectId,
+    DestinationId,
     PlacementId,
     SourceObjectId,
     derive_content_object_id,
+    derive_destination_id,
     derive_placement_id,
     derive_source_object_id,
+    normalize_root,
 )
 from curate_d.domain.placement import (
-    Destination,
+    DestinationIdentity,
     DryRunOutcome,
     Placement,
     PlacementState,
@@ -64,6 +67,7 @@ from curate_d.domain.policy import (
     PlacementPolicy,
     PlacementRule,
     RetentionRule,
+    check_destinations,
 )
 from curate_d.domain.retention import (
     RetentionDecision,
@@ -104,8 +108,9 @@ __all__ = [
     "ConnectionState",
     "ContentObject",
     "ContentObjectId",
-    "Destination",
     "DestinationConfig",
+    "DestinationId",
+    "DestinationIdentity",
     "DomainModel",
     "DryRunOutcome",
     "Facts",
@@ -142,10 +147,13 @@ __all__ = [
     "TaxonomyField",
     "VerificationLevel",
     "check_conditions",
+    "check_destinations",
     "derive_content_object_id",
+    "derive_destination_id",
     "derive_placement_id",
     "derive_source_object_id",
     "matches",
+    "normalize_root",
     "orphaned",
     "taxonomy_in",
 ]

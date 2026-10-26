@@ -18,6 +18,8 @@ from curate_d.domain import (
     AuditEntry,
     ContentObject,
     ContentObjectId,
+    DestinationId,
+    DestinationIdentity,
     Placement,
     PlacementId,
     Provider,
@@ -30,17 +32,21 @@ from curate_d.domain import (
 from curate_d.ledger.mapping import (
     audit_entry_values,
     content_object_values,
+    destination_values,
+    identifier,
     placement_values,
     source_object_values,
     text,
     to_audit_entry,
     to_content_object,
+    to_destination,
     to_placement,
     to_source_object,
 )
 from curate_d.ledger.tables import (
     audit_entries,
     content_objects,
+    destinations,
     placements,
     source_objects,
 )
@@ -232,21 +238,71 @@ class ContentObjectRepository:
         return to_content_object(row) if row is not None else None
 
 
+class DestinationRepository:
+    """Records the destination identities placements belong to."""
+
+    def __init__(self, connection: AsyncConnection) -> None:
+        """Wrap a caller-owned connection; the repository never opens its own."""
+        self._connection = connection
+
+    async def ensure(self, destination: DestinationIdentity) -> DestinationId:
+        """Record a destination identity unless it already is; return the row's identifier.
+
+        Conflicts only on the triple, so a different triple under an existing identifier
+        fails loudly rather than being taken for the same place.
+        """
+        await self._connection.execute(
+            insert(destinations)
+            .values(**destination_values(destination))
+            .on_conflict_do_nothing(index_elements=["provider", "account", "root_path"])
+        )
+        result = await self._connection.execute(
+            select(destinations.c.id).where(
+                destinations.c.provider == destination.provider.value,
+                destinations.c.account == destination.account,
+                destinations.c.root_path == destination.root_path,
+            )
+        )
+        return DestinationId(result.scalar_one())
+
+    async def find_many(
+        self, destination_ids: Sequence[DestinationId]
+    ) -> dict[DestinationId, DestinationIdentity]:
+        """Fetch several destination identities by identifier; unknown ones are left out."""
+        if not destination_ids:
+            return {}
+        result = await self._connection.execute(
+            select(destinations).where(destinations.c.id.in_(set(destination_ids)))
+        )
+        return {
+            DestinationId(identifier(row, "id")): to_destination(row) for row in result.mappings()
+        }
+
+
 class PlacementRepository:
-    """Reads and writes the per-destination identity layer."""
+    """Reads and writes the per-destination identity layer.
+
+    A placement's destination row must exist before the placement is written: see
+    `DestinationRepository.ensure`.
+    """
 
     def __init__(self, connection: AsyncConnection) -> None:
         """Wrap a caller-owned connection; the repository never opens its own."""
         self._connection = connection
 
     async def upsert(self, placement: Placement) -> Placement:
-        """Insert, or update in place when this content already has a row at the destination."""
+        """Insert, or update in place when this content already has a row at the destination.
+
+        The row keeps the identifier it was first given; the destination name follows the
+        latest placement, so a rename that keeps the identity relabels the row.
+        """
         statement = insert(placements).values(**placement_values(placement))
         upsert = statement.on_conflict_do_update(
-            index_elements=["content_object_id", "destination_name"],
+            index_elements=["content_object_id", "destination_id"],
             set_={
                 key: statement.excluded[key]
                 for key in (
+                    "destination_name",
                     "locator",
                     "template_version",
                     "state",
@@ -264,7 +320,7 @@ class PlacementRepository:
         return to_placement(result.mappings().one())
 
     async def get(self, placement_id: PlacementId, *, for_update: bool = False) -> Placement | None:
-        """Fetch a placement by its derived identifier, or None if absent.
+        """Fetch a placement by its row identifier, or None if absent.
 
         Args:
             placement_id: The placement to fetch.
@@ -278,6 +334,34 @@ class PlacementRepository:
         row = result.mappings().one_or_none()
         return to_placement(row) if row is not None else None
 
+    async def find(
+        self,
+        content_object_id: ContentObjectId,
+        destination_id: DestinationId,
+        *,
+        for_update: bool = False,
+    ) -> Placement | None:
+        """Fetch this content's placement at a destination identity, or None if absent.
+
+        Rows recorded before destinations had identities keep identifiers derived from the
+        destination's name, so this, not `get` with a derived identifier, is how to find
+        an existing placement.
+
+        Args:
+            content_object_id: The content placed.
+            destination_id: The destination identity it is placed at.
+            for_update: Lock the row (`FOR UPDATE`) until the transaction ends.
+        """
+        statement = select(placements).where(
+            placements.c.content_object_id == content_object_id,
+            placements.c.destination_id == destination_id,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        result = await self._connection.execute(statement)
+        row = result.mappings().one_or_none()
+        return to_placement(row) if row is not None else None
+
     async def find_for_content_object(
         self, content_object_id: ContentObjectId
     ) -> Sequence[Placement]:
@@ -285,15 +369,17 @@ class PlacementRepository:
         result = await self._connection.execute(
             select(placements)
             .where(placements.c.content_object_id == content_object_id)
-            .order_by(placements.c.destination_name)
+            .order_by(placements.c.destination_name, placements.c.destination_id)
         )
         return [to_placement(row) for row in result.mappings()]
 
-    async def find_at_locator(self, *, destination_name: str, locator: str) -> Placement | None:
+    async def find_at_locator(
+        self, *, destination_id: DestinationId, locator: str
+    ) -> Placement | None:
         """What already occupies a rendered path. Drives collision resolution."""
         result = await self._connection.execute(
             select(placements).where(
-                placements.c.destination_name == destination_name,
+                placements.c.destination_id == destination_id,
                 placements.c.locator == locator,
             )
         )

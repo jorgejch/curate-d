@@ -7,15 +7,19 @@ below is the load-bearing part of the zero-loss guarantee.
 
 from enum import IntEnum, StrEnum
 
-from pydantic import AwareDatetime, Field
+from pydantic import AwareDatetime, Field, field_validator
 
 from curate_d.domain.base import DomainModel
 from curate_d.domain.ids import (
     ContentObjectId,
+    DestinationId,
     PlacementId,
     SourceObjectId,
+    derive_destination_id,
     derive_placement_id,
+    normalize_root,
 )
+from curate_d.domain.source import Provider
 
 
 class VerificationLevel(IntEnum):
@@ -63,13 +67,48 @@ class PlacementState(StrEnum):
     UNTRUSTED = "untrusted"
 
 
-class Destination(DomainModel):
-    """A named target the system can place content into."""
+class DestinationIdentity(DomainModel):
+    """Where copies are kept: one account's root at one provider.
 
-    name: str = Field(min_length=1, description="Stable configuration key for this target.")
-    provider: str = Field(min_length=1)
+    A placement belongs to this, not to the policy's name for it. Two names with one
+    identity are one destination; one name pointed at another account or root is
+    another destination.
+    """
+
+    provider: Provider
     account: str = Field(min_length=1)
     root_path: str = Field(min_length=1, description="Path all rendered locators hang from.")
+
+    @field_validator("root_path")
+    @classmethod
+    def _normalize_root(cls, value: str) -> str:
+        """Return the root in canonical form; see `normalize_root`.
+
+        Raises:
+            ValueError: the root is not absolute or has an empty, "." or ".." segment.
+        """
+        return normalize_root(value)
+
+    @property
+    def id(self) -> DestinationId:
+        """Return the identity's derived identifier."""
+        return derive_destination_id(self.provider.value, self.account, self.root_path)
+
+    def contains(self, other: "DestinationIdentity") -> bool:
+        """Return whether `other` is this destination or lies inside it.
+
+        Two such destinations would hold the same physical files, so one copy would
+        count twice.
+        """
+        if (self.provider, self.account) != (other.provider, other.account):
+            return False
+        if self.root_path == "/":
+            return True
+        return other.root_path == self.root_path or other.root_path.startswith(self.root_path + "/")
+
+    def label(self) -> str:
+        """Return the identity as one readable string, "provider:account:root"."""
+        return f"{self.provider.value}:{self.account}:{self.root_path}"
 
 
 class Placement(DomainModel):
@@ -77,7 +116,14 @@ class Placement(DomainModel):
 
     id: PlacementId
     content_object_id: ContentObjectId
-    destination_name: str = Field(min_length=1)
+    destination_id: DestinationId = Field(
+        description="The destination identity the copy is at; see `DestinationIdentity`."
+    )
+    destination_name: str = Field(
+        min_length=1,
+        description="The policy's name for the destination when this was last placed: a "
+        "label, not part of the placement's identity.",
+    )
     locator: str = Field(min_length=1, description="Rendered destination path.")
     template_version: str = Field(min_length=1, description="Template that produced the locator.")
     state: PlacementState = PlacementState.PENDING
@@ -104,14 +150,21 @@ class Placement(DomainModel):
         cls,
         *,
         content_object_id: ContentObjectId,
+        destination_id: DestinationId,
         destination_name: str,
         locator: str,
         template_version: str,
     ) -> "Placement":
-        """Construct with the identifier derived from content object and destination."""
+        """Construct with the identifier derived from content object and destination identity.
+
+        A row recorded before destinations had identities keeps the identifier it was
+        given then, so look an existing placement up by content and destination, never
+        by this identifier.
+        """
         return cls(
-            id=derive_placement_id(content_object_id, destination_name),
+            id=derive_placement_id(content_object_id, destination_id),
             content_object_id=content_object_id,
+            destination_id=destination_id,
             destination_name=destination_name,
             locator=locator,
             template_version=template_version,

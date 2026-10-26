@@ -4,12 +4,16 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from curate_d.domain import (
+    AuditEntryType,
     ContentObjectId,
     DestinationConfig,
+    Placement,
     PlacementId,
     Provider,
     SourceObject,
+    derive_destination_id,
 )
+from curate_d.placement import pipeline
 from curate_d.placement.pipeline import location_details, started_details
 from curate_d.workflows.placement import verification_workflow_for
 
@@ -112,3 +116,21 @@ def test_each_attempt_is_verified_under_its_own_identity() -> None:
     identities = {verification_workflow_for(placement_id, attempt) for attempt in range(3)}
     assert len(identities) == 3
     assert verification_workflow_for(placement_id, 2) == f"verify:{placement_id}:2"
+
+
+def test_every_placement_entry_names_the_destination_identity_beside_its_name() -> None:
+    """The name is a label; the identity says which account and root the entry is about."""
+    placement = Placement.build(
+        content_object_id=ContentObjectId(uuid4()),
+        destination_id=derive_destination_id("pcloud", "dest-account", "/Library"),
+        destination_name="library",
+        locator="/Library/IMG_0001.JPG",
+        template_version="seed-1",
+    )
+    entry = pipeline._audit(
+        AuditEntryType.PLACEMENT_STARTED, placement, {}, datetime(2026, 1, 1, tzinfo=UTC)
+    )
+    assert entry.details["destination"] == "library"
+    assert entry.details["destination_id"] == str(
+        derive_destination_id("pcloud", "dest-account", "/Library/")
+    )

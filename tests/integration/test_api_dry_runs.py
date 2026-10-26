@@ -18,7 +18,13 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from curate_d.api.app import create_app
 from curate_d.classification.store import ReviewRepository
 from curate_d.config import Settings
-from curate_d.domain import Provider, RejectedValue, ReviewReason, TaxonomyField
+from curate_d.domain import (
+    Provider,
+    RejectedValue,
+    ReviewReason,
+    TaxonomyField,
+    derive_destination_id,
+)
 from curate_d.ledger.tables import dry_runs, review_items
 from curate_d.runtime import dbos_app
 from curate_d.runtime.workflow_ids import DRY_RUN_PREFIX
@@ -103,6 +109,9 @@ async def test_a_started_run_exports_facts_locators_and_unresolved_items(
     assert proposed["outcome"] == "proposed"
     assert proposed["facts"]["category"] == "Photos"
     assert proposed["locator"] == "/Organized/Photos/2024/2024-05/IMG_0001.JPG"
+    assert proposed["destination_id"] == str(
+        derive_destination_id("pcloud", destination["account"], "/Organized")
+    )
     failed = ours["/Camera/IMG_0002.JPG"]
     assert failed["outcome"] == "render_failed"
     assert "captured_at" in failed["reason"]
@@ -208,6 +217,23 @@ _DESTINATION = {"name": "named", "provider": "pcloud", "account": "1", "root_pat
         (
             {"policy": _draft({"media_kind": "photo"}), "destinations": [_DESTINATION]},
             "destinations",
+        ),
+        (
+            {"destinations": [_DESTINATION, _DESTINATION | {"name": "again"}]},
+            "are the same place",
+        ),
+        (
+            {"destinations": [_DESTINATION, _DESTINATION | {"name": "again", "root_path": "/N/"}]},
+            "are the same place",
+        ),
+        (
+            {
+                "destinations": [
+                    _DESTINATION,
+                    _DESTINATION | {"name": "inner", "root_path": "/N/Sub"},
+                ]
+            },
+            "overlap",
         ),
     ],
 )

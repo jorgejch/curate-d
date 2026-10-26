@@ -87,10 +87,12 @@ async def _pipeline(
     access: ScriptedAccess,
     *,
     listen: tuple[str, ...] | None = None,
+    directories: dict[str, str] | None = None,
 ) -> AsyncGenerator[Pipeline, None]:
     """A pipeline that transfers through `access` into `workspace`."""
+    remotes = WorkspaceRemotes(workspace, directories=directories)
     async with transfer_pipeline(
-        settings, engine, scratch, WorkspaceRemotes(workspace), access, listen=listen
+        settings, engine, scratch, remotes, access, listen=listen
     ) as pipeline:
         yield pipeline
 
@@ -128,7 +130,9 @@ def _request(
             name=destination,
             provider=Provider.PCLOUD,
             account=_DESTINATION_ACCOUNT,
-            root_path="/",
+            # A root of its own: the name alone no longer separates one test's placements
+            # from another's, and the copy goes to the locator whatever the root.
+            root_path=f"/{destination}",
         ),
         locator=locator,
         template_version="seed-1",
@@ -140,7 +144,7 @@ def _request(
 
 
 def _destination() -> str:
-    """A destination name no other run shares, so workflow ids never collide."""
+    """A destination name and root no other run shares, so workflow ids never collide."""
     return f"test-{uuid4().hex[:10]}"
 
 
@@ -242,8 +246,9 @@ async def test_a_placement_is_copied_verified_and_only_then_registered(
         assert {key: started.details[key] for key in _LOCATION} == {
             "destination_provider": "pcloud",
             "destination_account": _DESTINATION_ACCOUNT,
-            "destination_root": "/",
+            "destination_root": request.destination.root_path,
         }
+        assert started.details["destination_id"] == str(request.destination.id)
         assert (started.details["policy_version"], started.details["attempt"]) == (7, 0)
         assert source.version_marker is not None
         assert started.details["source_version_marker"] == source.version_marker
@@ -551,7 +556,7 @@ async def test_an_old_verification_run_again_after_a_newer_attempt_started_chang
                 connection,
                 content_object_id=stored.id,
                 fingerprint=stored.fingerprint,
-                destination_name=request.destination.name,
+                destination=request.destination,
                 locator=_LOCATOR,
                 template_version="seed-1",
                 source=source,
@@ -639,7 +644,7 @@ async def test_an_old_copy_that_completes_after_a_newer_attempt_started_records_
                 connection,
                 content_object_id=stored.id,
                 fingerprint=stored.fingerprint,
-                destination_name=request.destination.name,
+                destination=request.destination,
                 locator=_LOCATOR,
                 template_version="seed-1",
                 source=source,
@@ -688,7 +693,7 @@ async def test_an_old_copy_deferred_after_a_newer_attempt_started_stops_without_
                 connection,
                 content_object_id=stored.id,
                 fingerprint=stored.fingerprint,
-                destination_name=request.destination.name,
+                destination=request.destination,
                 locator=_LOCATOR,
                 template_version="seed-1",
                 source=source,
@@ -782,3 +787,43 @@ async def test_an_old_attempt_rewound_over_a_copy_registered_elsewhere_is_verifi
         assert await pipeline.workflows(f"verify:{placement.id}:") == [
             (verification_workflow_for(placement.id, attempt), "SUCCESS") for attempt in range(3)
         ]
+
+
+async def test_one_name_at_a_second_account_is_a_second_placement_and_workflow(
+    settings: Settings,
+    ledger_engine: AsyncEngine,
+    tmp_path: Path,
+    daemon: tuple[RcloneClient, str],
+) -> None:
+    """Placed under one name at two accounts: two copies, two rows, two workflows."""
+    access = ScriptedAccess()
+    content = media.photo(seed=int(uuid4().int % 97))
+    second_account = f"acct-{uuid4().hex[:8]}"
+    async with _pipeline(
+        settings,
+        ledger_engine,
+        tmp_path,
+        daemon[1],
+        access,
+        directories={second_account: "second"},
+    ) as pipeline:
+        _, stored = await _ingested(pipeline, daemon, content, at_source=content)
+        first = _request(stored, _destination())
+        moved = first.model_copy(
+            update={"destination": first.destination.model_copy(update={"account": second_account})}
+        )
+
+        assert await _place(pipeline, first) is PlaceOutcome.COPIED
+        assert await _place(pipeline, moved) is PlaceOutcome.COPIED
+
+        assert placement_workflow_for(first) != placement_workflow_for(moved)
+        async with ledger_engine.connect() as connection:
+            recorded = await PlacementRepository(connection).find_for_content_object(stored.id)
+        at = {p.destination_id: p for p in recorded}
+        assert first.destination.id in at
+        assert moved.destination.id in at
+        assert at[first.destination.id].id != at[moved.destination.id].id
+        assert {at[d.id].state for d in (first.destination, moved.destination)} == {
+            PlacementState.PRESENT
+        }
+        assert access.copies == 2

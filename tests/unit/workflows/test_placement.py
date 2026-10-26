@@ -8,11 +8,15 @@ import pytest
 
 from curate_d.domain import (
     ContentObjectId,
+    DestinationConfig,
+    HashAlgorithm,
     Placement,
     PlacementId,
     PlacementState,
     Provider,
     SourceObject,
+    StrongFingerprint,
+    derive_destination_id,
     derive_source_object_id,
 )
 from curate_d.workflows import placement
@@ -50,6 +54,7 @@ def test_a_start_that_copies_nothing_ends_by_the_state_it_left(
     """A registered placement ends already present; an attempt under way elsewhere, superseded."""
     left = Placement.build(
         content_object_id=ContentObjectId(uuid4()),
+        destination_id=derive_destination_id("pcloud", "acct-1", "/Library"),
         destination_name="library",
         locator="/Photos/2026/img.heic",
         template_version="seed-1",
@@ -102,3 +107,25 @@ async def test_a_deferral_reports_whether_the_attempt_was_still_copying(
     assert await placement._defer_tx(placement_id, "scratch exhausted", 3) is recorded
 
     assert seen == [(connection, placement_id, "scratch exhausted", 3)]
+
+
+def _request(account: str, name: str = "library") -> placement.PlacementRequest:
+    """Return a first attempt at placing one file under `name` at `/Library` of `account`."""
+    return placement.PlacementRequest(
+        content_object_id=ContentObjectId(uuid4()),
+        fingerprint=StrongFingerprint(algorithm=HashAlgorithm.SHA256, digest="a" * 64),
+        destination=DestinationConfig(
+            name=name, provider=Provider.PCLOUD, account=account, root_path="/Library"
+        ),
+        locator="/Library/img.heic",
+        template_version="seed-1",
+        size_bytes=1024,
+    )
+
+
+def test_a_placement_at_a_names_new_account_is_other_work() -> None:
+    """One name at two accounts is two workflows; a rename is the same one."""
+    old, new = _request("acct-1"), _request("acct-2")
+    renamed = _request("acct-1", name="photos")
+    assert placement.placement_workflow_for(old) != placement.placement_workflow_for(new)
+    assert placement.placement_workflow_for(old) == placement.placement_workflow_for(renamed)

@@ -9,6 +9,7 @@ from curate_d.domain import (
     HashAlgorithm,
     Placement,
     StrongFingerprint,
+    derive_destination_id,
 )
 from curate_d.placement.pipeline import LocatorConflictError, claim
 from curate_d.rendering.collision import disambiguate
@@ -22,6 +23,7 @@ def _held_by(content_object_id: ContentObjectId, locator: str) -> Placement:
     """A placement of `content_object_id` at `locator`."""
     return Placement.build(
         content_object_id=content_object_id,
+        destination_id=derive_destination_id("pcloud", "dest-account", "/Library"),
         destination_name="library",
         locator=locator,
         template_version="v1",

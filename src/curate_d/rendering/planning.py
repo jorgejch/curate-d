@@ -1,7 +1,7 @@
 """From stored facts to a placement plan, or a reason there can be none.
 
 The step between classification and transfer. It renders the locator, resolves it against
-whatever already occupies it at the destination, and either returns what to place where,
+whatever already occupies it at the destination's identity, and either returns what to place where,
 or the failure a person needs to see. A failure creates no placement; its review item and
 audit entry say which fact was missing.
 """
@@ -21,6 +21,7 @@ from curate_d.domain import (
     ConfigurationKind,
     ContentObjectId,
     DestinationConfig,
+    DestinationId,
     DomainModel,
     Facts,
     Placement,
@@ -70,6 +71,7 @@ class PlacementPlan(DomainModel):
     """Where one content object goes at one destination."""
 
     content_object_id: ContentObjectId
+    destination_id: DestinationId
     destination_name: str
     rendered: Rendered
     locator: str = Field(description="The rendered locator after collision resolution.")
@@ -97,6 +99,7 @@ def plan(
     content_object_id: ContentObjectId,
     fingerprint: StrongFingerprint,
     paths: Sequence[str],
+    destination_id: DestinationId,
     destination_name: str,
     profile: CapabilityProfile,
     root: str,
@@ -104,8 +107,9 @@ def plan(
 ) -> PlacementPlan | RenderFailure:
     """Render and resolve one placement, or explain why it cannot be made.
 
-    `occupants` maps locators to the placements already there at this destination, for
-    the locators this content could render to; collision resolution needs nothing else.
+    `occupants` maps locators to the placements already there at this destination
+    identity, for the locators this content could render to; collision resolution needs
+    nothing else.
     """
     try:
         rendered = render(
@@ -131,6 +135,7 @@ def plan(
     )
     return PlacementPlan(
         content_object_id=content_object_id,
+        destination_id=destination_id,
         destination_name=destination_name,
         rendered=rendered,
         locator=resolution.locator,
@@ -148,7 +153,11 @@ async def plan_at(
     paths: Sequence[str],
     destination: DestinationConfig,
 ) -> PlacementPlan | RenderFailure:
-    """Plan one placement at `destination`, resolved against what the ledger has there."""
+    """Plan one placement at `destination`, resolved against what the ledger has there.
+
+    "There" is the destination's identity: a placement made under the same name at another
+    account or root occupies nothing here.
+    """
     profile = PROFILES[CapabilityProfileName(destination.profile)]
 
     def attempt(occupants: Mapping[str, Placement]) -> PlacementPlan | RenderFailure:
@@ -159,6 +168,7 @@ async def plan_at(
             content_object_id=content_object_id,
             fingerprint=fingerprint,
             paths=paths,
+            destination_id=destination.id,
             destination_name=destination.name,
             profile=profile,
             root=destination.root_path,
@@ -169,7 +179,7 @@ async def plan_at(
     if isinstance(first, RenderFailure):
         return first
     occupant = await PlacementRepository(connection).find_at_locator(
-        destination_name=destination.name, locator=first.rendered.locator
+        destination_id=destination.id, locator=first.rendered.locator
     )
     return first if occupant is None else attempt({first.rendered.locator: occupant})
 

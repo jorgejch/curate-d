@@ -51,9 +51,10 @@ REPORT = text(
     ) r ON true
     LEFT JOIN LATERAL (
         SELECT json_agg(json_build_object(
-            'destination', p.destination_name, 'locator', p.locator, 'state', p.state,
+            'destination', p.destination_name, 'destination_id', p.destination_id,
+            'locator', p.locator, 'state', p.state,
             'level', p.verification_level, 'failure', p.failure_reason
-        ) ORDER BY p.destination_name) AS placements
+        ) ORDER BY p.destination_name, p.destination_id) AS placements
         FROM placements p WHERE p.content_object_id = s.content_object_id
     ) p ON true
     WHERE s.provider = 'pcloud' AND s.account = :account

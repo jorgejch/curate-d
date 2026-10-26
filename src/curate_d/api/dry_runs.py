@@ -37,6 +37,7 @@ from curate_d.domain import (
     PlacementPolicy,
     PolicySource,
     RejectedValue,
+    check_destinations,
 )
 from curate_d.placement.dry_run import DryRun, DryRunItem, DryRunRequest, DryRunStore
 from curate_d.rendering.templates import TemplateSet, parse_templates
@@ -75,16 +76,19 @@ class DryRunOrder(BaseModel):
 
     @model_validator(mode="after")
     def _check(self) -> Self:
-        """Refuse a draft policy alongside named destinations.
+        """Refuse a draft policy alongside named destinations, and destinations that clash.
 
         Raises:
-            ValueError: both were given.
+            ValueError: both were given; or a name repeats, two names are one place, or
+                one root lies inside another in an account, as `check_destinations`
+                refuses for a policy.
         """
         if self.policy is not None and self.destinations:
             raise ValueError(
                 "give either destinations or a draft policy: named destinations ignore "
                 "the policy's rules"
             )
+        check_destinations(self.destinations)
         return self
 
 
@@ -156,6 +160,8 @@ class ExportedItem(BaseModel):
 
     content_object_id: ContentObjectId
     destination: str
+    destination_id: str | None = None
+    """The destination's identity; None for content that reached no destination."""
     outcome: DryRunOutcome
     paths: list[str]
     facts: Facts | None = None
@@ -237,6 +243,7 @@ def exported(item: DryRunItem) -> ExportedItem:
     return ExportedItem(
         content_object_id=item.content_object_id,
         destination=item.destination_name,
+        destination_id=None if item.destination_id is None else str(item.destination_id),
         outcome=item.outcome,
         paths=list(item.paths),
         facts=item.facts,

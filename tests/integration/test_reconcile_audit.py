@@ -87,3 +87,4 @@ async def test_decisions_record_the_policy_version_they_applied(
         assert started.details["destination_provider"] == Provider.PCLOUD.value
         assert started.details["destination_account"] == DESTINATION_ACCOUNT
         assert started.details["destination_root"] == f"/{library}"
+        assert started.details["destination_id"] == str(_policy(library).destinations[0].id)

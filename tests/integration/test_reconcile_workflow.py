@@ -28,6 +28,7 @@ from curate_d.domain import (
     ConfigurationKind,
     ContentObjectId,
     DestinationConfig,
+    DestinationId,
     HashAlgorithm,
     Placement,
     PlacementPolicy,
@@ -207,6 +208,15 @@ async def _placements(engine: AsyncEngine, content_id: ContentObjectId) -> dict[
     return {p.destination_name: p for p in found}
 
 
+async def _placements_at(
+    engine: AsyncEngine, content_id: ContentObjectId
+) -> dict[DestinationId, Placement]:
+    """The content's placements by destination identity."""
+    async with engine.connect() as connection:
+        found = await PlacementRepository(connection).find_for_content_object(content_id)
+    return {p.destination_id: p for p in found}
+
+
 async def _audit(
     engine: AsyncEngine, content_id: ContentObjectId, entry_type: AuditEntryType, since: int
 ) -> list[AuditEntry]:
@@ -337,7 +347,8 @@ async def test_overlapping_evaluations_perform_one_transfer(
 
         assert access.copies == 1
         assert list(await _placements(ledger_engine, content_id)) == [library]
-        placed = [w for w, _ in await pipeline.workflows("placement:") if library in w]
+        library_id = str(_destination(library).id)
+        placed = [w for w, _ in await pipeline.workflows("placement:") if library_id in w]
         assert len(placed) == 1
 
 
@@ -401,7 +412,7 @@ async def test_a_lost_copy_is_marked_absent_and_re_established(
         assert (restored.state, restored.attempts) == (PlacementState.PRESENT, 1)
         assert await rclone.stat("/", f"{workspace}/destination{placed.locator}") is not None
         async with ledger_engine.connect() as connection:
-            [check] = await ReconciliationStore(connection).checks([library])
+            [check] = await ReconciliationStore(connection).checks([_destination(library).id])
         assert (check.reachable, check.absent) == (True, 1)
         assert access.copies == 2
 
@@ -429,7 +440,9 @@ async def test_an_unreachable_destination_is_recorded_and_its_placements_kept(
 
         assert (await _placements(ledger_engine, content_id))[library] == placed
         async with ledger_engine.connect() as connection:
-            [check] = await ReconciliationStore(connection).checks([library])
+            [check] = await ReconciliationStore(connection).checks(
+                [_destination(library, account=_OFFLINE).id]
+            )
         assert not check.reachable
         assert check.reason is not None
         assert "unreachable" in check.reason
@@ -534,8 +547,8 @@ async def test_a_copy_at_a_destination_dropped_from_the_policy_stops_counting(
 
         async with ledger_engine.connect() as connection:
             store = ReconciliationStore(connection)
-            assert await store.checks([offsite]) == []
-            [checked] = await store.checks([library])
+            assert await store.checks([_destination(offsite).id]) == []
+            [checked] = await store.checks([_destination(library).id])
         assert (checked.reachable, checked.absent) == (True, 0)
         assert await _audit(ledger_engine, content_id, AuditEntryType.PLACEMENT_ABSENT, since) == []
         assert (await _placements(ledger_engine, content_id))[offsite] == lost
@@ -545,10 +558,13 @@ async def test_a_copy_at_a_destination_dropped_from_the_policy_stops_counting(
         assert (decision.details["outcome"], decision.details["reason"]) == (
             "retain",
             "1 of 2 required copies are strongly verified; "
-            f"1 copies at destinations no longer in the policy do not count ({offsite})",
+            f"1 copies at destinations no longer in the policy do not count: {offsite} "
+            f"(pcloud:{DESTINATION_ACCOUNT}:/{offsite})",
         )
         assert decision.details["strong_copies"] == library
-        assert decision.details["unchecked_copies"] == offsite
+        assert decision.details["unchecked_copies"] == (
+            f"{offsite} (pcloud:{DESTINATION_ACCOUNT}:/{offsite})"
+        )
         assert (summary.placed, summary.satisfied) == (0, 1)
         assert access.copies == 2
 
@@ -688,6 +704,178 @@ async def test_a_scheduled_check_finds_a_lost_copy_and_re_establishes_it(
         restored = (await _placements(ledger_engine, content_id))[library]
         assert (restored.state, restored.attempts) == (PlacementState.PRESENT, 1)
         async with ledger_engine.connect() as connection:
-            [recorded] = await ReconciliationStore(connection).checks([library])
+            [recorded] = await ReconciliationStore(connection).checks([_destination(library).id])
         assert (recorded.reachable, recorded.absent) == (True, 1)
+        assert access.copies == 2
+
+
+def _plain(name: str) -> str:
+    """The locator the dated photo renders to under a destination rooted at `/name`."""
+    return f"/{name}/Photos/2024/2024-05/IMG_0001.JPG"
+
+
+def _at(
+    *destinations: DestinationConfig, retention: tuple[RetentionRule, ...] = ()
+) -> PlacementPolicy:
+    """Photos go to every destination given."""
+    return PlacementPolicy(
+        destinations=destinations,
+        rules=(
+            PlacementRule(
+                name="photos",
+                when={"category": "Photos"},
+                destinations=tuple(d.name for d in destinations),
+            ),
+        ),
+        retention=retention,
+    )
+
+
+async def test_a_name_moved_to_another_account_is_new_work_and_the_old_copy_stays(
+    settings: Settings,
+    ledger_engine: AsyncEngine,
+    tmp_path: Path,
+    daemon: tuple[RcloneClient, str],
+    activate: Activate,
+    names: tuple[str, str],
+) -> None:
+    """The move places the photo again at the plain locator of the new account; the old copy
+    stays present, is not looked for by the new account's check, and is retained-for, named
+    with its account, while it is the only copy."""
+    library, _ = names
+    second = f"acct-{uuid4().hex[:8]}"
+    rule = RetentionRule(name="archive", release_source=True, required_copies=1)
+    old = _destination(library)
+    moved = _destination(library, account=second)
+    rclone, workspace = daemon
+    access = ScriptedAccess()
+    remotes = WorkspaceRemotes(workspace, directories={second: "second"})
+    await activate(_at(old, retention=(rule,)))
+    async with transfer_pipeline(settings, ledger_engine, tmp_path, remotes, access) as pipeline:
+        content_id = (await _ingest(pipeline, daemon))[_DATED]
+        await _reconcile(pipeline, content_id)
+        before = (await _placements_at(ledger_engine, content_id))[old.id]
+
+        await activate(_at(moved, retention=(rule,)))
+        since = await _high_water(ledger_engine)
+        summary = await _reconcile(pipeline, content_id)
+
+        placed = await _placements_at(ledger_engine, content_id)
+        assert (summary.placed, summary.satisfied) == (1, 0)
+        assert placed[old.id] == before
+        assert placed[old.id].state is PlacementState.PRESENT
+        assert (placed[moved.id].state, placed[moved.id].locator) == (
+            PlacementState.PRESENT,
+            _plain(library),
+        )
+        assert placed[moved.id].id != before.id
+        assert await rclone.stat("/", f"{workspace}/second{_plain(library)}") is not None
+        [retained, *_] = await _audit(
+            ledger_engine, content_id, AuditEntryType.RETENTION_DECIDED, since
+        )
+        located = f"{library} (pcloud:{DESTINATION_ACCOUNT}:/{library})"
+        assert retained.details["outcome"] == "retain"
+        assert retained.details["unchecked_copies"] == located
+        assert located in str(retained.details["reason"])
+
+        await rclone.delete("/", f"{workspace}/destination{before.locator}")
+        since = await _high_water(ledger_engine)
+        with SetWorkflowID(f"test-check-{uuid4().hex[:10]}"):
+            assert await check_destination(moved, "c1") == 0
+        await pipeline.settle()
+
+        assert await _audit(ledger_engine, content_id, AuditEntryType.PLACEMENT_ABSENT, since) == []
+        assert (await _placements_at(ledger_engine, content_id))[old.id] == before
+        assert access.copies == 2
+
+
+async def test_a_renamed_destination_keeps_its_placement_check_and_count(
+    settings: Settings,
+    ledger_engine: AsyncEngine,
+    tmp_path: Path,
+    daemon: tuple[RcloneClient, str],
+    activate: Activate,
+    names: tuple[str, str],
+) -> None:
+    """A rename creates no work and counts the copy under the new name; its check replaces
+    the old name's; the next start relabels the row and keeps its identifier."""
+    library, renamed_name = names
+    rule = RetentionRule(name="archive", release_source=True, required_copies=1)
+    original = _destination(library)
+    renamed = DestinationConfig(
+        name=renamed_name,
+        provider=Provider.PCLOUD,
+        account=DESTINATION_ACCOUNT,
+        root_path=f"/{library}/",
+    )
+    rclone, workspace = daemon
+    access = ScriptedAccess()
+    await activate(_at(original, retention=(rule,)))
+    async with transfer_pipeline(
+        settings, ledger_engine, tmp_path, WorkspaceRemotes(workspace), access
+    ) as pipeline:
+        content_id = (await _ingest(pipeline, daemon))[_DATED]
+        await _reconcile(pipeline, content_id)
+        await _reconcile(pipeline, content_id)
+        with SetWorkflowID(f"test-check-{uuid4().hex[:10]}"):
+            await check_destination(original, "c1")
+        before = (await _placements_at(ledger_engine, content_id))[original.id]
+
+        await activate(_at(renamed, retention=(rule,)))
+        since = await _high_water(ledger_engine)
+        summary = await _reconcile(pipeline, content_id)
+
+        assert (summary.placed, summary.satisfied) == (0, 1)
+        [decision] = await _audit(
+            ledger_engine, content_id, AuditEntryType.RETENTION_DECIDED, since
+        )
+        assert decision.details["outcome"] == "release_permitted"
+        assert decision.details["strong_copies"] == renamed_name
+
+        await rclone.delete("/", f"{workspace}/destination{before.locator}")
+        with SetWorkflowID(f"test-check-{uuid4().hex[:10]}"):
+            assert await check_destination(renamed, "c2") == 1
+        await pipeline.settle()
+
+        async with ledger_engine.connect() as connection:
+            [check] = await ReconciliationStore(connection).checks([original.id])
+        assert (check.destination_name, check.absent) == (renamed_name, 1)
+        [after] = (await _placements_at(ledger_engine, content_id)).values()
+        assert (after.id, after.destination_name, after.state) == (
+            before.id,
+            renamed_name,
+            PlacementState.PRESENT,
+        )
+        assert access.copies == 2
+
+
+async def test_two_accounts_under_one_root_each_get_the_plain_locator(
+    settings: Settings,
+    ledger_engine: AsyncEngine,
+    tmp_path: Path,
+    daemon: tuple[RcloneClient, str],
+    activate: Activate,
+    names: tuple[str, str],
+) -> None:
+    """One root and template in two accounts: a placement at each, neither suffixed."""
+    library, offsite = names
+    second = f"acct-{uuid4().hex[:8]}"
+    here = _destination(library)
+    there = DestinationConfig(
+        name=offsite, provider=Provider.PCLOUD, account=second, root_path=f"/{library}"
+    )
+    access = ScriptedAccess()
+    remotes = WorkspaceRemotes(daemon[1], directories={second: "second"})
+    await activate(_at(here, there))
+    async with transfer_pipeline(settings, ledger_engine, tmp_path, remotes, access) as pipeline:
+        content_id = (await _ingest(pipeline, daemon))[_DATED]
+
+        summary = await _reconcile(pipeline, content_id)
+
+        placed = await _placements_at(ledger_engine, content_id)
+        assert summary.placed == 2
+        assert {d: (p.state, p.locator) for d, p in placed.items()} == {
+            here.id: (PlacementState.PRESENT, _plain(library)),
+            there.id: (PlacementState.PRESENT, _plain(library)),
+        }
         assert access.copies == 2

@@ -4,6 +4,7 @@ Other tests leave rows behind, so counts are compared before and after this test
 its own; failures are looked for by identity.
 """
 
+import re
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Iterator
 from contextlib import asynccontextmanager
@@ -25,6 +26,7 @@ from curate_d.classification.store import ReviewRepository, SpendRepository
 from curate_d.config import Settings
 from curate_d.domain import (
     ContentObject,
+    DestinationIdentity,
     HashAlgorithm,
     PendingFolder,
     Placement,
@@ -36,9 +38,15 @@ from curate_d.domain import (
     StrongFingerprint,
 )
 from curate_d.inventory.scans import ScanRepository
-from curate_d.ledger import ContentObjectRepository, PlacementRepository, SourceObjectRepository
+from curate_d.ledger import (
+    ContentObjectRepository,
+    DestinationRepository,
+    PlacementRepository,
+    SourceObjectRepository,
+)
 from curate_d.ledger.tables import (
     content_objects,
+    destinations,
     placements,
     remote_spend,
     review_items,
@@ -116,9 +124,14 @@ async def _failed_units(ledger_engine: AsyncEngine) -> AsyncGenerator[dict[str, 
             )
             for _ in range(2)
         ]
+        library = DestinationIdentity(
+            provider=Provider.PCLOUD, account=account, root_path=f"/lib-{tag}"
+        )
+        await DestinationRepository(connection).ensure(library)
         placement = await PlacementRepository(connection).upsert(
             Placement.build(
                 content_object_id=placed.id,
+                destination_id=library.id,
                 destination_name=f"lib-{tag}",
                 locator=f"/lib-{tag}/x.jpg",
                 template_version="seed-1",
@@ -141,19 +154,22 @@ async def _failed_units(ledger_engine: AsyncEngine) -> AsyncGenerator[dict[str, 
             "reviewed": reviewed.id,
         }
     finally:
-        await _remove(ledger_engine, scan.id, source.id, placement.id, [placed.id, reviewed.id])
+        await _remove(ledger_engine, scan.id, source.id, placement, [placed.id, reviewed.id])
 
 
 async def _remove(
     ledger_engine: AsyncEngine,
     scan_id: uuid.UUID,
     source_id: uuid.UUID,
-    placement_id: uuid.UUID,
+    placement: Placement,
     content_ids: list[uuid.UUID],
 ) -> None:
     """Delete what `_failed_units` created."""
     async with ledger_engine.begin() as connection:
-        await connection.execute(delete(placements).where(placements.c.id == placement_id))
+        await connection.execute(delete(placements).where(placements.c.id == placement.id))
+        await connection.execute(
+            delete(destinations).where(destinations.c.id == placement.destination_id)
+        )
         await connection.execute(
             delete(review_items).where(review_items.c.content_object_id.in_(content_ids))
         )
@@ -216,6 +232,10 @@ async def test_each_failed_unit_reports_what_it_concerned_and_why(
     assert placement["stage"] == "placement"
     assert placement["content_object_id"] == str(failed_units["placed"])
     assert placement["reason"].startswith("failed: copy timed out")
+    # Named, located and with its locator: `lib-<tag> (pcloud:jobs-<tag>:/lib-<tag>):<locator>`.
+    assert re.fullmatch(
+        r"lib-(\w{8}) \(pcloud:jobs-\1:/lib-\1\):/lib-\1/x\.jpg", placement["where"]
+    )
     review = find("content_object_id", failed_units["reviewed"])
     assert review["stage"] == "classification"
     assert review["reason"].startswith("low_confidence: no tier was sure")

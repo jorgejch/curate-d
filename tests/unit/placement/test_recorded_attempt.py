@@ -4,7 +4,7 @@ from uuid import uuid4
 
 import pytest
 
-from curate_d.domain import ContentObjectId, Placement, PlacementState
+from curate_d.domain import ContentObjectId, Placement, PlacementState, derive_destination_id
 from curate_d.placement.pipeline import recorded_attempt
 
 # The placement's recorded attempt in every case below.
@@ -23,6 +23,7 @@ def _placement(state: PlacementState, attempts: int) -> Placement:
     """Return a placement in `state` that has recorded `attempts`."""
     built = Placement.build(
         content_object_id=ContentObjectId(uuid4()),
+        destination_id=derive_destination_id("pcloud", "dest-account", "/Library"),
         destination_name="library",
         locator="/Photos/2026/IMG_0001.JPG",
         template_version="seed-1",

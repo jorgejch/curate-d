@@ -1,10 +1,13 @@
 """Placement policy: where content should be, and when an original may be released.
 
-Destinations are named targets. Placement rules map facts to the destinations content
-should have copies at; every matching rule contributes, so policies compose. Retention is
-separate: an original is kept unless a retention rule explicitly permits release, and even
-then only once the required number of strongly verified copies exist besides the original,
-at destinations the policy defines.
+Destinations are named targets. The name is the policy's label; what a destination is, and
+what its placements belong to, is its identity: provider, account and canonical root path.
+Two destinations sharing files, one identity under two names or one root inside another in
+the same account, are refused (`check_destinations`). Placement rules map facts to the
+destinations content should have copies at; every matching rule contributes, so policies
+compose. Retention is separate: an original is kept unless a retention rule explicitly
+permits release, and even then only once the required number of strongly verified copies
+exist besides the original, at destination identities the policy defines.
 
 Every value a policy names is checked when it is parsed: a condition's `media_kind` must
 be a `MediaKind`, and a destination's `profile` the value of a `CapabilityProfileName`.
@@ -16,8 +19,9 @@ workflow inputs, a checkpoint holds the plain string older builds wrote, and unp
 not validate it. A reader that needs the member converts at use.
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from enum import StrEnum
+from itertools import combinations
 from typing import Final, Self
 
 from pydantic import Field, ValidationInfo, field_validator, model_validator
@@ -26,7 +30,8 @@ from pydantic_core import PydanticCustomError
 from curate_d.domain.base import DomainModel
 from curate_d.domain.conditions import check_conditions, matches, taxonomy_in
 from curate_d.domain.facts import Facts
-from curate_d.domain.placement import VerificationLevel
+from curate_d.domain.ids import DestinationId, normalize_root
+from curate_d.domain.placement import DestinationIdentity, VerificationLevel
 from curate_d.domain.source import Provider
 
 
@@ -50,12 +55,17 @@ _PROFILES_EXPECTED: Final = (
 
 
 class DestinationConfig(DomainModel):
-    """A named target content can be placed at."""
+    """A named target content can be placed at.
+
+    The name labels the destination in the policy; `identity` is what placements belong
+    to. The root path is held in its canonical form (`normalize_root`). A checkpointed
+    config is not revalidated on unpickling, so `identity` normalizes again.
+    """
 
     name: str = Field(min_length=1, pattern=r"^[a-z0-9][a-z0-9-]*$")
     provider: Provider
     account: str = Field(min_length=1)
-    root_path: str = Field(min_length=1, pattern=r"^/")
+    root_path: str = Field(min_length=1)
     profile: str = Field(
         default=CapabilityProfileName.PCLOUD.value,
         description="Capability profile name: the value of a `CapabilityProfileName`.",
@@ -75,6 +85,64 @@ class DestinationConfig(DomainModel):
                 "enum", "Input should be {expected}", {"expected": _PROFILES_EXPECTED}
             )
         return value
+
+    @field_validator("root_path")
+    @classmethod
+    def _normalize_root(cls, value: str, info: ValidationInfo[object]) -> str:
+        """Return the root in canonical form; see `normalize_root`.
+
+        Raises:
+            ValueError: the root is not absolute or has an empty, "." or ".." segment;
+                the message names the destination.
+        """
+        try:
+            return normalize_root(value)
+        except ValueError as error:
+            raise ValueError(f"destination {info.data.get('name')!r}: {error}") from error
+
+    @property
+    def identity(self) -> DestinationIdentity:
+        """Return the provider, account and root this name points at."""
+        return DestinationIdentity(
+            provider=self.provider, account=self.account, root_path=self.root_path
+        )
+
+    @property
+    def id(self) -> DestinationId:
+        """Return the identifier of this destination's identity."""
+        return self.identity.id
+
+
+def check_destinations(destinations: Sequence[DestinationConfig]) -> None:
+    """Refuse destinations that repeat a name or would share files.
+
+    Raises:
+        ValueError: a name repeats; a root does not normalize; two names point at one
+            identity; or one root lies inside another's in the same account, so one file
+            would count as a copy at both. The message names the destinations concerned.
+    """
+    names = [d.name for d in destinations]
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+        raise ValueError(f"destination names must be unique; repeated: {repeated}")
+    for destination in destinations:
+        try:
+            normalize_root(destination.root_path)
+        except ValueError as error:
+            raise ValueError(f"destination {destination.name!r}: {error}") from error
+    for first, second in combinations(destinations, 2):
+        outer, inner = first.identity, second.identity
+        if outer == inner:
+            raise ValueError(
+                f"destinations {first.name!r} and {second.name!r} are the same place "
+                f"({outer.label()})"
+            )
+        if outer.contains(inner) or inner.contains(outer):
+            raise ValueError(
+                f"destinations {first.name!r} ({outer.label()}) and {second.name!r} "
+                f"({inner.label()}) overlap: one root lies inside the other in the same "
+                "account, so one file would count as a copy at both"
+            )
 
 
 class PlacementRule(DomainModel):
@@ -141,14 +209,14 @@ class PlacementPolicy(DomainModel):
 
     @model_validator(mode="after")
     def _check(self) -> Self:
-        """Reject duplicate destinations and rules naming undefined ones.
+        """Reject destinations sharing a name or a place, and rules naming undefined ones.
 
         Raises:
-            ValueError: a destination name repeats, or a rule targets an undefined one.
+            ValueError: `check_destinations` refuses the destinations, or a rule targets an
+                undefined one.
         """
+        check_destinations(self.destinations)
         names = [d.name for d in self.destinations]
-        if len(set(names)) != len(names):
-            raise ValueError("destination names must be unique")
         for rule in self.rules:
             missing = set(rule.destinations) - set(names)
             if missing:
@@ -168,6 +236,14 @@ class PlacementPolicy(DomainModel):
         count toward source release.
         """
         return frozenset(d.name for d in self.destinations)
+
+    def destinations_by_id(self) -> dict[DestinationId, str]:
+        """Return each destination identity this policy defines, mapped to its name here.
+
+        These are the identities the destination checks verify, so only copies at them
+        count toward source release, reported under the name the policy now gives them.
+        """
+        return {d.id: d.name for d in self.destinations}
 
     def desired_destinations(self, facts: Facts) -> tuple[str, ...]:
         """Return every destination a matching rule asks for, in a stable order."""

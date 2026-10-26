@@ -12,6 +12,10 @@ that cannot be admitted, or that runs out of scratch, waits durably and retries;
 that fails outright is recorded as failed, and the next reconciliation pass starts a new
 attempt under a new workflow identity.
 
+The placement, and every workflow identity derived from it, belongs to the destination's
+identity, its provider, account and root path, not to the policy's name for it: a copy
+under one name at two accounts is two placements and two workflows.
+
 A verification belongs to the attempt `start` recorded, in its identity and its input. A
 placement rewound after an attempt failed records a later attempt when it starts again, so
 its copy gets a verification of its own rather than collapsing onto the finished one. An
@@ -119,7 +123,7 @@ class PlaceOutcome(StrEnum):
 def placement_workflow_for(request: PlacementRequest) -> str:
     """Return the workflow identity of one attempt at one placement."""
     return placement_attempt_workflow_id(
-        request.fingerprint, request.destination.name, request.locator, request.attempt
+        request.fingerprint, request.destination.id, request.locator, request.attempt
     )
 
 
@@ -220,7 +224,7 @@ async def _start_tx(
         connection,
         content_object_id=request.content_object_id,
         fingerprint=request.fingerprint,
-        destination_name=request.destination.name,
+        destination=request.destination,
         locator=request.locator,
         template_version=request.template_version,
         source=source,

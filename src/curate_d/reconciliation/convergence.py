@@ -2,7 +2,9 @@
 
 Evaluation reads the ledger only. For each content object it derives the destinations the
 policy wants, renders where the content goes at each, and pairs every target with the
-placement the ledger holds for that content at that destination. What to do about each
+placement the ledger holds for that content at that destination's identity, never by its
+name: a name pointed at another account or root pairs with nothing, so its content is placed
+again there, and a renamed destination keeps its placements. What to do about each
 pair is `decide`'s: nothing when the copy is registered at the rendered locator, nothing
 while an attempt is still running, otherwise a new attempt. Deciding needs to know which
 attempts are still running, which the workflow asks DBOS for between the two.
@@ -10,8 +12,9 @@ attempts are still running, which the workflow asks DBOS for between the two.
 Content awaiting a person — other than for a render failure, which a template change may
 resolve — is left alone, and content a person excluded is never placed. The retention
 decision is re-derived from the placements as they stand, counting only those at
-destinations the policy defines (the ones the destination checks still verify), and is
-reported only when it, or the policy version it applied, differs from the last one recorded.
+destination identities the policy defines (the ones the destination checks still verify),
+and is reported only when it, or the policy version it applied, differs from the last one
+recorded.
 """
 
 from collections.abc import Sequence
@@ -32,7 +35,12 @@ from curate_d.domain import (
     SourceObjectState,
     StrongFingerprint,
 )
-from curate_d.ledger import ContentObjectRepository, PlacementRepository, SourceObjectRepository
+from curate_d.ledger import (
+    ContentObjectRepository,
+    DestinationRepository,
+    PlacementRepository,
+    SourceObjectRepository,
+)
 from curate_d.reconciliation.retention import RetentionDecision, decide_retention
 from curate_d.reconciliation.store import ReconciliationStore, RecordedRetention
 from curate_d.rendering.planning import RenderFailure, plan_at
@@ -89,6 +97,11 @@ def decide(target: Target, *, running: bool) -> Action:
     return Action.PLACE
 
 
+def paired(destination: DestinationConfig, placements: Sequence[Placement]) -> Placement | None:
+    """Return the placement at `destination`'s identity, whatever name it was made under."""
+    return next((p for p in placements if p.destination_id == destination.id), None)
+
+
 def retention_changed(
     last: RecordedRetention | None, decision: RetentionDecision, *, policy_version: int | None
 ) -> bool:
@@ -131,14 +144,14 @@ async def evaluate(
         return nothing
     facts = classification.facts
     sources = await SourceObjectRepository(connection).find_by_content_object(content_object_id)
-    existing = {
-        p.destination_name: p
-        for p in await PlacementRepository(connection).find_for_content_object(content_object_id)
-    }
+    placements = await PlacementRepository(connection).find_for_content_object(content_object_id)
+    defined = policy.destinations_by_id()
+    elsewhere = sorted({p.destination_id for p in placements} - defined.keys())
     retention = decide_retention(
         policy.retention_for(facts),
-        list(existing.values()),
-        destinations=policy.destination_names(),
+        placements,
+        destinations=defined,
+        locations=await DestinationRepository(connection).find_many(elsewhere),
     )
     last = await ReconciliationStore(connection).last_retention(content_object_id)
     changed = retention_changed(last, retention, policy_version=policy_version)
@@ -170,7 +183,7 @@ async def evaluate(
                 locator=planned.locator,
                 template_version=planned.rendered.template_version,
                 originals={t.rendered: t.original for t in planned.rendered.transformations},
-                existing=existing.get(destination.name),
+                existing=paired(destination, placements),
             )
         )
     return evaluation.model_copy(

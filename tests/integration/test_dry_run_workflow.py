@@ -22,12 +22,19 @@ from curate_d.domain import (
     ContentObjectId,
     DestinationConfig,
     DryRunOutcome,
+    Placement,
     PolicySource,
     Provider,
     VerificationLevel,
 )
-from curate_d.ledger import ContentObjectRepository
-from curate_d.ledger.tables import audit_entries, dry_runs, placements, review_items
+from curate_d.ledger import ContentObjectRepository, DestinationRepository, PlacementRepository
+from curate_d.ledger.tables import (
+    audit_entries,
+    destinations,
+    dry_runs,
+    placements,
+    review_items,
+)
 from curate_d.placement.dry_run import (
     NO_DESTINATION,
     DryRun,
@@ -140,7 +147,8 @@ async def test_a_dry_run_proposes_locators_and_levels_and_places_nothing(
         assert "captured_at" in failed.reason
 
         assert await _counts(ledger_engine, content_ids) == before  # type: ignore[arg-type]
-        assert [w for w, _ in await pipeline.workflows("placement:") if destination.name in w] == []
+        placed = [w for w, _ in await pipeline.workflows("placement:") if str(destination.id) in w]
+        assert placed == []
 
 
 async def test_a_locator_proposed_for_other_content_is_taken(
@@ -208,6 +216,7 @@ async def test_a_locator_proposed_for_other_content_is_taken(
                             run_id=earlier,
                             content_object_id=ContentObjectId(uuid4()),
                             destination_name=destination.name,
+                            destination_id=destination.id,
                             outcome=DryRunOutcome.PROPOSED,
                             locator=rendered,
                         )
@@ -491,3 +500,143 @@ async def test_an_unknown_run_has_no_results(ledger_engine: AsyncEngine) -> None
     """Asking about a run that never happened is an answer, not an error."""
     async with ledger_engine.connect() as connection:
         assert await DryRunStore(connection).get(uuid4()) is None
+
+
+async def _twins(pipeline: Pipeline) -> tuple[ContentObjectId, ContentObjectId]:
+    """Scan two photos rendering to one locator; return their content ids in id order."""
+    camera = ("Canon", f"EOS {pipeline.account}")
+    taken = datetime(2024, 5, 1, 9, 30)  # noqa: DTZ001 - EXIF wall-clock time
+    for folder, seed in (("Camera", 1), ("Phone", 3)):
+        pipeline.pcloud.file(
+            f"/{folder}/IMG_0001.JPG",
+            media.photo(camera=camera, taken=taken, offset="+02:00", seed=seed),
+        )
+    await _scan(pipeline)
+    first, second = sorted(
+        ContentObjectId(s.content_object_id)
+        for s in await pipeline.sources()
+        if s.content_object_id is not None
+    )
+    return first, second
+
+
+_RENDERED = "/Organized/Photos/2024/2024-05/IMG_0001.JPG"
+
+
+async def test_a_proposal_at_one_account_does_not_take_the_locator_at_another(
+    settings: Settings, ledger_engine: AsyncEngine, tmp_path: Path, run_id: UUID
+) -> None:
+    """One root and template in two accounts: other content's proposal at one leaves the
+    plain locator free at the other."""
+    async with running_pipeline(settings, ledger_engine, tmp_path) as pipeline:
+        first, _ = await _twins(pipeline)
+        here = DestinationConfig(
+            name=f"dry-{uuid4().hex[:8]}",
+            provider=Provider.PCLOUD,
+            account=pipeline.account,
+            root_path="/Organized",
+        )
+        there = here.model_copy(
+            update={"name": f"dry-{uuid4().hex[:8]}", "account": f"acct-{uuid4().hex[:8]}"}
+        )
+
+        async with ledger_engine.connect() as connection:
+            transaction = await connection.begin()
+            try:
+                configurations = ConfigurationRepository(connection)
+                store = DryRunStore(connection)
+                await store.create(
+                    DryRun(
+                        id=run_id,
+                        started_at=datetime.now(UTC),
+                        template_version="seed-1",
+                        taxonomy_version=1,
+                    )
+                )
+                # An earlier page proposed the rendered locator for other content, here only.
+                await store.add(
+                    [
+                        DryRunItem(
+                            run_id=run_id,
+                            content_object_id=ContentObjectId(uuid4()),
+                            destination_name=here.name,
+                            destination_id=here.id,
+                            outcome=DryRunOutcome.PROPOSED,
+                            locator=_RENDERED,
+                        )
+                    ]
+                )
+                evaluator = Evaluator(
+                    connection,
+                    run_id=run_id,
+                    templates=(await active_templates(configurations)).templates,
+                    policy=(await active_policy(configurations)).policy,
+                    destinations=(here, there),
+                )
+                at_here, at_there = await evaluator.evaluate(first)
+                content = await ContentObjectRepository(connection).get(first)
+            finally:
+                await transaction.rollback()
+        assert content is not None
+        assert (at_here.destination_id, at_here.locator) == (
+            here.id,
+            disambiguate(_RENDERED, content.fingerprint),
+        )
+        assert (at_there.destination_id, at_there.locator, at_there.outcome) == (
+            there.id,
+            _RENDERED,
+            DryRunOutcome.PROPOSED,
+        )
+
+
+async def test_placements_left_at_a_names_previous_account_do_not_count(
+    settings: Settings, ledger_engine: AsyncEngine, tmp_path: Path, run_id: UUID
+) -> None:
+    """A copy at the old account is neither already present nor an occupant at the new one,
+    and the run records no destination."""
+    async with running_pipeline(settings, ledger_engine, tmp_path) as pipeline:
+        first, second = await _twins(pipeline)
+        old = DestinationConfig(
+            name=f"dry-{uuid4().hex[:8]}",
+            provider=Provider.PCLOUD,
+            account=f"acct-{uuid4().hex[:8]}",
+            root_path="/Organized",
+        )
+        moved = old.model_copy(update={"account": pipeline.account})
+        async with ledger_engine.begin() as connection:
+            await DestinationRepository(connection).ensure(old.identity)
+            await PlacementRepository(connection).upsert(
+                Placement.build(
+                    content_object_id=second,
+                    destination_id=old.id,
+                    destination_name=old.name,
+                    locator=_RENDERED,
+                    template_version="seed-1",
+                )
+            )
+        try:
+            workflow_id = await start_dry_run(DryRunRequest(run_id=run_id, destinations=(moved,)))
+            await pipeline.settle()
+            handle: WorkflowHandleAsync[int] = await DBOS.retrieve_workflow_async(workflow_id)
+            await handle.get_result()
+
+            async with ledger_engine.connect() as connection:
+                items = {
+                    item.content_object_id: item
+                    for item in await DryRunStore(connection).items(run_id)
+                    if item.content_object_id in (first, second)
+                }
+                later = await ContentObjectRepository(connection).get(second)
+                recorded = await DestinationRepository(connection).find_many([moved.id])
+            assert later is not None
+            assert {i.outcome for i in items.values()} == {DryRunOutcome.PROPOSED}
+            assert items[first].locator == _RENDERED
+            assert items[second].locator == disambiguate(_RENDERED, later.fingerprint)
+            assert {i.destination_id for i in items.values()} == {moved.id}
+            assert recorded == {}
+        finally:
+            async with ledger_engine.begin() as connection:
+                await connection.execute(
+                    delete(placements).where(placements.c.destination_id == old.id)
+                )
+                await connection.execute(delete(destinations).where(destinations.c.id == old.id))

@@ -30,6 +30,7 @@ from curate_d.ledger.tables import (
     classification_holds,
     classifications,
     content_objects,
+    destinations,
     placements,
     review_items,
     scans,
@@ -152,7 +153,8 @@ class FailedUnit(BaseModel):
     stage: Stage
     reason: str
     where: str | None = None
-    """The path, destination and locator, scan root or queue it concerned."""
+    """The path; the destination's name, location (`provider:account:root`) and locator; the
+    scan root; or the queue it concerned."""
     content_object_id: UUID | None = None
     placement_id: UUID | None = None
     source_object_id: UUID | None = None
@@ -408,7 +410,11 @@ class LedgerJobs:
                 placements.c.locator,
                 placements.c.state,
                 placements.c.failure_reason,
+                destinations.c.provider,
+                destinations.c.account,
+                destinations.c.root_path,
             )
+            .join(destinations, destinations.c.id == placements.c.destination_id)
             .where(placements.c.state.in_([state.value for state in _FAILED_PLACEMENTS]))
             .order_by(placements.c.created_at.desc())
             .limit(limit)
@@ -417,7 +423,8 @@ class LedgerJobs:
             FailedUnit(
                 stage=Stage.PLACEMENT,
                 reason=f"{row.state}: {row.failure_reason or 'no reason recorded'}",
-                where=f"{row.destination_name}:{row.locator}",
+                where=f"{row.destination_name} ({row.provider}:{row.account}:{row.root_path})"
+                f":{row.locator}",
                 content_object_id=row.content_object_id,
                 placement_id=row.id,
             )

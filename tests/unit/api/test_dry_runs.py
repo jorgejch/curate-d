@@ -37,6 +37,7 @@ from curate_d.domain import (
     Taxonomy,
     TaxonomyField,
     VerificationLevel,
+    derive_destination_id,
 )
 from curate_d.placement.dry_run import (
     NO_DESTINATION,
@@ -49,6 +50,7 @@ from curate_d.rendering.templates import SEED_TEMPLATES
 from tests.unit.api.fakes import FakeDryRuns, backends, client
 
 _AT = datetime(2026, 9, 30, 8, tzinfo=UTC)
+_LIBRARY_ID = derive_destination_id("pcloud", "1", "/library")
 _RECEIPTS = RejectedValue(field=TaxonomyField.SUBCATEGORY, value="Receipts", category="Documents")
 
 
@@ -59,6 +61,7 @@ def _items(run_id: UUID) -> list[DryRunItem]:
             run_id=run_id,
             content_object_id=ContentObjectId(uuid4()),
             destination_name="library",
+            destination_id=_LIBRARY_ID,
             outcome=DryRunOutcome.PROPOSED,
             paths=("/Camera/IMG_0001.JPG",),
             facts=Facts(media_kind=MediaKind.PHOTO, category="Photos"),
@@ -203,6 +206,8 @@ def test_the_export_carries_facts_locators_and_what_could_not_be_resolved() -> N
     assert proposed["facts"]["category"] == "Photos"
     assert proposed["locator"] == "/library/Photos/2024/2024-05/IMG_0001.JPG"
     assert proposed["expected_verification"] == "strong_common_hash"
+    assert proposed["destination_id"] == str(_LIBRARY_ID)
+    assert unresolved["destination_id"] is None
     assert unresolved["reason"].startswith("awaiting review")
     assert unresolved["rejected_values"] == [_RECEIPTS.model_dump(mode="json")]
 
@@ -298,6 +303,22 @@ def test_a_draft_policy_with_named_destinations_is_refused() -> None:
     assert response.status_code == 422
     assert "draft policy" in response.text
     assert fake.started == []
+
+
+@pytest.mark.parametrize(
+    ("account", "root", "accepted"),
+    [("1", "/Org", False), ("1", "/Org/", False), ("1", "/Org/Sub", False), ("2", "/Org", True)],
+)
+def test_named_destinations_sharing_a_place_are_refused(
+    account: str, root: str, accepted: bool
+) -> None:
+    """One place under two names, or nested roots in one account, is 422; nothing starts."""
+    other = {"name": "other", "provider": "pcloud", "account": account, "root_path": root}
+    fake = FakeDryRuns()
+    with client(replace(backends(), dry_runs=fake)) as http:
+        response = http.post("/dry-runs", json={"destinations": [_LIBRARY, other]})
+    assert response.status_code == (202 if accepted else 422)
+    assert len(fake.started) == (1 if accepted else 0)
 
 
 def test_named_destinations_with_a_draft_template_set_are_accepted() -> None:
@@ -446,6 +467,7 @@ def test_unselected_content_is_counted_under_its_outcome_and_by_no_rule() -> Non
     assert export.rule_counts == [RuleCount(index=0, name="photos", count=0)]
     [item] = export.items
     assert (item.destination, item.rules, item.locator) == (NO_DESTINATION, [], None)
+    assert item.destination_id is None
     assert item.facts == unselected.facts
 
 

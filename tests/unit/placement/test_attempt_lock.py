@@ -1,8 +1,9 @@
 """The placement row each attempt check reads is locked for the writing transaction.
 
 The repository's statement is compiled against the PostgreSQL dialect; the pipeline's
-checks run against a repository that only records how it was read. A start also locks
-the placement itself before its paths and its row, which a missing row cannot lock.
+checks run against a repository that only records how it was read. A start records its
+destination identity, then locks the placement itself before its paths and its row,
+which a missing row cannot lock.
 """
 
 from datetime import UTC, datetime
@@ -18,6 +19,9 @@ from curate_d.domain import (
     AuditEntry,
     AuditEntryType,
     ContentObjectId,
+    DestinationConfig,
+    DestinationId,
+    DestinationIdentity,
     HashAlgorithm,
     Placement,
     PlacementId,
@@ -25,6 +29,7 @@ from curate_d.domain import (
     Provider,
     SourceObject,
     StrongFingerprint,
+    derive_destination_id,
     derive_placement_id,
 )
 from curate_d.ledger import PlacementRepository
@@ -35,6 +40,10 @@ _NOW = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
 _LOCATOR = "/Photos/2026/IMG_0001.JPG"
 _OTHER_LOCATOR = "/Photos/2026-07/IMG_0001.JPG"
 _POSTGRESQL = make_url("postgresql+psycopg://").get_dialect()()
+_LIBRARY = DestinationConfig(
+    name="library", provider=Provider.PCLOUD, account="dest-account", root_path="/Library"
+)
+_LIBRARY_ID = derive_destination_id("pcloud", "dest-account", "/Library/")
 
 
 class _NoRows:
@@ -100,7 +109,19 @@ class _Ledger:
         self.journal.append("read locked" if for_update else "read")
         return self.held
 
-    async def find_at_locator(self, *, destination_name: str, locator: str) -> Placement | None:
+    async def find(
+        self,
+        content_object_id: ContentObjectId,
+        destination_id: DestinationId,
+        *,
+        for_update: bool = False,
+    ) -> Placement | None:
+        """Record the read by content and identity and return the held placement."""
+        return await self.get(PlacementId(uuid4()), for_update=for_update)
+
+    async def find_at_locator(
+        self, *, destination_id: DestinationId, locator: str
+    ) -> Placement | None:
         """Journal the look at a path and return nothing holding it."""
         self.journal.append("find")
         return None
@@ -109,6 +130,18 @@ class _Ledger:
         """Journal the write and return `placement` as stored."""
         self.journal.append("upsert")
         return placement
+
+
+class _Destinations:
+    """A destination repository that journals each identity it is asked to record."""
+
+    def __init__(self, connection: object) -> None:
+        """Ignore the connection."""
+
+    async def ensure(self, destination: DestinationIdentity) -> DestinationId:
+        """Journal the write and return the identity's identifier."""
+        _Ledger.journal.append("ensure")
+        return destination.id
 
 
 class _Audit:
@@ -130,6 +163,7 @@ def ledger(monkeypatch: pytest.MonkeyPatch) -> type[_Ledger]:
     monkeypatch.setattr(_Ledger, "journal", [])
     monkeypatch.setattr(_Ledger, "held", None)
     monkeypatch.setattr(pipeline, "PlacementRepository", _Ledger)
+    monkeypatch.setattr(pipeline, "DestinationRepository", _Destinations)
     monkeypatch.setattr(pipeline, "AuditRepository", _Audit)
     return _Ledger
 
@@ -208,6 +242,7 @@ async def test_a_start_checks_the_locked_row(
     content_object_id = ContentObjectId(uuid4())
     present = Placement.build(
         content_object_id=content_object_id,
+        destination_id=_LIBRARY_ID,
         destination_name="library",
         locator=_LOCATOR,
         template_version="seed-1",
@@ -223,7 +258,7 @@ async def test_a_start_checks_the_locked_row(
         _journaling(ledger),
         content_object_id=content_object_id,
         fingerprint=StrongFingerprint(algorithm=HashAlgorithm.SHA256, digest="a" * 64),
-        destination_name="library",
+        destination=_LIBRARY,
         locator=_LOCATOR,
         template_version="seed-1",
         source=_source(),
@@ -240,12 +275,12 @@ async def test_a_first_start_locks_the_placement_before_its_path_and_row(
 ) -> None:
     """With no row to lock yet, a start locks the placement, then the path, then reads."""
     content_object_id = ContentObjectId(uuid4())
-    placement_id = derive_placement_id(content_object_id, "library")
+    placement_id = derive_placement_id(content_object_id, _LIBRARY_ID)
     placement, copy = await pipeline.start(
         _journaling(ledger),
         content_object_id=content_object_id,
         fingerprint=StrongFingerprint(algorithm=HashAlgorithm.SHA256, digest="a" * 64),
-        destination_name="library",
+        destination=_LIBRARY,
         locator=_LOCATOR,
         template_version="seed-1",
         source=_source(),
@@ -259,8 +294,9 @@ async def test_a_first_start_locks_the_placement_before_its_path_and_row(
         0,
     )
     assert ledger.journal == [
+        "ensure",
         f"lock placement:{placement_id}",
-        f"lock library\n{_LOCATOR}",
+        f"lock {_LIBRARY_ID}\n{_LOCATOR}",
         "find",
         "read locked",
         "upsert",
@@ -275,6 +311,7 @@ def _held(
     """Return a placement of the content at `library` in `state`, recorded as `attempts`."""
     return Placement.build(
         content_object_id=content_object_id,
+        destination_id=_LIBRARY_ID,
         destination_name="library",
         locator=locator,
         template_version="seed-1",
@@ -289,7 +326,7 @@ async def _start_at_locator(
         _journaling(ledger),
         content_object_id=content_object_id,
         fingerprint=StrongFingerprint(algorithm=HashAlgorithm.SHA256, digest="a" * 64),
-        destination_name="library",
+        destination=_LIBRARY,
         locator=_LOCATOR,
         template_version="seed-1",
         source=_source(),
@@ -310,8 +347,9 @@ async def test_a_start_leaves_its_attempt_to_one_under_way_at_another_locator(
     started = await _start_at_locator(ledger, content_object_id, attempt=0)
     assert started == (held, False)
     assert ledger.journal == [
+        "ensure",
         f"lock placement:{held.id}",
-        f"lock library\n{_LOCATOR}",
+        f"lock {_LIBRARY_ID}\n{_LOCATOR}",
         "find",
         "read locked",
     ]
@@ -341,9 +379,13 @@ async def test_a_start_over_an_attempt_under_way_records_the_next_one(
     assert "upsert" in ledger.journal
 
 
-def test_a_path_lock_keeps_the_name_older_builds_take() -> None:
-    """A path's lock name is unchanged, so starts of mixed builds still exclude each other."""
-    assert pipeline.path_lock_name("library", _LOCATOR) == f"library\n{_LOCATOR}"
+def test_one_locator_at_two_identities_takes_two_path_locks() -> None:
+    """Two accounts under one name do not serialize on each other's paths."""
+    elsewhere = derive_destination_id("pcloud", "other-account", "/Library")
+    assert pipeline.path_lock_name(_LIBRARY_ID, _LOCATOR) != pipeline.path_lock_name(
+        elsewhere, _LOCATOR
+    )
+    assert pipeline.path_lock_name(_LIBRARY.id, _LOCATOR) == f"{_LIBRARY_ID}\n{_LOCATOR}"
 
 
 def test_no_path_lock_shares_a_placement_lock_name() -> None:
@@ -351,6 +393,6 @@ def test_no_path_lock_shares_a_placement_lock_name() -> None:
     placement_id = PlacementId(uuid4())
     name = pipeline.placement_lock_name(placement_id)
     assert name not in {
-        pipeline.path_lock_name("placement", str(placement_id)),
-        pipeline.path_lock_name("placement", f":{placement_id}"),
+        pipeline.path_lock_name(_LIBRARY_ID, str(placement_id)),
+        pipeline.path_lock_name(_LIBRARY_ID, f":{placement_id}"),
     }
