@@ -63,6 +63,10 @@ cleanup of unrelated code.
   bounds which of its code-review findings it may fix by itself, on top of the organization's
   criteria. Gitar reads it from `dev`, so a pull request can't change the criteria for its own
   fixes, and the file turns nothing on: auto-apply is enabled per pull request.
+  [`.gitar/config/approve.md`](.gitar/config/approve.md) bounds which pull requests it may
+  approve, and so auto-merge: documentation prose, comment- and docstring-only changes and
+  added unit tests, never a pull request a bot opened or committed to, and never one that
+  changes `.gitar/`.
 
 ## Tests
 
