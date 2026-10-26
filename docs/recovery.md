@@ -168,19 +168,21 @@ use the client of the Kill switch (Triage).
    account, root) instead of name. The old build's placement workflows are keyed by the name,
    so the new reconciler would not find one and would start a second copy beside it. Their
    `Placement` checkpoints also lack the required `destination_id`, so a fork of one raises
-   `StaleCheckpointError`. A reconciliation's batches checkpoint the placements they found,
-   so one recovered on the new build raises it too. A dry run continued across the deploy
-   would not see the proposals it saved before the migration, which carry no identity, and
-   could propose one locator twice.
+   `StaleCheckpointError`. A verification's first step checkpoints the placement too, and one
+   whose conclusion committed before its workflow finished passes the migration's in-flight
+   gate, so a verification recovered on the new build raises it as well. A reconciliation's
+   batches checkpoint the placements they found, so one recovered on the new build raises it
+   too. A dry run continued across the deploy would not see the proposals it saved before the
+   migration, which carry no identity, and could propose one locator twice.
 
    1. Pause the `reconcile` and `check-destinations` schedules:
       `dbos.pause_schedule("reconcile")`, `dbos.pause_schedule("check-destinations")`.
-   2. Let placements, reconciliations, destination checks and dry runs drain, until this
-      returns an empty list:
+   2. Let placements, verifications, reconciliations, destination checks and dry runs drain,
+      until this returns an empty list:
 
       ```python
       dbos.list_workflows(
-          workflow_id_prefix=["placement:", "reconcile:", "check:", "dry-run:"],
+          workflow_id_prefix=["placement:", "verify:", "reconcile:", "check:", "dry-run:"],
           status=["ENQUEUED", "PENDING"],
       )
       ```
