@@ -34,6 +34,8 @@ if [[ -e $REPO/.env ]]; then load_env "$(<"$REPO/.env")"; fi
 BASE=${CURATE_D_URL:?set CURATE_D_URL (the deployed control plane URL) in .env}
 NAMESPACE=${CURATE_D_NAMESPACE:?set CURATE_D_NAMESPACE (the Kubernetes namespace) in .env}
 TEST_ROOT=${CURATE_D_TEST_ROOT:?set CURATE_D_TEST_ROOT (the pCloud test folder) in .env}
+# A policy refuses a relative destination root, and scans and reports match absolute paths.
+[[ $TEST_ROOT == /* ]] || { echo "CURATE_D_TEST_ROOT must be absolute: /$TEST_ROOT, not $TEST_ROOT" >&2; exit 1; }
 SOURCE=$TEST_ROOT/source
 ORGANIZED=$TEST_ROOT/organized
 DESTINATION=test-organized
