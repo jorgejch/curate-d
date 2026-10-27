@@ -23,6 +23,14 @@ def _properties() -> dict[str, str]:
     return properties
 
 
+def test_automatic_configuration_cannot_override_explicit_scope() -> None:
+    """Cloud automatic configuration cannot ignore the selected source and test paths."""
+    assert _properties().get("sonar.scanner.autoconfig.enabled") == "false", (
+        "Disable CLI automatic configuration explicitly; Cloud otherwise ignores sonar.sources "
+        "and sonar.tests when it is enabled in project settings"
+    )
+
+
 def _exclusions(key: str) -> set[str]:
     """Return the comma-separated patterns of the property called `key`, none if it is unset."""
     return {pattern.strip() for pattern in _properties().get(key, "").split(",") if pattern.strip()}
@@ -39,7 +47,7 @@ def test_analysis_uses_explicit_source_and_test_roots() -> None:
     """Application, operations, migrations, image and config are sources; tests/ is test code."""
     properties = _properties()
     expected_roots = {
-        "sonar.sources": "src,ops,migrations,docker,pyproject.toml,alembic.ini",
+        "sonar.sources": "src,ops,migrations,docker,pyproject.toml,alembic.ini,compose.yaml",
         "sonar.tests": "tests",
     }
     for key, expected in expected_roots.items():
@@ -75,7 +83,7 @@ def test_coverage_counts_src_only() -> None:
     """Non-application sources are analysed without lowering application coverage."""
     _assert_excludes_exactly(
         "sonar.coverage.exclusions",
-        {"ops/**", "migrations/**", "docker/**", "pyproject.toml", "alembic.ini"},
+        {"ops/**", "migrations/**", "docker/**", "pyproject.toml", "alembic.ini", "compose.yaml"},
     )
 
 
@@ -105,13 +113,13 @@ def test_no_out_of_scope_rule_suppression_remains() -> None:
 
 
 def test_scoped_configuration_files_receive_text_analysis() -> None:
-    """TOML and INI files receive secret detection without pretending to be Python."""
+    """Project, migration and Compose config receive secret detection without false languages."""
     properties = _properties()
     expected = {"sonar.text.inclusions.activate": "true"}
     for key, value in expected.items():
         assert properties.get(key) == value, f"{key} must be {value!r} for scoped text analysis"
     patterns = {entry.strip() for entry in properties.get("sonar.text.inclusions", "").split(",")}
-    assert {"pyproject.toml", "alembic.ini"} <= patterns, (
+    assert {"pyproject.toml", "alembic.ini", "compose.yaml"} <= patterns, (
         "sonar.text.inclusions misses config files"
     )
     assert "sonar.lang.patterns.py" not in properties, "Do not classify config files as Python"

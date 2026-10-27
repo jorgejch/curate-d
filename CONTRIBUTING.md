@@ -111,6 +111,7 @@ cleanup of unrelated code.
 | `migrations/` | Source | Excluded | Included |
 | `docker/` | Source | Excluded | Where supported by the analyzer |
 | `pyproject.toml`, `alembic.ini` | Source (text/secret detection) | Excluded | No dedicated language analyzer |
+| `compose.yaml` | Source (including text/secret detection) | Excluded | Where supported by the analyzer |
 | `tests/` | Test | Not measured | Not measured |
 
 All other paths are outside ordinary Sonar analysis, including GitHub workflows, unlisted
@@ -122,7 +123,8 @@ without pretending to be Python. They independently add Git-tracked files to sca
 `**/*` would also admit docs and other unselected paths, regardless of `sonar.sources`.
 This does not add general TOML/INI language rules or package vulnerability scanning.
 Docker analysis checks the image definition, not the built image; check scan logs for
-parsing warnings with newer Dockerfile syntax.
+parsing warnings with newer Dockerfile syntax. Including `compose.yaml` does not imply
+Dockerfile-specific rules apply to Compose. The lifecycle override remains outside scope.
 
 Adding an unrelated directory needs no exclusion edit. To add a source directory or file, update
 `sonar.sources` and the matching `sonar.text.inclusions` pattern, decide whether it belongs
@@ -133,10 +135,15 @@ test code for this scanner. No duplication exclusions are needed for the current
 
 CI uses SonarScanner CLI through the scan action, not SonarScanner for Python (`pysonar`).
 Keep Cloud's Automatic Analysis disabled: Python coverage requires CI-based analysis.
+Separately, keep CLI automatic configuration disabled with
+`sonar.scanner.autoconfig.enabled=false` in the properties file. When enabled, it ignores
+`sonar.sources` and `sonar.tests` and scans the whole repository, including docs, even in CI.
+The repository setting overrides Cloud's project-level automatic configuration setting.
 After changing scope, check the next CI scan's indexed source/test files and coverage import;
 local tests validate the properties, not Cloud-side settings or computed metrics.
 
 References: [initial scope](https://docs.sonarsource.com/sonarqube-cloud/managing-your-projects/project-analysis/setting-analysis-scope/setting-initial-scope),
+[CLI automatic configuration](https://docs.sonarsource.com/sonarqube-cloud/analyzing-source-code/scanners/sonarscanner-cli),
 [metric exclusions](https://docs.sonarsource.com/sonarqube-cloud/managing-your-projects/project-analysis/setting-analysis-scope/exclude-from-coverage-duplication),
 [Python coverage](https://docs.sonarsource.com/sonarqube-cloud/analyzing-source-code/test-coverage/python-test-coverage),
 [secret detection](https://docs.sonarsource.com/sonarqube-cloud/analyzing-source-code/languages/secrets).

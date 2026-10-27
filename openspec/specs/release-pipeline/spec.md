@@ -457,7 +457,7 @@ suite naming the setting.
 
 #### Scenario: Metric setting drifts
 - **WHEN** coverage exclusions no longer name exactly `ops/**`, `migrations/**`,
-  `docker/**`, `pyproject.toml` and `alembic.ini`, duplication exclusions are added,
+  `docker/**`, `pyproject.toml`, `alembic.ini` and `compose.yaml`, duplication exclusions are added,
   or the coverage report path changes
 - **THEN** the unit suite fails naming the setting
 
@@ -470,12 +470,12 @@ suite naming the setting.
 - **THEN** it does not lower coverage, but remains eligible for duplication findings
 
 #### Scenario: Image and configuration coverage
-- **WHEN** `docker/`, `pyproject.toml` or `alembic.ini` has no unit coverage
+- **WHEN** `docker/`, `pyproject.toml`, `alembic.ini` or `compose.yaml` has no unit coverage
 - **THEN** it does not lower application coverage
 
 ### Requirement: SonarQube analyses explicitly selected source and test trees
-SonarQube Cloud MUST use `src/`, `ops/`, `migrations/`, `docker/`, `pyproject.toml` and
-`alembic.ini` as its only sources, and `tests/` as tests. Scopes MUST be disjoint,
+SonarQube Cloud MUST use `src/`, `ops/`, `migrations/`, `docker/`, `pyproject.toml`,
+`alembic.ini` and `compose.yaml` as its only sources, and `tests/` as tests. Scopes MUST be disjoint,
 independent of pytest and free of source/test filters. Scoped text MUST be eligible for
 secret detection. Scope or text-setting drift MUST fail unit tests naming the setting.
 Contributor docs MUST explain scope maintenance, metrics and language support.
@@ -505,6 +505,11 @@ Contributor docs MUST explain scope maintenance, metrics and language support.
 - **WHEN** `pyproject.toml` or `alembic.ini` changes
 - **THEN** the file is in source scope and eligible for text/secret detection without
   assigning a false language or claiming general TOML/INI language rules
+
+#### Scenario: Compose definition changes
+- **WHEN** `compose.yaml` changes
+- **THEN** it is in source scope and eligible for text/secret detection without claiming
+  Dockerfile-specific rules apply to Compose
 
 #### Scenario: Secret detection configuration drifts
 - **WHEN** text inclusions no longer cover all scoped text files or are deactivated
