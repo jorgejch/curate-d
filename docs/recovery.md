@@ -408,11 +408,12 @@ prints that version.
 
 ## Known gaps
 
-The follow-up `harden-recovery-sweep`, which moves the sweep's writes out of its step,
-addresses the two that depend on that: writes outside the lock and the fork boundary.
-dbos-transact-py#886 is an upstream DBOS bug, left to a DBOS fix. The rest are accepted for
-this release: no replay compatibility check, redispatch count before the resume, resume after
-a cancel, schedule authority check to write, and prune re-read to delete.
+Two of these gaps come from the sweep writing from inside its step: writes outside the lock
+and the fork boundary. Moving those writes out of the step would address both; that follow-up
+is known and not yet done. dbos-transact-py#886 is an upstream DBOS bug, left to a DBOS fix.
+The rest are accepted for this release: no replay compatibility check, redispatch count
+before the resume, resume after a cancel, schedule authority check to write, and prune re-read
+to delete.
 
 - **Writes outside the lock.** Forks, cancels and resumes still commit on DBOS's own
   connections, not on the lock's session. The sweep detects a lost fence or version lock
