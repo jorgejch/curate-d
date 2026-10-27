@@ -81,6 +81,35 @@ Alert on these events:
 - `worker.drain_state_unknown`: a stopping worker could not read whether it left workflows
   running, so it keeps its executor lease until the process exits. If it repeats, check the
   database's reachability at shutdown.
+- `recovery_sweep.target_unregistered`: the target, DBOS's latest version, has no
+  `lease_versions` row, although its workers registered it at startup: the row was removed
+  since, by hand or by restoring a dump taken before the target registered. Without the
+  target's registration time no other version can be ordered against it, so every older
+  version's rows are in `failed`, every tick. Only a worker's startup registers a version:
+  restart a worker of the target (`kubectl -n <namespace> rollout restart
+  statefulset/curate-d-worker-io`), and the next tick forks. The new row carries the
+  restart's time, so first check `lease_versions` for a build newer than the target, as after
+  a rollback: re-registering would order the target after it, and the sweep would fork that
+  build's rows onto older code. If there is one, pause the sweep (Kill switch) until that
+  build is rolled forward.
+- `staging.supervisor_failed`: a worker's staging event loop died after startup, of an error
+  its idle cleanup does not catch (`error_type` names it). The worker keeps dequeuing, but on
+  that pod every step that stages or reads staged content fails, as staging is no longer
+  running, and on an I/O worker idle cleanup has stopped. Nothing restarts the worker: delete
+  the pod that logged it (`kubectl -n <namespace> delete pod <pod>`), which restarts it
+  through staging readiness, then find the cause in its logs.
+
+Logged at ERROR or above, not alerted on, because the restart that follows repairs them:
+
+- `executor_lease.lost` and `worker.lease_lost_exiting` (CRITICAL): a worker's lease monitor,
+  which polls every 5 s, found its lease session no longer holding every lock, or broken. The
+  worker shuts DBOS down without draining and exits with status 75. Kubernetes restarts the
+  pod, which takes the lease again before launch, and DBOS's startup recovery resumes its
+  PENDING rows; a pod that does not come back leaves them to the sweep's dead-executor
+  re-enqueue. If a worker keeps restarting with status 75, check the pooler under
+  [Connection pooling](#connection-pooling). In the operator sweep, `executor_lease.lost`
+  names `version-lease <version>`, `operator_sweep.version_lease_lost` follows, and the
+  command exits `3`: run it again.
 
 ## Connection pooling
 
@@ -121,11 +150,39 @@ taxonomy check and retired fields. A version in force that it cannot read, such 
 naming a profile it dropped or a template set conditioned on an unknown `media_kind`, fails
 every read of its kind: reconciliation, classification, review resolution and dry runs fail
 with a `ConfigurationError`, `GET /configuration/<kind>` fails, and
-`PUT /configuration/taxonomy` is refused. Check the stored versions first:
+`PUT /configuration/taxonomy` is refused. Check the stored versions first, with
+`python -m curate_d.configuration.verify` run from the image about to be deployed. An
+`exec` into the running workers runs the current build instead. Run it in a one-off pod
+built, as the reset's helper pod is (`infrastructure/reset/reset-environment.sh`), from the
+I/O worker's pod template (its environment, service account and database settings), with
+only the image swapped for the new tag:
 
 ```bash
-kubectl -n <namespace> exec statefulset/curate-d-worker-io -- python -m curate_d.configuration.verify
+NS=<namespace> POD=curate-d-config-verify IMAGE=ghcr.io/jorgejch/curate-d:<new tag>
+kubectl -n "$NS" get statefulset/curate-d-worker-io -o json | jq --arg pod "$POD" --arg image "$IMAGE" '
+  .spec.template.spec as $spec | {
+    apiVersion: "v1", kind: "Pod",
+    metadata: {name: $pod, labels: {app: "curate-d", component: "config-verify"}},
+    spec: ($spec | del(.initContainers) | .restartPolicy = "Never" | .containers = [
+      .containers[] | select(.name == "worker")
+      | del(.ports, .livenessProbe, .readinessProbe, .startupProbe, .args)
+      | .image = $image | .command = ["python", "-m", "curate_d.configuration.verify"]
+    ])
+  }' | kubectl -n "$NS" apply -f -
+deadline=$((SECONDS + 600))
+until phase=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.status.phase}') &&
+  [[ $phase == Succeeded || $phase == Failed ]]; do
+  ((SECONDS < deadline)) || { echo "timed out in phase $phase" >&2; break; }
+  sleep 3
+done
+kubectl -n "$NS" logs "$POD"
+kubectl -n "$NS" get pod "$POD" -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}{"\n"}'
+kubectl -n "$NS" delete pod "$POD"
 ```
+
+The `exitCode` read prints the exit status in the table below. A new build that needs a
+setting the current template lacks exits `2` (`configuration_verify.setup_failed`); add it to
+the container's `env` in the `jq` filter.
 
 - **When:** before the rollout, from the image about to be deployed, against the target
   database. Run from the current build, it checks nothing the new build changed.
@@ -408,11 +465,12 @@ prints that version.
 
 ## Known gaps
 
-The follow-up `harden-recovery-sweep`, which moves the sweep's writes out of its step,
-addresses the two that depend on that: writes outside the lock and the fork boundary.
-dbos-transact-py#886 is an upstream DBOS bug, left to a DBOS fix. The rest are accepted for
-this release: no replay compatibility check, redispatch count before the resume, resume after
-a cancel, schedule authority check to write, and prune re-read to delete.
+Two of these gaps come from the sweep writing from inside its step: writes outside the lock
+and the fork boundary. Moving those writes out of the step would address both; that follow-up
+is known and not yet done. dbos-transact-py#886 is an upstream DBOS bug, left to a DBOS fix.
+The rest are accepted for this release: no replay compatibility check, redispatch count
+before the resume, resume after a cancel, schedule authority check to write, and prune re-read
+to delete.
 
 - **Writes outside the lock.** Forks, cancels and resumes still commit on DBOS's own
   connections, not on the lock's session. The sweep detects a lost fence or version lock

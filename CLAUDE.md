@@ -131,7 +131,8 @@ how it is made idempotent, whether it belongs in a workflow — against the `dbo
   `MAX_SWEEP_REDISPATCHES` per application version (`recovery_sweep.redispatch_cap`). Before
   each fork and before every cancel, it asks the fence's and the version lock's sessions
   whether they still hold; a loss stops the batch (`recovery_sweep.version_lock_lost`).
-  `harden-recovery-sweep` moves the writes out of the step.
+  Moving the writes out of the step is a known follow-up, not yet done
+  (`docs/recovery.md`, Known gaps).
 - Version lease: every process that runs workflows (the workers, nothing else) registers its
   version in `lease_versions` before launch and holds that version's advisory lock shared, on
   its executor lease's session, until it exits (`runtime/version_lease.py`). The sweep forks
