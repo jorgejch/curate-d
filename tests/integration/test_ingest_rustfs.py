@@ -207,3 +207,71 @@ async def test_a_replaced_version_is_refused_as_superseded(
         assert (await inspect_staged(reader.reader, second)).media_type == "text/plain"
     finally:
         await writer.occupancy.release(StagingKey(second.key))
+
+
+async def _objects_under(writer: StagingWriterBackend, key: str) -> list[str]:
+    """The completed objects RustFS holds under one staging key."""
+    return [
+        ref.object_key
+        async for ref in writer.store.list_objects()
+        if ref.object_key.startswith(f"{key}/")
+    ]
+
+
+async def test_a_consumed_attempt_leaves_the_bucket(
+    writer: StagingWriterBackend,
+    reader: StagingReaderBackend,
+    files: tuple[StubPCloud, PCloudFiles],
+    tmp_path: Path,
+) -> None:
+    """Released by the attempt that was read, the object leaves RustFS, not only the index."""
+    pcloud, client = files
+    staged = await _stage(
+        client, writer, _source(pcloud.file("/read.txt", b"read")), tmp_path / "f"
+    )
+    assert staged.attempt_id is not None
+    assert await _objects_under(writer, staged.key) == [f"{staged.key}/{staged.attempt_id.hex}"]
+    assert (await inspect_staged(reader.reader, staged)).media_type == "text/plain"
+
+    report = await writer.occupancy.release(StagingKey(staged.key), attempt_id=staged.attempt_id)
+
+    assert (report.deleted, report.freed_bytes) == (True, len(b"read"))
+    assert await _objects_under(writer, staged.key) == []
+    assert await writer.index.lookup(StagingKey(staged.key)) is None
+
+
+async def test_a_release_of_a_replaced_attempt_leaves_the_newer_one_in_the_bucket(
+    writer: StagingWriterBackend,
+    reader: StagingReaderBackend,
+    files: tuple[StubPCloud, PCloudFiles],
+    tmp_path: Path,
+) -> None:
+    """A late release by the old version's reader cannot take the bytes a newer one needs."""
+    pcloud, client = files
+    stub = pcloud.file("/doc.txt", b"one")
+    source = _source(stub)
+    first = await _stage(client, writer, source, tmp_path / "f1")
+    pcloud.modify(stub, b"two")
+    second = await _stage(
+        client,
+        writer,
+        source.model_copy(
+            update={
+                "reported_digests": (
+                    StrongFingerprint(
+                        algorithm=HashAlgorithm.SHA1, digest=hashlib.sha1(b"two").hexdigest()
+                    ),
+                )
+            }
+        ),
+        tmp_path / "f2",
+    )
+    try:
+        assert second.attempt_id is not None and second.attempt_id != first.attempt_id
+        report = await writer.occupancy.release(StagingKey(first.key), attempt_id=first.attempt_id)
+
+        assert report.deleted is False
+        assert await _objects_under(writer, second.key) == [f"{second.key}/{second.attempt_id.hex}"]
+        assert (await inspect_staged(reader.reader, second)).media_type == "text/plain"
+    finally:
+        await writer.occupancy.release(StagingKey(second.key))

@@ -308,10 +308,14 @@ async def test_a_full_cycle_files_every_file_where_expected_and_verified(
                 .select_from(staged_objects)
                 .where(staged_objects.c.staging_key.in_(keys))
             )
-        # Staged through RustFS: the S3 backend's index holds every fetched source, and the
+        # Staged through RustFS and released once read: every fetched source's attempt was
+        # released through the S3 backend's index, which holds none of them now, and the
         # in-memory staging the harness would otherwise install was never written to.
-        assert staged == len(keys)
-        assert pipeline.staging.index.registrations == {}
+        assert staged == 0
+        for key in keys:
+            released = await pipeline.workflows(f"release-staged:{key}:")
+            assert [status for _, status in released] == ["SUCCESS"], key
+        assert pipeline.staging.store.uploads == 0
 
 
 async def test_a_second_cycle_transfers_nothing_and_records_nothing_twice(

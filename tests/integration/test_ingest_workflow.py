@@ -29,6 +29,7 @@ from curate_d.ingest.pipeline import StagedRef, observed_marker
 from curate_d.ledger.mapping import to_audit_entry
 from curate_d.ledger.tables import audit_entries
 from curate_d.runtime.queues import QueueName
+from curate_d.staging.keys import derive_staging_key
 from curate_d.workflows.ingest import (
     FingerprintOutcome,
     IngestOutcome,
@@ -126,6 +127,68 @@ async def test_identical_content_at_two_paths_is_one_content_object(pipeline: Pi
     assert len(sources) == 2
     assert sources[0].content_object_id == sources[1].content_object_id
     assert len(await pipeline.contents()) == 1
+
+
+async def test_consumed_staged_versions_leave_staging(pipeline: Pipeline) -> None:
+    """Once fingerprinting and classification have read them, no staged bytes remain.
+
+    Two of the three files share content, so classification reads one copy and the
+    other is released by its fingerprinting alone.
+    """
+    tag = pipeline.account.encode()
+    pipeline.pcloud.file("/a/one.txt", b"shared " + tag)
+    pipeline.pcloud.file("/b/two.txt", b"shared " + tag)
+    pipeline.pcloud.file("/c/own.txt", b"own " + tag)
+
+    await _scan(pipeline)
+    await pipeline.settle()
+
+    sources = await pipeline.sources()
+    assert all(s.state is SourceObjectState.FINGERPRINTED for s in sources)
+    assert pipeline.staging.index.registrations == {}
+    assert pipeline.staging.store.objects == {}
+    for source in sources:
+        released = await pipeline.workflows(f"release-staged:{derive_staging_key(source.id)}:")
+        assert [status for _, status in released] == ["SUCCESS"], source.path
+
+
+async def test_the_copy_classification_reads_waits_for_classification(
+    scan_only: Pipeline,
+) -> None:
+    """A second source of the same content is released at once; the first copy is not."""
+    same = b"twice " + scan_only.account.encode()
+    scan_only.pcloud.file("/a/one.txt", same)
+    scan_only.pcloud.file("/b/two.txt", same)
+    await _scan(scan_only)
+    first, second = await scan_only.sources()
+
+    for source in (first, second):
+        observed = observed_marker(source)
+        with SetWorkflowID(f"test-ingest-{uuid4()}"):
+            assert await ingest_source(source.id, observed) is IngestOutcome.STAGED
+        key = derive_staging_key(source.id)
+        registration = scan_only.staging.index.registrations[key]
+        with SetWorkflowID(f"test-fingerprint-{uuid4()}"):
+            outcome = await fingerprint_source(
+                source.id,
+                observed,
+                StagedRef(
+                    key=key,
+                    sha256=registration.sha256,
+                    sha1=hashlib.sha1(same).hexdigest(),
+                    size_bytes=registration.size_bytes,
+                    attempt_id=registration.attempt_id,
+                ),
+            )
+        assert outcome is FingerprintOutcome.FINGERPRINTED
+
+    first_key, second_key = derive_staging_key(first.id), derive_staging_key(second.id)
+    assert await scan_only.workflows(f"release-staged:{first_key}:") == []
+    assert first_key in scan_only.staging.index.registrations
+    second_attempt = scan_only.staging.index.registrations[second_key].attempt_id
+    assert await scan_only.workflows(f"release-staged:{second_key}:") == [
+        (f"release-staged:{second_key}:{second_attempt.hex}", "ENQUEUED")
+    ]
 
 
 async def test_an_unreadable_file_fails_alone_without_content(
@@ -241,6 +304,7 @@ async def test_a_snapshot_failing_verification_marks_the_source_unreadable(
                 sha256=registration.sha256,
                 sha1="0" * 40,
                 size_bytes=registration.size_bytes,
+                attempt_id=registration.attempt_id,
             ),
         )
 
@@ -249,3 +313,7 @@ async def test_a_snapshot_failing_verification_marks_the_source_unreadable(
     assert failed.state is SourceObjectState.FAILED
     assert failed.content_object_id is None
     assert AuditEntryType.SOURCE_READ_FAILED in await _audit(ledger_engine, failed)
+    # Nothing can use the bytes, so they are handed to the I/O profile to release.
+    assert await scan_only.workflows(f"release-staged:{key}:") == [
+        (f"release-staged:{key}:{registration.attempt_id.hex}", "ENQUEUED")
+    ]

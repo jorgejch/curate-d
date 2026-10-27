@@ -7,7 +7,9 @@ reads a verified snapshot and records the content object. Neither profile does t
 other's half: the I/O profile decodes nothing, and the CPU profile reaches no provider.
 
 Every ledger write is a datasource transaction; provider calls and staging operations are
-steps. Failures take one of four routes:
+steps. Once nothing else will read a staged version, `fingerprint_source` hands its release
+to the I/O profile (`staged_release.py`); the copy classification reads is classification's
+to release. Failures take one of four routes:
 
 - The provider cannot deliver the file, or its bytes cannot be read: the source is marked
   failed with the reason, no content object is created, and nothing else waits on it.
@@ -50,7 +52,7 @@ from curate_d.providers.errors import (
 )
 from curate_d.runtime.queues import QueueName
 from curate_d.runtime.services import ServicesNotInstalledError, current
-from curate_d.runtime.workflow_ids import ingest_workflow_id
+from curate_d.runtime.workflow_ids import classification_workflow_id, ingest_workflow_id
 from curate_d.staging.errors import (
     StagedEntryMissingError,
     StagedEntrySupersededError,
@@ -58,6 +60,7 @@ from curate_d.staging.errors import (
     StagingError,
 )
 from curate_d.workflows.classify import enqueue_classification
+from curate_d.workflows.staged_release import enqueue_staged_release, reads_staged
 
 logger = get_logger(__name__)
 
@@ -351,6 +354,8 @@ async def fingerprint_source(
             f"staged content could not be read: {error}",
             AuditEntryType.SOURCE_READ_FAILED,
         )
+        # The source is failed for this version; the next scan's ingest stages afresh.
+        await enqueue_staged_release(staged)
         return FingerprintOutcome.UNREADABLE
     record = await current().datasource.run_tx_step_async(
         {"name": "record_fingerprint"},
@@ -361,6 +366,8 @@ async def fingerprint_source(
         inspection,
     )
     if record is None:
+        # The source moved on; its newer version stages an attempt of its own.
+        await enqueue_staged_release(staged)
         return FingerprintOutcome.SUPERSEDED
     logger.info(
         "ingest.fingerprinted",
@@ -368,7 +375,12 @@ async def fingerprint_source(
         content_object_id=str(record.content_object_id),
         new_content=record.newly_created,
     )
-    await enqueue_classification(
-        content_fingerprint(staged.sha256), record.content_object_id, staged
-    )
+    fingerprint = content_fingerprint(staged.sha256)
+    await enqueue_classification(fingerprint, record.content_object_id, staged)
+    # Identical content found at several sources is classified once, from whichever copy
+    # reached classification first; that copy is classification's to release.
+    if staged.attempt_id is not None and not await reads_staged(
+        classification_workflow_id(fingerprint), staged
+    ):
+        await enqueue_staged_release(staged)
     return FingerprintOutcome.FINGERPRINTED

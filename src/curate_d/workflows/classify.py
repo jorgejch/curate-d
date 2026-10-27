@@ -75,6 +75,7 @@ from curate_d.runtime.services import ServicesNotInstalledError, current
 from curate_d.runtime.workflow_ids import classification_workflow_id
 from curate_d.staging.errors import StagedEntryMissingError
 from curate_d.staging.keys import StagingKey, derive_staging_key
+from curate_d.workflows.staged_release import enqueue_staged_release
 
 logger = get_logger(__name__)
 
@@ -317,9 +318,12 @@ async def classify_content(
     """Classify one content object with the cheap tiers, escalating if they cannot settle it.
 
     `generation` names a repeat classification, such as one after the taxonomy grew, so
-    its escalation is a remote call of its own rather than the earlier one.
+    its escalation is a remote call of its own rather than the earlier one. The staged
+    version is released once read, or once an existing classification makes reading it
+    unnecessary; a run that fails or is cancelled before reading it leaves it staged.
     """
     if await _existing_step(content_object_id) is not None:
+        await enqueue_staged_release(staged)
         return ClassifyOutcome.REUSED
     content, paths = await _content_step(content_object_id)
     if content is None:
@@ -328,6 +332,9 @@ async def classify_content(
         {"name": "active_taxonomy"}, _taxonomy_tx
     )
     prepared = await _prepare_step(content, paths, staged, taxonomy)
+    # The bytes have been read and the prepared result is checkpointed, so neither a later
+    # step, the remote tier nor a resumed run reads them again.
+    await enqueue_staged_release(staged)
     decision = prepared.decision
     if decision.verdict is GateVerdict.ESCALATE and prepared.remote is not None:
         suffix = f":{generation}" if generation else ""

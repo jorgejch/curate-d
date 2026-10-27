@@ -101,9 +101,10 @@ infrequent effect that `maintenance` at a low priority already serves).
 
 ### 4. Where each consumer releases
 
-`classify_content` releases the `staged` it was given on every path it returns by:
-`REUSED` (it read nothing), `ESCALATED` (the prepared request holds what the remote tier
-needs), `CLASSIFIED` and `REVIEW`. An exception or cancellation releases nothing.
+`classify_content` releases the `staged` it was given as soon as `_prepare_step` returns:
+that step's result is checkpointed, so no later step, no `classify_remote` (it carries
+the prepared request) and no resumed run reads the bytes again. On the `REUSED` path it
+releases without reading. A run that fails or is cancelled before then releases nothing.
 
 `fingerprint_source` releases its own `staged`:
 
@@ -155,9 +156,10 @@ checkpointed patterns.
 
 - [One extra workflow per consumed file] → a few system-table rows each, pruned with the
   rest of the workflow history; a release is one writer-lock holding and one delete.
-- [Rewinding or forking a `classify_content` that already released] → its re-run
-  classifies from names and media type (the existing missing-entry path); restage the
-  source (a full rescan) to classify from the bytes. Recorded in `docs/rewind.md`.
+- [Rewinding or forking a `classify_content` to a step at or before `_prepare_step` after
+  it released] → its re-run classifies from names and media type (the existing
+  missing-entry path); restage the source (a full rescan) to classify from the bytes.
+  Recorded in `docs/rewind.md`.
 - [Two sources with identical content fingerprinted at once] → only the copy
   classification was handed waits for classification; the decision reads a fixed workflow
   input, so neither copy is released early.

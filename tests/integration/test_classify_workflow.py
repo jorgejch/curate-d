@@ -5,6 +5,7 @@ that answers as told and counts its calls.
 """
 
 import asyncio
+import hashlib
 from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -44,12 +45,20 @@ from curate_d.domain import (
     Taxonomy,
     TaxonomyField,
 )
+from curate_d.ingest.pipeline import StagedRef
 from curate_d.ledger.mapping import to_audit_entry
 from curate_d.ledger.tables import audit_entries, classification_holds
 from curate_d.runtime import services
 from curate_d.runtime.workflow_ids import classification_workflow_id
-from curate_d.workflows.classify import reclassify_rejected, release_holds
+from curate_d.staging.keys import derive_staging_key
+from curate_d.workflows.classify import (
+    ClassifyOutcome,
+    classify_content,
+    reclassify_rejected,
+    release_holds,
+)
 from curate_d.workflows.scan import scan_root
+from curate_d.workflows.staged_release import release_workflow_id
 from tests.integration.pipeline_harness import Pipeline, running_pipeline
 from tests.stubs import media
 
@@ -217,6 +226,9 @@ async def test_what_the_cheap_tiers_cannot_settle_goes_to_the_configured_model(
         assert result.tier is ClassificationTier.REMOTE_MODEL
         assert result.model_id == "stub/model-2026"
         assert remote.models == ["stub/model"]
+        # The remote tier works from the prepared request, so the bytes went before it ran.
+        assert pipeline.staging.index.registrations == {}
+        assert pipeline.staging.store.objects == {}
 
 
 async def test_malformed_remote_output_goes_to_review_not_the_ledger(
@@ -277,6 +289,38 @@ async def test_repeat_content_reuses_its_classification(
         [stored] = await pipeline.contents()
         classify_runs = await pipeline.workflows(classification_workflow_id(stored.fingerprint))
         assert len(classify_runs) == 1
+        # One copy was classification's to release, the other two their fingerprinting's.
+        assert pipeline.staging.index.registrations == {}
+        assert pipeline.staging.store.objects == {}
+
+
+async def test_a_reused_classification_releases_the_copy_it_was_handed(
+    settings: Settings, ledger_engine: AsyncEngine, tmp_path: Path
+) -> None:
+    """A classification run that finds one already recorded reads nothing and releases."""
+    async with running_pipeline(settings, ledger_engine, tmp_path) as pipeline:
+        photo = media.photo(camera=("Canon", f"EOS R{pipeline.account}"))
+        pipeline.pcloud.file("/IMG_0002.JPG", photo)
+        await _scan(pipeline)
+        [source] = await pipeline.sources()
+        assert source.content_object_id is not None
+        assert await _classification(ledger_engine, source.content_object_id) is not None
+        staged = StagedRef(
+            key=derive_staging_key(source.id),
+            sha256=hashlib.sha256(photo).hexdigest(),
+            sha1=hashlib.sha1(photo).hexdigest(),
+            size_bytes=len(photo),
+            attempt_id=uuid4(),
+        )
+
+        with SetWorkflowID(f"test-classify-{uuid4()}"):
+            outcome = await classify_content(source.content_object_id, staged)
+        await pipeline.settle()
+
+        assert outcome is ClassifyOutcome.REUSED
+        assert await pipeline.workflows(release_workflow_id(staged)) == [
+            (release_workflow_id(staged), "SUCCESS")
+        ]
 
 
 async def test_the_spend_cap_holds_content_instead_of_misclassifying_it(
