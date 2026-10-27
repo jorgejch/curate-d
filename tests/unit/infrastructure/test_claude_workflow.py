@@ -139,6 +139,11 @@ def test_the_checkout_keeps_full_history() -> None:
     assert cast(Document, checkout["with"])["fetch-depth"] == 0
 
 
+def test_claude_signs_its_commits() -> None:
+    """Commits go through the GitHub API, signed, so the verified-commits rule accepts them."""
+    assert cast(Document, _step("Run Claude Code")["with"])["use_commit_signing"] is True
+
+
 def test_every_mcp_tool_allowed_is_a_read_tool_of_a_configured_server() -> None:
     """An allowed MCP tool names a configured server and one of its read tools."""
     servers = _mcp_servers()
