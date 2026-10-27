@@ -17,19 +17,19 @@ on the one before it, so nothing here splits usefully across agents.
 
 ## 4. Consumers release
 
-- [ ] 4.1 `fingerprint_source` enqueues the release on the paths in design decision 4. Verify in `tests/integration/test_ingest_workflow.py`: a fingerprinted source whose classification reads another source's copy leaves staging; an unreadable snapshot is released; the copy classification was handed stays until classification ends.
-- [ ] 4.2 `classify_content` enqueues the release of its `staged` on every return. Verify in `tests/integration/test_classify_workflow.py` (or the ingest suite's pipeline): after a full cycle every fingerprinted source's entry has left the in-memory staging, and a reused classification releases the copy it was handed.
-- [ ] 4.3 Update `tests/integration/test_end_to_end.py`, whose RustFS cycle asserts every fetched source is still in the cache index: assert instead that each was staged through RustFS and released. Verify with that test under the stack lock.
-- [ ] 4.4 Add a RustFS integration test showing a consumed object leaves the store (`tests/integration/test_ingest_rustfs.py`): stage, inspect, release by attempt; the object is gone from the bucket listing, and a release naming a superseded attempt leaves the newer one. Verify with `--staging-backend=rustfs` under the stack lock.
+- [x] 4.1 `fingerprint_source` enqueues the release on the paths in design decision 4. Verify in `tests/integration/test_ingest_workflow.py`: a fingerprinted source whose classification reads another source's copy leaves staging; an unreadable snapshot is released; the copy classification was handed stays until classification ends.
+- [x] 4.2 `classify_content` enqueues the release of its `staged` on every return. Verify in `tests/integration/test_classify_workflow.py` (or the ingest suite's pipeline): after a full cycle every fingerprinted source's entry has left the in-memory staging, and a reused classification releases the copy it was handed.
+- [x] 4.3 Update `tests/integration/test_end_to_end.py`, whose RustFS cycle asserts every fetched source is still in the cache index: assert instead that each was staged through RustFS and released. Verify with that test under the stack lock.
+- [x] 4.4 Add a RustFS integration test showing a consumed object leaves the store (`tests/integration/test_ingest_rustfs.py`): stage, inspect, release by attempt; the object is gone from the bucket listing, and a release naming a superseded attempt leaves the newer one. Verify with `--staging-backend=rustfs` under the stack lock.
 
 ## 5. Documentation
 
-- [ ] 5.1 `docs/staging.md`: rewrite the "Release" bullet under "DBOS step boundaries", add `staging.released` and `staging.release_failed` to the log events table, and correct any other text saying entries leave only by age or pressure. `docs/rewind.md`: add the release child to the parents table and note that a rewound classification after its release classifies from names. Verify by `grep -n "No step releases" docs/staging.md` returning nothing.
+- [x] 5.1 `docs/staging.md`: rewrite the "Release" bullet under "DBOS step boundaries", add `staging.released` and `staging.release_failed` to the log events table, and correct any other text saying entries leave only by age or pressure. `docs/rewind.md`: add the release child to the parents table and note that a rewound classification after its release classifies from names. Verify by `grep -n "No step releases" docs/staging.md` returning nothing.
 
 ## 6. Checks
 
-- [ ] 6.1 `make check` green (lint incl. `workflow_audit`, mypy, unit suite with coverage gate).
-- [ ] 6.2 Under the stack lock: `make test-stack`, then `uv run pytest tests/integration/test_staging_occupancy.py tests/integration/test_ingest_rustfs.py tests/integration/test_ingest_workflow.py tests/integration/test_classify_workflow.py tests/integration/test_end_to_end.py --staging-backend=rustfs`; release the lock.
+- [x] 6.1 `make check` green (lint incl. `workflow_audit`, mypy, unit suite with coverage gate).
+- [x] 6.2 Under the stack lock: `make test-stack`, then `uv run pytest tests/integration/test_staging_occupancy.py tests/integration/test_ingest_rustfs.py tests/integration/test_ingest_workflow.py tests/integration/test_classify_workflow.py tests/integration/test_end_to_end.py --staging-backend=rustfs`; release the lock.
 
 ## Workflow follow-up
 
