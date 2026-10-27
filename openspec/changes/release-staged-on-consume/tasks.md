@@ -13,7 +13,7 @@ on the one before it, so nothing here splits usefully across agents.
 
 ## 3. The release workflow
 
-- [ ] 3.1 Add `workflows/staged_release.py` (`release_staged_entry`, `_release_step`, `enqueue_staged_release`, `classification_reads`) and list it in `workflows/registry.py` (design decisions 3, 5, 6). Verify with unit tests in `tests/unit/workflows/test_staged_release.py`: the step releases through the writer on the staging loop; a step failure after retries returns `FAILED` and logs `staging.release_failed`; a repeated release no-ops; no writer raises; an unknown attempt enqueues nothing; the ID is deterministic; `classification_reads` matches only a `StagedRef` input with the same attempt, and treats a missing status as not holding.
+- [x] 3.1 Add `workflows/staged_release.py` (`release_staged_entry`, `_release_step`, `enqueue_staged_release`, `reads_staged`) and list it in `workflows/registry.py` (design decisions 3, 5, 6). Verify with unit tests in `tests/unit/workflows/test_staged_release.py`: the step releases through the writer on the staging loop; a step failure after retries returns `FAILED` and logs `staging.release_failed`; a repeated release no-ops; no writer raises; an unknown attempt enqueues nothing; the ID is deterministic; `reads_staged` matches only a `StagedRef` input with the same attempt, and treats a missing status as not holding.
 
 ## 4. Consumers release
 

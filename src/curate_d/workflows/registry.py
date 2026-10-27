@@ -20,10 +20,11 @@ from curate_d.workflows import (
     rescan,
     retention,
     scan,
+    staged_release,
 )
 
 # Imported for their DBOS registrations; nothing here calls them directly.
-_REGISTERED = (dry_run, ingest, placement)
+_REGISTERED = (dry_run, ingest, placement, staged_release)
 
 
 def schedules_for(profile: WorkerProfile, settings: Settings) -> list[ScheduleInput]:
