@@ -104,18 +104,25 @@ cleanup of unrelated code.
 
 [`sonar-project.properties`](sonar-project.properties) defines the CI scanner's scope:
 
-| Tree | Classification | Coverage | Duplication |
+| Path | Classification | Coverage | Duplication |
 | --- | --- | --- | --- |
 | `src/` | Source | Unit tests only, from `coverage.xml` | Included |
 | `ops/` | Source | Excluded | Included, including copies from `src/` |
 | `migrations/` | Source | Excluded | Included |
+| `docker/` | Source | Excluded | Where supported by the analyzer |
+| `pyproject.toml`, `alembic.ini` | Source (text/secret detection) | Excluded | No dedicated language analyzer |
 | `tests/` | Test | Not measured | Not measured |
 
-All other paths are outside ordinary Sonar analysis, including Dockerfiles,
-GitHub workflows, root files, docs and OpenSpec artifacts. This deliberately trades broad
-Sonar findings for explicit, stable scope; it does not configure other security scanners.
+All other paths are outside ordinary Sonar analysis, including GitHub workflows, unlisted
+root files, docs and OpenSpec artifacts. This deliberately trades broad Sonar findings
+for explicit, stable scope; it does not configure other security scanners.
 
-Adding an unrelated directory needs no exclusion edit. To add a production tree, update
+Text inclusions cover all scoped text files so TOML and INI receive secret detection
+without pretending to be Python. This does not add general TOML/INI language rules or
+package vulnerability scanning. Docker analysis checks the image definition, not the
+built image; check scan logs for parsing warnings with newer Dockerfile syntax.
+
+Adding an unrelated directory needs no exclusion edit. To add a source directory or file, update
 `sonar.sources`, decide whether it belongs in coverage (otherwise extend
 `sonar.coverage.exclusions`), and update the scope tests in
 `tests/unit/infrastructure/test_sonar_properties.py` and the release-pipeline spec.
@@ -129,7 +136,8 @@ local tests validate the properties, not Cloud-side settings or computed metrics
 
 References: [initial scope](https://docs.sonarsource.com/sonarqube-cloud/managing-your-projects/project-analysis/setting-analysis-scope/setting-initial-scope),
 [metric exclusions](https://docs.sonarsource.com/sonarqube-cloud/managing-your-projects/project-analysis/setting-analysis-scope/exclude-from-coverage-duplication),
-[Python coverage](https://docs.sonarsource.com/sonarqube-cloud/analyzing-source-code/test-coverage/python-test-coverage).
+[Python coverage](https://docs.sonarsource.com/sonarqube-cloud/analyzing-source-code/test-coverage/python-test-coverage),
+[secret detection](https://docs.sonarsource.com/sonarqube-cloud/analyzing-source-code/languages/secrets).
 
 ## Code conventions
 

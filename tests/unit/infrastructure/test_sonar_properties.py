@@ -36,11 +36,23 @@ def _assert_excludes_exactly(key: str, expected: set[str]) -> None:
 
 
 def test_analysis_uses_explicit_source_and_test_roots() -> None:
-    """Application, operations and migrations are sources; tests/ is explicitly test code."""
+    """Application, operations, migrations, image and config are sources; tests/ is test code."""
     properties = _properties()
-    for key, expected in {"sonar.sources": "src,ops,migrations", "sonar.tests": "tests"}.items():
+    expected_roots = {
+        "sonar.sources": "src,ops,migrations,docker,pyproject.toml,alembic.ini",
+        "sonar.tests": "tests",
+    }
+    for key, expected in expected_roots.items():
         actual = properties.get(key)
         assert actual == expected, f"{key} must be {expected!r}, got {actual!r}"
+
+
+def test_analysis_paths_exist() -> None:
+    """Every explicitly selected source or test path exists in this repository."""
+    properties = _properties()
+    for key in ("sonar.sources", "sonar.tests"):
+        for entry in properties[key].split(","):
+            assert (REPOSITORY_ROOT / entry.strip()).exists(), f"{key} path {entry!r} is missing"
 
 
 def test_source_and_test_roots_are_disjoint() -> None:
@@ -60,12 +72,15 @@ def test_source_and_test_roots_are_disjoint() -> None:
 
 
 def test_coverage_counts_src_only() -> None:
-    """Operations and migrations are analysed without lowering application coverage."""
-    _assert_excludes_exactly("sonar.coverage.exclusions", {"ops/**", "migrations/**"})
+    """Non-application sources are analysed without lowering application coverage."""
+    _assert_excludes_exactly(
+        "sonar.coverage.exclusions",
+        {"ops/**", "migrations/**", "docker/**", "pyproject.toml", "alembic.ini"},
+    )
 
 
 def test_duplication_counts_all_source_roots() -> None:
-    """All three source roots count toward duplication without exclusions."""
+    """All supported sources remain eligible for duplication without exclusions."""
     assert "sonar.cpd.exclusions" not in _properties(), "Remove sonar.cpd.exclusions"
 
 
@@ -82,11 +97,20 @@ def test_analysis_needs_no_inclusions_or_exclusions() -> None:
 
 
 def test_no_out_of_scope_rule_suppression_remains() -> None:
-    """Dockerfiles outside the analysis roots need no rule suppression."""
+    """Dockerfiles now in scope receive checks without blanket rule suppressions."""
     stale = sorted(
         key for key in _properties() if key.startswith("sonar.issue.ignore.multicriteria")
     )
-    assert not stale, f"Remove out-of-scope Docker rule suppression settings: {stale}"
+    assert not stale, f"Remove blanket rule suppression settings: {stale}"
+
+
+def test_scoped_configuration_files_receive_text_analysis() -> None:
+    """TOML and INI files receive secret detection without pretending to be Python."""
+    properties = _properties()
+    expected = {"sonar.text.inclusions.activate": "true", "sonar.text.inclusions": "**/*"}
+    for key, value in expected.items():
+        assert properties.get(key) == value, f"{key} must be {value!r} for scoped text analysis"
+    assert "sonar.lang.patterns.py" not in properties, "Do not classify config files as Python"
 
 
 def test_project_identity_python_and_coverage_report_are_preserved() -> None:

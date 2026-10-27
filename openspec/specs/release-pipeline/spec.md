@@ -438,8 +438,9 @@ run the scan, and MUST fail when its token is missing rather than skip the analy
 - **THEN** the scan step runs and fails, and the job fails
 
 ### Requirement: SonarQube measures production code only
-SonarQube Cloud MUST count coverage on `src/` only, and duplication on `src/`, `ops/`
-and `migrations/`. It MUST explicitly classify `tests/` as test code, independently
+SonarQube Cloud MUST count coverage on `src/` only. All selected source paths MUST remain
+eligible for duplication measurement where their language analyzer supports it, without
+duplication exclusions. It MUST explicitly classify `tests/` as test code, independently
 of pytest configuration, so tests count toward neither metric. Coverage MUST import
 only `coverage.xml` from the unit suite. A scope or report-path drift MUST fail the unit
 suite naming the setting.
@@ -455,8 +456,9 @@ suite naming the setting.
   for them
 
 #### Scenario: Metric setting drifts
-- **WHEN** coverage exclusions no longer name exactly `ops/**` and `migrations/**`,
-  duplication exclusions are added, or the coverage report path changes
+- **WHEN** coverage exclusions no longer name exactly `ops/**`, `migrations/**`,
+  `docker/**`, `pyproject.toml` and `alembic.ini`, duplication exclusions are added,
+  or the coverage report path changes
 - **THEN** the unit suite fails naming the setting
 
 #### Scenario: New top-level directory left unlisted
@@ -467,29 +469,46 @@ suite naming the setting.
 - **WHEN** a migration has no unit coverage or copies a block from another source root
 - **THEN** it does not lower coverage, but remains eligible for duplication findings
 
+#### Scenario: Image and configuration coverage
+- **WHEN** `docker/`, `pyproject.toml` or `alembic.ini` has no unit coverage
+- **THEN** it does not lower application coverage
+
 ### Requirement: SonarQube analyses explicitly selected source and test trees
-SonarQube Cloud MUST use `src/`, `ops/` and `migrations/` as its only source roots and
-`tests/` as its only test root. These scopes MUST be disjoint and MUST NOT depend on
-pytest's `testpaths`. It MUST NOT enumerate other paths through exclusions or inclusions.
-Scope drift MUST fail the unit suite naming the setting. Contributor documentation MUST
-explain how to expand the roots and review metric scope.
+SonarQube Cloud MUST use `src/`, `ops/`, `migrations/`, `docker/`, `pyproject.toml` and
+`alembic.ini` as its only sources, and `tests/` as tests. Scopes MUST be disjoint,
+independent of pytest and free of source/test filters. Scoped text MUST be eligible for
+secret detection. Scope or text-setting drift MUST fail unit tests naming the setting.
+Contributor docs MUST explain scope maintenance, metrics and language support.
 
 #### Scenario: Existing non-source paths
-- **WHEN** a Dockerfile, workflow, root file, document or OpenSpec artifact changes
-- **THEN** SonarQube does not analyse it because it is outside the selected roots
+- **WHEN** a workflow, unlisted root file, document or OpenSpec artifact changes
+- **THEN** SonarQube does not analyse it because it is outside the selected paths
 
 #### Scenario: New top-level directory
-- **WHEN** a directory outside the selected roots is added
+- **WHEN** a directory outside the selected paths is added
 - **THEN** it receives no Sonar analysis, coverage or duplication measurement, without a
   new exclusion or test update
 
 #### Scenario: Source and test roots drift
-- **WHEN** a source or test root changes or a source root overlaps the test tree
+- **WHEN** a source or test path changes or a source path overlaps the test tree
 - **THEN** the unit suite fails naming the setting
 
 #### Scenario: Migration changes
 - **WHEN** a Python migration changes
 - **THEN** SonarQube analyses it as source code
+
+#### Scenario: Image definition changes
+- **WHEN** `docker/Dockerfile` changes
+- **THEN** it is in source scope for Docker analysis without blanket rule suppressions
+
+#### Scenario: Project and migration configuration changes
+- **WHEN** `pyproject.toml` or `alembic.ini` changes
+- **THEN** the file is in source scope and eligible for text/secret detection without
+  assigning a false language or claiming general TOML/INI language rules
+
+#### Scenario: Secret detection configuration drifts
+- **WHEN** text inclusions no longer cover all scoped text files or are deactivated
+- **THEN** the unit suite fails naming the setting
 
 ### Requirement: CI checkouts keep the token off disk
 The checks job, the coverage-report job and the integration job MUST check the repository
