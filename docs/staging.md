@@ -582,9 +582,34 @@ Workflows place external staging effects in DBOS steps
   and consume/close the handle within the step. An open handle cannot be a durable step
   result.
 - **Release:** the stage step releases a key before publishing a new version and when the
-  fetched bytes show a source change. No step releases an entry after its consumers
-  finish; it ages out through idle-cleanup eviction or ceiling admission. Release changes
-  recoverable cache state, not source-release authority.
+  fetched bytes show a source change. Once nothing else will read a staged version, its
+  readers release it ([staged_release.py](../src/curate_d/workflows/staged_release.py)).
+  The CPU profile has no release authority, so they enqueue `release_staged_entry` on the
+  I/O profile's `maintenance` queue, below scheduled housekeeping, under the ID
+  `release-staged:<key>:<attempt>`. Its step runs `occupancy.release(key, attempt_id=...)`,
+  which changes nothing unless that attempt is still the registered one: a key restaged
+  since holds a newer version.
+  - `fingerprint_source` releases its version when classification was handed another
+    source's copy of the same content (classification is keyed by fingerprint, so it reads
+    the first copy it was handed; the step that checks reads the classification workflow's
+    recorded inputs), when the snapshot fails verification, and when the source moved on.
+  - `classify_content` releases the version it was handed once `_prepare_step` has read
+    it, or at once when it reuses an existing classification. `classify_remote` reads no
+    bytes.
+  - A consumer that fails or is cancelled first releases nothing, so a resumed run can
+    still read the bytes. A reference with no `attempt_id` (one `reclassify_rejected` builds
+    from the ledger, or one pickled before attempts were carried) releases nothing either.
+  - A release that still fails after three attempts logs `staging.release_failed` and ends
+    `failed`; the consumer's outcome is unaffected. The idle sweep stays the backstop:
+    bytes whose registration went are collected at its next reconciliation, a registration
+    that stayed ages out through idle-cleanup eviction or ceiling admission.
+
+  Release changes recoverable cache state, not source-release authority.
+
+| Event | Level | Emitted by | Fields |
+| --- | --- | --- | --- |
+| `staging.released` | info | I/O, once per completed release step | `staging_key`, `attempt_id`, `deleted` (`false`: already gone, replaced, or a download holds it), `freed_bytes` |
+| `staging.release_failed` | warning | I/O, when a release step has failed every attempt | `staging_key`, `attempt_id`, `attempts`, `error_type` (the last failure's class name) |
 
 Do not call these effects directly from a replayed workflow body. Cache-index mutations
 are retry-safe operational state. Source and placement ledger mutations still require
@@ -757,6 +782,15 @@ Start a writer before the CPU workers: CPU readiness GETs the marker the writer 
 ### Endpoint IP change
 
 Restrict staging egress to the endpoint and re-check it if the provider changes addresses.
+
+### Release failures
+
+`staging.release_failed` means a consumed version could not be released after three
+attempts, usually because the cache index or the store was unreachable. Nothing is owed:
+the next idle sweep collects bytes whose registration went, and age eviction (24 h by
+default) a registration that stayed. A sustained rate points at the store or the database,
+not at the release. To reclaim at once, run the sweep as under
+[Residual multipart parts after a crash](#residual-multipart-parts-after-a-crash).
 
 ### Expired or missing staged object
 

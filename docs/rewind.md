@@ -84,15 +84,16 @@ decision.
 ## Parents and children
 
 Children are enqueued under deterministic IDs and none of curate.d's workflows reads a
-child's result.
+child's result. `fingerprint_source` reads its classification child's recorded inputs, to
+tell whether that child reads its staged copy; the inputs never change.
 
 | Parent | Children |
 |---|---|
 | `scan_root` | `ingest_source`, the scan's next part |
 | `full_rescan` | `ingest_source`, the rescan's next part |
 | `ingest_source` | `fingerprint_source` |
-| `fingerprint_source` | `ingest_source` (staged content evicted before it was read), `classify_content` |
-| `classify_content` | `classify_remote` |
+| `fingerprint_source` | `ingest_source` (staged content evicted before it was read), `classify_content`, `release_staged_entry` |
+| `classify_content` | `classify_remote`, `release_staged_entry` |
 | `release_holds` | `classify_remote` |
 | `reclassify_rejected` | `classify_content` |
 | `reconcile` | `place_content`, the run's next part |
@@ -102,6 +103,13 @@ child's result.
 
 The other scheduled workflows that start work (`scan_all`, `full_rescan_all`,
 `reconcile_all`, `check_destinations`) only start the parents above.
+
+A staged version is released once its readers are done (`docs/staging.md`, DBOS step
+boundaries), and the release child collapses on a rewind. Rewinding `fingerprint_source`
+to `_inspect_step`, or `classify_content` to `_prepare_step` or earlier, after that release
+finds the entry missing: fingerprinting ends as for evicted content, and classification
+works from names and media type alone. Re-ingest the source (a full rescan) to classify
+from the bytes.
 
 ## Placement
 
