@@ -27,6 +27,16 @@ ABORT_DAYS="${RUSTFS_STAGING_ABORT_DAYS:-1}"
 say() { echo "rustfs-init: $*"; }
 fail() { echo "rustfs-init: FAILED: $*" >&2; exit 1; }
 
+# `rc` imports a policy as written, so the templates in policies/ are rendered for this
+# bucket and prefix first. The render rejects an unusable bucket or prefix before anything
+# is created, so no identity is ever scoped to a grant the bucket does not match.
+READER_POLICY=/tmp/staging-reader.json
+WRITER_POLICY=/tmp/staging-writer.json
+sh /render_policy.sh /policies/staging-reader.json "$BUCKET" "$PREFIX" >"$READER_POLICY" \
+    || fail "could not render the reader policy for ${BUCKET}/${PREFIX}"
+sh /render_policy.sh /policies/staging-writer.json "$BUCKET" "$PREFIX" >"$WRITER_POLICY" \
+    || fail "could not render the writer policy for ${BUCKET}/${PREFIX}"
+
 say "waiting for ${ENDPOINT}"
 rc alias set admin "$ENDPOINT" "$ROOT_USER" "$ROOT_PASSWORD" >/dev/null \
     || fail "could not configure the admin alias"
@@ -97,9 +107,9 @@ rc admin user add admin "$WRITER_KEY" "$WRITER_SECRET" >/dev/null \
 # explicit `content/`. The grant widens each identity by exactly that one key, which the
 # application never writes; `test_neighbouring_keys_stay_denied` pins that nothing else
 # outside the prefix is reachable. OVH needs no such grant.
-rc admin policy create admin curate-d-staging-reader /policies/staging-reader.json >/dev/null \
+rc admin policy create admin curate-d-staging-reader "$READER_POLICY" >/dev/null \
     || fail "could not create the reader policy"
-rc admin policy create admin curate-d-staging-writer /policies/staging-writer.json >/dev/null \
+rc admin policy create admin curate-d-staging-writer "$WRITER_POLICY" >/dev/null \
     || fail "could not create the writer policy"
 
 rc admin policy attach admin curate-d-staging-reader --user "$READER_KEY" >/dev/null \

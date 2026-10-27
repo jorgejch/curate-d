@@ -35,6 +35,7 @@ from curate_d.config import S3AddressingStyle, Settings, StagingRole
 from curate_d.staging.errors import StagingNotReadyError
 from curate_d.staging.factories import check_staging_ready, refresh_readiness_marker
 from curate_d.staging.object_store import S3StagingObjectStore
+from tests.integration.rustfs_staging import provisioned_location
 
 if TYPE_CHECKING:
     from types_aiobotocore_s3.client import S3Client
@@ -92,13 +93,14 @@ def backend(staging_backend_name: str) -> Backend:
     endpoint = os.environ.get(env + "ENDPOINT", _LOCAL_ENDPOINTS.get(name, ""))
     if name == "ovh" and not endpoint.startswith("https://"):
         pytest.fail("OVH checks require certificate-verified HTTPS", pytrace=False)
-    prefix = os.environ.get(env + "PREFIX", "content/")
+    local_bucket, local_prefix = provisioned_location() if name != "ovh" else ("", "content/")
+    prefix = os.environ.get(env + "PREFIX", local_prefix)
     if not prefix or not prefix.endswith("/"):
         pytest.fail("disposable fixture prefix must be nonempty and end with /", pytrace=False)
     return Backend(
         name,
         endpoint,
-        os.environ.get(env + "BUCKET", "curate-d-staging"),
+        os.environ.get(env + "BUCKET", local_bucket),
         prefix,
         os.environ.get(env + "REGION", "us-east-va" if name == "ovh" else "us-east-1"),
         cast(

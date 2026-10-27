@@ -24,21 +24,21 @@ from curate_d.staging.keys import StagingKey
 from curate_d.staging.object_store import S3StagingObjectStore
 from curate_d.staging.objects import StagedObject
 from curate_d.staging.snapshots import LocalScratchBudget, LocalSnapshotReader
+from tests.integration.rustfs_staging import provisioned_location
 
 pytestmark = pytest.mark.integration
 
 _ENDPOINT = os.environ.get("CURATE_D_TEST_RUSTFS_ENDPOINT", "http://127.0.0.1:9100")
-_BUCKET = os.environ.get("CURATE_D_TEST_RUSTFS_BUCKET", "curate-d-staging")
-_PREFIX = os.environ.get("CURATE_D_TEST_RUSTFS_PREFIX", "content/")
 _WRITER = ("curate-d-staging-writer", "writer-development-secret")
 _READER = ("curate-d-staging-reader", "reader-development-secret")
 
 
 def _settings(role: StagingRole, credentials: tuple[str, str]) -> Settings:
     """Configuration for one staging identity against the local RustFS fixture."""
+    bucket, prefix = provisioned_location()
     return Settings(
         staging_s3_endpoint_url=HttpUrl(_ENDPOINT),
-        staging_s3_bucket=_BUCKET,
+        staging_s3_bucket=bucket,
         staging_s3_region="us-east-1",
         staging_s3_role=role,
         staging_s3_access_key_id=SecretStr(credentials[0]),
@@ -47,7 +47,7 @@ def _settings(role: StagingRole, credentials: tuple[str, str]) -> Settings:
         # The local fixture is plaintext loopback; configuration refuses to pretend
         # otherwise, so this has to be disabled deliberately rather than by default.
         staging_s3_verify_tls=False,
-        staging_s3_content_prefix=_PREFIX,
+        staging_s3_content_prefix=prefix,
     )
 
 

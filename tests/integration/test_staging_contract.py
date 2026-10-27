@@ -34,6 +34,7 @@ from curate_d.staging.errors import (
 from curate_d.staging.keys import StagingKey
 from curate_d.staging.object_store import S3StagingObjectStore, build_client_factory
 from curate_d.staging.objects import StagedObject, StagingObjectStore
+from tests.integration.rustfs_staging import provisioned_location
 
 if TYPE_CHECKING:
     from botocore.awsrequest import AWSPreparedRequest
@@ -123,7 +124,7 @@ def _settings(backend: str, role: StagingRole, prefix: str) -> Settings:
     env = f"CURATE_D_TEST_{backend.upper()}_"
     defaults = {
         "ENDPOINT": _LOCAL_ENDPOINTS.get(backend, ""),
-        "BUCKET": "curate-d-staging",
+        "BUCKET": "" if backend == "ovh" else provisioned_location()[0],
         "REGION": "us-east-1",
         "ADDRESSING_STYLE": "path",
         "WRITER_ACCESS_KEY_ID": "curate-d-staging-writer",
@@ -208,7 +209,11 @@ def _denied_settings(backend: str, reader_settings: Settings) -> Settings:
 @asynccontextmanager
 async def _isolated_contract(staging_backend_name: str) -> AsyncGenerator[StagingContract, None]:
     """Clean completed objects and multipart parts after success, failure or cancellation."""
-    root = os.environ.get(f"CURATE_D_TEST_{staging_backend_name.upper()}_PREFIX", "content/")
+    local = staging_backend_name != "ovh"
+    root = os.environ.get(
+        f"CURATE_D_TEST_{staging_backend_name.upper()}_PREFIX",
+        provisioned_location()[1] if local else "content/",
+    )
     prefix = f"{root}contract-{uuid4().hex}/"
     writer_settings = _settings(staging_backend_name, StagingRole.WRITER, prefix)
     reader_settings = _settings(staging_backend_name, StagingRole.READER, prefix)

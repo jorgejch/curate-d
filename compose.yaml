@@ -9,6 +9,11 @@ name: curate-d
 # they are per-role and appear only on the worker that is entitled to them. The API is
 # not a staging participant and gets none of this, including the endpoint — a configured
 # endpoint without credentials is rejected at startup rather than silently disabled.
+#
+# The bucket and prefix come from the shell and default to `curate-d-staging` and `content/`.
+# rustfs-init takes the same two variables with the same defaults and renders the RustFS
+# policy templates for them, so provisioning and the workers cannot disagree.
+# tests/unit/infrastructure/test_rustfs_provisioning.py pins that.
 x-staging-s3: &staging-s3
   CURATE_D_STAGING_S3_ENDPOINT_URL: http://rustfs:9000
   CURATE_D_STAGING_S3_BUCKET: ${CURATE_D_STAGING_S3_BUCKET:-curate-d-staging}
@@ -71,9 +76,10 @@ services:
 
   # Content staging, standing in for OVH Standard S3 in the cluster. The application
   # reaches this through the same S3 adapter it uses against OVH; only the endpoint,
-  # addressing style, TLS trust and credentials differ. Local success here is never
-  # evidence about OVH — see infrastructure/rustfs/initialize.sh. It replaced MinIO, whose
-  # upstream is archived (docs/staging.md, "Local engine: RustFS").
+  # signing region (us-east-1 here, us-east-va on OVH), addressing style, TLS trust and
+  # credentials differ. Local success here is never evidence about OVH — see
+  # infrastructure/rustfs/initialize.sh. It replaced MinIO, whose upstream is archived
+  # (docs/staging.md, "Local engine: RustFS").
   rustfs:
     # Pinned by digest to the multi-arch index, linux/amd64 for CI and linux/arm64 locally:
     # compatibility evidence is only meaningful against an exact server build.
@@ -101,7 +107,8 @@ services:
       retries: 30
 
   # Provisions the bucket, SSE-S3, the lifecycle rules and the two scoped identities, then
-  # proves encryption and the access matrix with the real credentials before exiting.
+  # proves encryption and the access matrix with the real credentials before exiting. It
+  # renders the policy templates for the same bucket and prefix as the workers.
   # Runs to completion on every `stack-up`; it is idempotent, so that is a no-op once ready.
   rustfs-init:
     image: rustfs/rc:v0.1.36@sha256:ab024bfebee49a750ce886b4c70963ccd9ddaa03f491704a90710641d7a26699
@@ -118,6 +125,7 @@ services:
       RUSTFS_STAGING_WRITER_SECRET: ${CURATE_D_STAGING_WRITER_SECRET:-writer-development-secret}
     volumes:
       - ./infrastructure/rustfs/initialize.sh:/initialize.sh:ro
+      - ./infrastructure/rustfs/render_policy.sh:/render_policy.sh:ro
       - ./infrastructure/rustfs/policies:/policies:ro
     depends_on:
       rustfs:

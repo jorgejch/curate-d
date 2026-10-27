@@ -113,9 +113,12 @@ make lifecycle-check   # observe expiration and abort reclamation (rows 30/31) i
 ```
 
 `infrastructure/rustfs/initialize.sh`, run by `rustfs-init` with RustFS's own CLI `rc`,
-creates the bucket, sets SSE-S3 as its default, imports the expiration and
-`AbortIncompleteMultipartUpload` lifecycle rules, provisions the two identities from
-`infrastructure/rustfs/policies/`, and then **proves the access matrix with those
+creates the bucket (`CURATE_D_STAGING_S3_BUCKET`, default `curate-d-staging`), sets SSE-S3
+as its default, imports the expiration and `AbortIncompleteMultipartUpload` lifecycle rules,
+provisions the two identities from the policy templates in
+`infrastructure/rustfs/policies/`, which `infrastructure/rustfs/render_policy.sh` renders for
+the bucket and prefix (`CURATE_D_STAGING_S3_CONTENT_PREFIX`, default `content/`) because `rc`
+imports a policy as written, and then **proves the access matrix with those
 identities**, including an encrypted probe write, before exiting zero. Both workers wait
 on that exit code, so a partially provisioned backend stops the stack rather than
 surfacing later as a staging failure.
@@ -245,7 +248,15 @@ docker compose run --rm --no-deps --entrypoint /bin/sh rustfs-init -eu -c '
 ```
 
 Run with the normal local identities (override these development defaults if local
-provisioning uses other credentials):
+provisioning uses other credentials). The local bucket and prefix default to
+`curate-d-staging` and `content/`. Export `CURATE_D_STAGING_S3_BUCKET` or
+`CURATE_D_STAGING_S3_CONTENT_PREFIX` (the prefix ends with `/`) before `make stack-up` or
+`make staging-init` to change them: the workers and `rustfs-init` read the same variables, and
+`rustfs-init` renders the policies for them. The RustFS integration tests read the same
+variables and defaults (`tests/integration/rustfs_staging.py`), log
+`integration.rustfs_location_overridden` at INFO when they are not the defaults, and take
+`CURATE_D_TEST_RUSTFS_BUCKET` and `CURATE_D_TEST_RUSTFS_PREFIX` over them. Use the same values
+in the command below.
 
 ```bash
 CURATE_D_STAGING_S3_ENDPOINT_URL=http://127.0.0.1:9100 \
