@@ -36,9 +36,9 @@ def _assert_excludes_exactly(key: str, expected: set[str]) -> None:
 
 
 def test_analysis_uses_explicit_source_and_test_roots() -> None:
-    """Only src/ and infrastructure/ are sources; tests/ is explicitly test code."""
+    """Application, operations and migrations are sources; tests/ is explicitly test code."""
     properties = _properties()
-    for key, expected in {"sonar.sources": "src,infrastructure", "sonar.tests": "tests"}.items():
+    for key, expected in {"sonar.sources": "src,ops,migrations", "sonar.tests": "tests"}.items():
         actual = properties.get(key)
         assert actual == expected, f"{key} must be {expected!r}, got {actual!r}"
 
@@ -60,12 +60,12 @@ def test_source_and_test_roots_are_disjoint() -> None:
 
 
 def test_coverage_counts_src_only() -> None:
-    """Only infrastructure/ needs a coverage exclusion within the selected source roots."""
-    _assert_excludes_exactly("sonar.coverage.exclusions", {"infrastructure/**"})
+    """Operations and migrations are analysed without lowering application coverage."""
+    _assert_excludes_exactly("sonar.coverage.exclusions", {"ops/**", "migrations/**"})
 
 
-def test_duplication_counts_src_and_infrastructure_only() -> None:
-    """Both source roots count toward duplication without exclusions."""
+def test_duplication_counts_all_source_roots() -> None:
+    """All three source roots count toward duplication without exclusions."""
     assert "sonar.cpd.exclusions" not in _properties(), "Remove sonar.cpd.exclusions"
 
 

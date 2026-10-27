@@ -186,12 +186,12 @@ suite was not run and why, and MUST pass.
   `Integration tests` writes a summary naming the declared paths, and passes
 
 #### Scenario: Mounted infrastructure changes
-- **WHEN** a pull request changes a file under `infrastructure/rustfs/` or
-  `infrastructure/postgres/`, or `infrastructure/staging-compatibility.md`
+- **WHEN** a pull request changes a file under `ops/rustfs/` or
+  `ops/postgres/`, or `ops/staging-compatibility.md`
 - **THEN** the integration run is selected
 
 #### Scenario: Unmounted infrastructure changes
-- **WHEN** a pull request changes files under `infrastructure/reset/` and nothing else
+- **WHEN** a pull request changes files under `ops/reset/` and nothing else
 - **THEN** no shard runs and `Integration tests` passes
 
 #### Scenario: Image definition or stack definition changes
@@ -213,7 +213,7 @@ suite was not run and why, and MUST pass.
 - **WHEN** a pull request adds `conftest.py`, `tests/conftest.py`, a pytest configuration
   file in `tests/` or the root, a Compose override file (`compose.override.yml`,
   `compose.override.yaml`, `docker-compose.override.yml` or `docker-compose.override.yaml`),
-  `.env`, a `.gitattributes` at the root or in `tests/`, `infrastructure/` or `docker/`, or
+  `.env`, a `.gitattributes` at the root or in `tests/`, `ops/` or `docker/`, or
   `docker/Dockerfile.dockerignore`
 - **THEN** the integration run is selected
 
@@ -438,14 +438,14 @@ run the scan, and MUST fail when its token is missing rather than skip the analy
 - **THEN** the scan step runs and fails, and the job fails
 
 ### Requirement: SonarQube measures production code only
-SonarQube Cloud MUST count coverage on `src/` only, and duplication on `src/` and
-`infrastructure/` only. It MUST explicitly classify `tests/` as test code, independently
+SonarQube Cloud MUST count coverage on `src/` only, and duplication on `src/`, `ops/`
+and `migrations/`. It MUST explicitly classify `tests/` as test code, independently
 of pytest configuration, so tests count toward neither metric. Coverage MUST import
 only `coverage.xml` from the unit suite. A scope or report-path drift MUST fail the unit
 suite naming the setting.
 
 #### Scenario: Uncovered helper in infrastructure
-- **WHEN** a script under `infrastructure/` has no unit test
+- **WHEN** a script under `ops/` has no unit test
 - **THEN** SonarQube's coverage metric is unchanged, and a block it copies from `src/` is
   reported as duplication
 
@@ -455,23 +455,27 @@ suite naming the setting.
   for them
 
 #### Scenario: Metric setting drifts
-- **WHEN** coverage exclusions no longer name only `infrastructure/**`, duplication
-  exclusions are added, or the coverage report path changes
+- **WHEN** coverage exclusions no longer name exactly `ops/**` and `migrations/**`,
+  duplication exclusions are added, or the coverage report path changes
 - **THEN** the unit suite fails naming the setting
 
 #### Scenario: New top-level directory left unlisted
 - **WHEN** a top-level directory is added outside the selected source and test roots
 - **THEN** its files remain outside analysis and both metrics without adding exclusions
 
+#### Scenario: Uncovered migration
+- **WHEN** a migration has no unit coverage or copies a block from another source root
+- **THEN** it does not lower coverage, but remains eligible for duplication findings
+
 ### Requirement: SonarQube analyses explicitly selected source and test trees
-SonarQube Cloud MUST use `src/` and `infrastructure/` as its only source roots and `tests/`
-as its only test root. These scopes MUST be disjoint and MUST NOT depend on pytest's
-`testpaths`. It MUST NOT enumerate other paths through exclusions or inclusions. Scope
-drift MUST fail the unit suite naming the setting. Contributor documentation MUST explain
-how to expand the roots and review metric scope.
+SonarQube Cloud MUST use `src/`, `ops/` and `migrations/` as its only source roots and
+`tests/` as its only test root. These scopes MUST be disjoint and MUST NOT depend on
+pytest's `testpaths`. It MUST NOT enumerate other paths through exclusions or inclusions.
+Scope drift MUST fail the unit suite naming the setting. Contributor documentation MUST
+explain how to expand the roots and review metric scope.
 
 #### Scenario: Existing non-source paths
-- **WHEN** a migration, Dockerfile, workflow, root file, document or OpenSpec artifact changes
+- **WHEN** a Dockerfile, workflow, root file, document or OpenSpec artifact changes
 - **THEN** SonarQube does not analyse it because it is outside the selected roots
 
 #### Scenario: New top-level directory
@@ -482,6 +486,10 @@ how to expand the roots and review metric scope.
 #### Scenario: Source and test roots drift
 - **WHEN** a source or test root changes or a source root overlaps the test tree
 - **THEN** the unit suite fails naming the setting
+
+#### Scenario: Migration changes
+- **WHEN** a Python migration changes
+- **THEN** SonarQube analyses it as source code
 
 ### Requirement: CI checkouts keep the token off disk
 The checks job, the coverage-report job and the integration job MUST check the repository

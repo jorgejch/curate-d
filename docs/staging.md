@@ -5,7 +5,7 @@ Kubernetes. RustFS replaced MinIO, whose upstream is archived
 ([Local engine: RustFS](#local-engine-rustfs)). The runtime, cache coordination, snapshot reader and provisioning smoke
 command are implemented. Local success does not establish
 remote compatibility: see the
-[compatibility matrix](../infrastructure/staging-compatibility.md).
+[compatibility matrix](../ops/staging-compatibility.md).
 
 This implements the [S3 staging contract](../openspec/specs/content-staging/spec.md)
 and consumes the already-reconciled staging decision.
@@ -87,7 +87,7 @@ Staging never authorizes source release.
 1. Provision RustFS with `make stack-up`, or provision the disposable OVH fixture separately.
    Apply the migrations (`make migrate`; the cache index is `0006_staged_objects` and
    `0021_staging_reservations`) before running staging workflows.
-2. Run the [provisioning smoke command](../infrastructure/README.md#provisioning-smoke-check)
+2. Run the [provisioning smoke command](../ops/README.md#provisioning-smoke-check)
    with both identities, or start I/O first to create the readiness marker.
 3. Start CPU after the marker exists. A first concurrent startup can fail CPU readiness,
    and failed readiness exits the process rather than degrading. CPU must therefore be
@@ -110,7 +110,7 @@ cross-role credentials. The worker does not import the smoke command.
 On RustFS, both identities' policies also grant the slash-less key `content`: RustFS
 evaluates policies against the key with its trailing slash removed, so without it neither
 identity can write or read the marker. This widens each by that one key only; see
-[Content staging on RustFS](../infrastructure/README.md#content-staging-on-rustfs).
+[Content staging on RustFS](../ops/README.md#content-staging-on-rustfs).
 
 The marker is excluded from application content listings and occupancy. I/O refreshes it
 on each idle-cleanup tick, normally every 300 seconds. Keep lifecycle expiration longer
@@ -699,7 +699,7 @@ cleanly whether or not it denies anything.
 RustFS replaced MinIO on 2026-09-26 because MinIO's open-source upstream (`minio/minio`,
 `minio/mc`) is archived and its quay.io images stopped pulling. The decision is recorded in the archived
 `replace-local-s3-engine` change; provisioning is described in
-[Content staging on RustFS](../infrastructure/README.md#content-staging-on-rustfs). What
+[Content staging on RustFS](../ops/README.md#content-staging-on-rustfs). What
 matters when changing staging code or bumping the RustFS pin:
 
 - **Policy keys lose their trailing slash.** RustFS evaluates `content/` as `content`,
@@ -748,7 +748,7 @@ kubectl logs -n <namespace> <worker pod> -c worker | grep '"staging.ready"'
 ```
 
 1. Confirm the startup logs show the readiness failure, not a transient endpoint error.
-2. Diagnose against the [provisioning smoke check](../infrastructure/README.md#provisioning-smoke-check):
+2. Diagnose against the [provisioning smoke check](../ops/README.md#provisioning-smoke-check):
    bucket reachable, correct identity, prefix, addressing style and signing region.
 3. Correct the configuration or provisioning, redeploy, re-verify.
 

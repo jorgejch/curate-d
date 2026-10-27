@@ -1,11 +1,12 @@
-# Infrastructure
+# Operations
 
-This repository holds the **container build**; the Kubernetes manifests live in a
-separate deployment repository.
+The `ops/` directory holds local provisioning and environment reset assets, not
+deployment manifests. This repository holds the **container build**; the Kubernetes
+manifests live in a separate deployment repository.
 
 ```
 docker/Dockerfile      one image, API and both worker profiles
-infrastructure/
+ops/
   postgres/initdb/     extensions for the local Compose stack
   rustfs/              staging bucket, scoped identities, and their provisioning
   reset/               wipe a local or Kubernetes environment back to an empty ledger and bucket prefix (docs/reset.md)
@@ -112,11 +113,11 @@ make staging-init      # re-run provisioning alone, printing each step
 make lifecycle-check   # observe expiration and abort reclamation (rows 30/31) in seconds
 ```
 
-`infrastructure/rustfs/initialize.sh`, run by `rustfs-init` with RustFS's own CLI `rc`,
+`ops/rustfs/initialize.sh`, run by `rustfs-init` with RustFS's own CLI `rc`,
 creates the bucket (`CURATE_D_STAGING_S3_BUCKET`, default `curate-d-staging`), sets SSE-S3
 as its default, imports the expiration and `AbortIncompleteMultipartUpload` lifecycle rules,
 provisions the two identities from the policy templates in
-`infrastructure/rustfs/policies/`, which `infrastructure/rustfs/render_policy.sh` renders for
+`ops/rustfs/policies/`, which `ops/rustfs/render_policy.sh` renders for
 the bucket and prefix (`CURATE_D_STAGING_S3_CONTENT_PREFIX`, default `content/`) because `rc`
 imports a policy as written, and then **proves the access matrix with those
 identities**, including an encrypted probe write, before exiting zero. Both workers wait

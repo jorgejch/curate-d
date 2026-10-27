@@ -107,10 +107,11 @@ cleanup of unrelated code.
 | Tree | Classification | Coverage | Duplication |
 | --- | --- | --- | --- |
 | `src/` | Source | Unit tests only, from `coverage.xml` | Included |
-| `infrastructure/` | Source | Excluded | Included, including copies from `src/` |
+| `ops/` | Source | Excluded | Included, including copies from `src/` |
+| `migrations/` | Source | Excluded | Included |
 | `tests/` | Test | Not measured | Not measured |
 
-All other paths are outside ordinary Sonar analysis, including migrations, Dockerfiles,
+All other paths are outside ordinary Sonar analysis, including Dockerfiles,
 GitHub workflows, root files, docs and OpenSpec artifacts. This deliberately trades broad
 Sonar findings for explicit, stable scope; it does not configure other security scanners.
 

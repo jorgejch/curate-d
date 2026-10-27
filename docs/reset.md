@@ -1,11 +1,11 @@
 # Environment reset
 
-[`infrastructure/reset/reset-environment.sh`](../infrastructure/reset/reset-environment.sh)
+[`ops/reset/reset-environment.sh`](../ops/reset/reset-environment.sh)
 wipes `local` or `dev` back to an empty ledger and an empty staging content prefix. There is no
 production path: the script only accepts `local` and `dev`.
 
 ```bash
-infrastructure/reset/reset-environment.sh local|dev [--execute [--yes]] [--drop-connections]
+ops/reset/reset-environment.sh local|dev [--execute [--yes]] [--drop-connections]
 ```
 
 Without `--execute` it is a dry run: it prints the rows and objects a reset would remove and
@@ -31,7 +31,7 @@ Two files:
 
 - `reset-environment.sh` is the bash driver you run. It owns confirmation, stopping and
   restarting workloads, and the cluster's reconciler.
-- [`reset.py`](../infrastructure/reset/reset.py) is the part that touches data. The script
+- [`reset.py`](../ops/reset/reset.py) is the part that touches data. The script
   passes it to `python -c` inside the curate.d image, so it runs with the I/O worker's database
   URL and staging writer identity. No credentials reach your machine, no secret
   changes, and nothing is installed into the application.
@@ -159,17 +159,17 @@ also empties `lease_versions`, and the workers register again as they restart.
 Preview a dev reset (changes nothing):
 
 ```bash
-CURATE_D_RESET_NAMESPACE=<namespace> infrastructure/reset/reset-environment.sh dev
+CURATE_D_RESET_NAMESPACE=<namespace> ops/reset/reset-environment.sh dev
 ```
 
 Reset dev, typing `reset dev` when asked:
 
 ```bash
-CURATE_D_RESET_NAMESPACE=<namespace> infrastructure/reset/reset-environment.sh dev --execute
+CURATE_D_RESET_NAMESPACE=<namespace> ops/reset/reset-environment.sh dev --execute
 ```
 
 Reset the local stack without the prompt:
 
 ```bash
-infrastructure/reset/reset-environment.sh local --execute --yes
+ops/reset/reset-environment.sh local --execute --yes
 ```

@@ -59,7 +59,7 @@ Approve only when every changed file is one of these.
 Everything else needs a human, including, at least:
 
 - Executable code anywhere: `src/`, `migrations/`, `tests/local/`, scripts.
-- CI, build and infrastructure: `.github/`, `docker/`, `infrastructure/`, `compose.yaml`,
+- CI, build and infrastructure: `.github/`, `docker/`, `ops/`, `compose.yaml`,
   `compose.lifecycle.yaml`, `Makefile`, `alembic.ini`, `sonar-project.properties`.
 - Dependencies: `pyproject.toml`, `uv.lock`, `.agents/skills/dbos-python` and `skills-lock.json`.
 - Instructions to agents and reviewers: `CLAUDE.md` (and `AGENTS.md`, which links to it),
