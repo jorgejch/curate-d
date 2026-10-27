@@ -153,7 +153,7 @@ with a `ConfigurationError`, `GET /configuration/<kind>` fails, and
 `PUT /configuration/taxonomy` is refused. Check the stored versions first, with
 `python -m curate_d.configuration.verify` run from the image about to be deployed. An
 `exec` into the running workers runs the current build instead. Run it in a one-off pod
-built, as the reset's helper pod is (`infrastructure/reset/reset-environment.sh`), from the
+built, as the reset's helper pod is (`ops/reset/reset-environment.sh`), from the
 I/O worker's pod template (its environment, service account and database settings), with
 only the image swapped for the new tag:
 

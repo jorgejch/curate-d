@@ -186,12 +186,12 @@ suite was not run and why, and MUST pass.
   `Integration tests` writes a summary naming the declared paths, and passes
 
 #### Scenario: Mounted infrastructure changes
-- **WHEN** a pull request changes a file under `infrastructure/rustfs/` or
-  `infrastructure/postgres/`, or `infrastructure/staging-compatibility.md`
+- **WHEN** a pull request changes a file under `ops/rustfs/` or
+  `ops/postgres/`, or `ops/staging-compatibility.md`
 - **THEN** the integration run is selected
 
 #### Scenario: Unmounted infrastructure changes
-- **WHEN** a pull request changes files under `infrastructure/reset/` and nothing else
+- **WHEN** a pull request changes files under `ops/reset/` and nothing else
 - **THEN** no shard runs and `Integration tests` passes
 
 #### Scenario: Image definition or stack definition changes
@@ -213,7 +213,7 @@ suite was not run and why, and MUST pass.
 - **WHEN** a pull request adds `conftest.py`, `tests/conftest.py`, a pytest configuration
   file in `tests/` or the root, a Compose override file (`compose.override.yml`,
   `compose.override.yaml`, `docker-compose.override.yml` or `docker-compose.override.yaml`),
-  `.env`, a `.gitattributes` at the root or in `tests/`, `infrastructure/` or `docker/`, or
+  `.env`, a `.gitattributes` at the root or in `tests/`, `ops/` or `docker/`, or
   `docker/Dockerfile.dockerignore`
 - **THEN** the integration run is selected
 
@@ -438,46 +438,82 @@ run the scan, and MUST fail when its token is missing rather than skip the analy
 - **THEN** the scan step runs and fails, and the job fails
 
 ### Requirement: SonarQube measures production code only
-SonarQube Cloud MUST count coverage on `src/` only, and duplication on `src/` and
-`infrastructure/` only. Test code under `tests/` MUST NOT count toward either metric. A new
-top-level directory MUST be excluded from both until it is deliberately added.
+SonarQube Cloud MUST count coverage on `src/` only. All selected source paths MUST remain
+eligible for duplication measurement where their language analyzer supports it, without
+duplication exclusions. It MUST explicitly classify `tests/` as test code, independently
+of pytest configuration, so tests count toward neither metric. Coverage MUST import
+only `coverage.xml` from the unit suite. A scope or report-path drift MUST fail the unit
+suite naming the setting.
 
 #### Scenario: Uncovered helper in infrastructure
-- **WHEN** a script under `infrastructure/` has no unit test
+- **WHEN** a script under `ops/` has no unit test
 - **THEN** SonarQube's coverage metric is unchanged, and a block it copies from `src/` is
   reported as duplication
 
 #### Scenario: Duplicated test fixture
 - **WHEN** two test modules under `tests/` share a copied block
-- **THEN** SonarQube reports no duplication for it
+- **THEN** SonarQube classifies them as tests and reports neither coverage nor duplication
+  for them
+
+#### Scenario: Metric setting drifts
+- **WHEN** coverage exclusions no longer name exactly `ops/**`, `migrations/**`,
+  `docker/**`, `pyproject.toml`, `alembic.ini` and `compose.yaml`, duplication exclusions are added,
+  or the coverage report path changes
+- **THEN** the unit suite fails naming the setting
 
 #### Scenario: New top-level directory left unlisted
-- **WHEN** a top-level directory is added and not named in the SonarQube exclusions
-- **THEN** its files count toward coverage and duplication, and the unit test pinning the
-  measured scope fails naming the directory
+- **WHEN** a top-level directory is added outside the selected source and test roots
+- **THEN** its files remain outside analysis and both metrics without adding exclusions
 
-### Requirement: SonarQube does not analyse docs/ or openspec/
-SonarQube Cloud MUST leave every file under `docs/` and `openspec/` out of its analysis, so it
-raises no issue, security hotspot or secret there. Its analysis exclusions MUST be exactly
-`docs/**` and `openspec/**`. A drift either way MUST fail the unit suite, naming the pattern
-missing or added.
+#### Scenario: Uncovered migration
+- **WHEN** a migration has no unit coverage or copies a block from another source root
+- **THEN** it does not lower coverage, but remains eligible for duplication findings
 
-#### Scenario: Generated diagram page analysed
-- **WHEN** a pull request changes the inline script of a page under `docs/diagrams/`
-- **THEN** SonarQube Cloud's analysis of it reports no issue on that page
+#### Scenario: Image and configuration coverage
+- **WHEN** `docker/`, `pyproject.toml`, `alembic.ini` or `compose.yaml` has no unit coverage
+- **THEN** it does not lower application coverage
 
-#### Scenario: Change artifact analysed
-- **WHEN** a pull request adds a file under `openspec/changes/`
-- **THEN** SonarQube Cloud's analysis of it reports no issue on that file
+### Requirement: SonarQube analyses explicitly selected source and test trees
+SonarQube Cloud MUST use `src/`, `ops/`, `migrations/`, `docker/`, `pyproject.toml`,
+`alembic.ini` and `compose.yaml` as its only sources, and `tests/` as tests. Scopes MUST be disjoint,
+independent of pytest and free of source/test filters. Scoped text MUST be eligible for
+secret detection. Scope or text-setting drift MUST fail unit tests naming the setting.
+Contributor docs MUST explain scope maintenance, metrics and language support.
 
-#### Scenario: Exclusion dropped
-- **WHEN** the SonarQube analysis exclusions no longer list `docs/**` or `openspec/**`
-- **THEN** the unit test pinning the analysed scope fails, naming the missing pattern
+#### Scenario: Existing non-source paths
+- **WHEN** a workflow, unlisted root file, document or OpenSpec artifact changes
+- **THEN** SonarQube does not analyse it because it is outside the selected paths
 
-#### Scenario: Another directory excluded from analysis
-- **WHEN** a pattern other than `docs/**` and `openspec/**` is added to the SonarQube analysis
-  exclusions
-- **THEN** the unit test pinning the analysed scope fails, naming the added pattern
+#### Scenario: New top-level directory
+- **WHEN** a directory outside the selected paths is added
+- **THEN** it receives no Sonar analysis, coverage or duplication measurement, without a
+  new exclusion or test update
+
+#### Scenario: Source and test roots drift
+- **WHEN** a source or test path changes or a source path overlaps the test tree
+- **THEN** the unit suite fails naming the setting
+
+#### Scenario: Migration changes
+- **WHEN** a Python migration changes
+- **THEN** SonarQube analyses it as source code
+
+#### Scenario: Image definition changes
+- **WHEN** `docker/Dockerfile` changes
+- **THEN** it is in source scope for Docker analysis without blanket rule suppressions
+
+#### Scenario: Project and migration configuration changes
+- **WHEN** `pyproject.toml` or `alembic.ini` changes
+- **THEN** the file is in source scope and eligible for text/secret detection without
+  assigning a false language or claiming general TOML/INI language rules
+
+#### Scenario: Compose definition changes
+- **WHEN** `compose.yaml` changes
+- **THEN** it is in source scope and eligible for text/secret detection without claiming
+  Dockerfile-specific rules apply to Compose
+
+#### Scenario: Secret detection configuration drifts
+- **WHEN** text inclusions no longer cover all scoped text files or are deactivated
+- **THEN** the unit suite fails naming the setting
 
 ### Requirement: CI checkouts keep the token off disk
 The checks job, the coverage-report job and the integration job MUST check the repository

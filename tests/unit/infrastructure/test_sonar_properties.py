@@ -1,20 +1,9 @@
-"""SonarQube's analysed and measured scope.
+"""SonarQube's explicit source/test roots and production metric scope."""
 
-Nothing under docs/ or openspec/ is analysed; coverage counts src/ only, duplication src/ and
-infrastructure/.
-"""
-
-import subprocess
-import tomllib
 from pathlib import Path
-from typing import cast
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 PROPERTIES = REPOSITORY_ROOT / "sonar-project.properties"
-PYPROJECT = REPOSITORY_ROOT / "pyproject.toml"
-
-# `*` matches the files at the repository root.
-_ROOT_FILES = "*"
 
 
 def _properties() -> dict[str, str]:
@@ -34,24 +23,17 @@ def _properties() -> dict[str, str]:
     return properties
 
 
+def test_automatic_configuration_cannot_override_explicit_scope() -> None:
+    """Cloud automatic configuration cannot ignore the selected source and test paths."""
+    assert _properties().get("sonar.scanner.autoconfig.enabled") == "false", (
+        "Disable CLI automatic configuration explicitly; Cloud otherwise ignores sonar.sources "
+        "and sonar.tests when it is enabled in project settings"
+    )
+
+
 def _exclusions(key: str) -> set[str]:
     """Return the comma-separated patterns of the property called `key`, none if it is unset."""
     return {pattern.strip() for pattern in _properties().get(key, "").split(",") if pattern.strip()}
-
-
-def _tracked_directories() -> set[str]:
-    """Return the repository's tracked top-level directories; ignored ones never count."""
-    listing = subprocess.run(
-        ["git", "ls-files"], cwd=REPOSITORY_ROOT, capture_output=True, text=True, check=True
-    )
-    return {path.split("/")[0] for path in listing.stdout.splitlines() if "/" in path}
-
-
-def _test_code_directories() -> set[str]:
-    """Return the directories SonarQube takes as test code, from pytest's `testpaths`."""
-    pyproject = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
-    pytest_options = cast(dict[str, object], pyproject["tool"]["pytest"]["ini_options"])
-    return {str(path).rstrip("/") for path in cast(list[str], pytest_options["testpaths"])}
 
 
 def _assert_excludes_exactly(key: str, expected: set[str]) -> None:
@@ -61,25 +43,112 @@ def _assert_excludes_exactly(key: str, expected: set[str]) -> None:
     assert not actual - expected, f"{key} also lists {sorted(actual - expected)}"
 
 
-def _assert_measures_only(key: str, measured: set[str]) -> None:
-    """Assert `key` excludes the root files and every tracked directory but `measured`."""
-    _assert_excludes_exactly(
-        key, {_ROOT_FILES} | {f"{d}/**" for d in _tracked_directories() - measured}
-    )
+def test_analysis_uses_explicit_source_and_test_roots() -> None:
+    """Application, operations, migrations, image and config are sources; tests/ is test code."""
+    properties = _properties()
+    expected_roots = {
+        "sonar.sources": "src,ops,migrations,docker,pyproject.toml,alembic.ini,compose.yaml",
+        "sonar.tests": "tests",
+    }
+    for key, expected in expected_roots.items():
+        actual = properties.get(key)
+        assert actual == expected, f"{key} must be {expected!r}, got {actual!r}"
 
 
-def test_analysis_excludes_docs_and_openspec_only() -> None:
-    """SonarQube analyses nothing under docs/ or openspec/, and every other path stays analysed."""
-    _assert_excludes_exactly("sonar.exclusions", {"docs/**", "openspec/**"})
+def test_analysis_paths_exist() -> None:
+    """Every explicitly selected source or test path exists in this repository."""
+    properties = _properties()
+    for key in ("sonar.sources", "sonar.tests"):
+        for entry in properties[key].split(","):
+            assert (REPOSITORY_ROOT / entry.strip()).exists(), f"{key} path {entry!r} is missing"
+
+
+def test_source_and_test_roots_are_disjoint() -> None:
+    """No configured source root contains or overlaps a test root."""
+    properties = _properties()
+    sources = properties.get("sonar.sources", "")
+    tests = properties.get("sonar.tests", "")
+    assert sources, "sonar.sources must explicitly declare source roots"
+    assert tests, "sonar.tests must explicitly declare test roots"
+    for source in sources.split(","):
+        for test in tests.split(","):
+            source_root = Path(source.strip())
+            test_root = Path(test.strip())
+            assert not (
+                source_root.is_relative_to(test_root) or test_root.is_relative_to(source_root)
+            ), f"sonar.sources root {source!r} overlaps sonar.tests root {test!r}"
 
 
 def test_coverage_counts_src_only() -> None:
-    """Every other top-level directory, tests/ included, is excluded from coverage."""
-    _assert_measures_only("sonar.coverage.exclusions", {"src"})
+    """Non-application sources are analysed without lowering application coverage."""
+    _assert_excludes_exactly(
+        "sonar.coverage.exclusions",
+        {"ops/**", "migrations/**", "docker/**", "pyproject.toml", "alembic.ini", "compose.yaml"},
+    )
 
 
-def test_duplication_counts_src_and_infrastructure_only() -> None:
-    """tests/ is test code, which SonarQube measures no duplication on; the rest is excluded."""
-    test_code = _test_code_directories()
-    assert test_code == {"tests"}
-    _assert_measures_only("sonar.cpd.exclusions", {"src", "infrastructure"} | test_code)
+def test_duplication_counts_all_source_roots() -> None:
+    """All supported sources remain eligible for duplication without exclusions."""
+    assert "sonar.cpd.exclusions" not in _properties(), "Remove sonar.cpd.exclusions"
+
+
+def test_analysis_needs_no_inclusions_or_exclusions() -> None:
+    """Explicit roots replace all source and test analysis filters."""
+    properties = _properties()
+    for key in (
+        "sonar.inclusions",
+        "sonar.exclusions",
+        "sonar.test.inclusions",
+        "sonar.test.exclusions",
+    ):
+        assert key not in properties, f"Remove {key}; sonar.sources and sonar.tests define scope"
+
+
+def test_no_out_of_scope_rule_suppression_remains() -> None:
+    """Dockerfiles now in scope receive checks without blanket rule suppressions."""
+    stale = sorted(
+        key for key in _properties() if key.startswith("sonar.issue.ignore.multicriteria")
+    )
+    assert not stale, f"Remove blanket rule suppression settings: {stale}"
+
+
+def test_scoped_configuration_files_receive_text_analysis() -> None:
+    """Project, migration and Compose config receive secret detection without false languages."""
+    properties = _properties()
+    expected = {"sonar.text.inclusions.activate": "true"}
+    for key, value in expected.items():
+        assert properties.get(key) == value, f"{key} must be {value!r} for scoped text analysis"
+    patterns = {entry.strip() for entry in properties.get("sonar.text.inclusions", "").split(",")}
+    assert {"pyproject.toml", "alembic.ini", "compose.yaml"} <= patterns, (
+        "sonar.text.inclusions misses config files"
+    )
+    assert "sonar.lang.patterns.py" not in properties, "Do not classify config files as Python"
+
+
+def test_text_inclusions_do_not_expand_analysis_scope() -> None:
+    """Secret scanning cannot add docs, OpenSpec or other unselected Git-tracked files."""
+    properties = _properties()
+    expected = {
+        f"{entry.strip()}/**" if (REPOSITORY_ROOT / entry.strip()).is_dir() else entry.strip()
+        for key in ("sonar.sources", "sonar.tests")
+        for entry in properties[key].split(",")
+    }
+    actual = {entry.strip() for entry in properties.get("sonar.text.inclusions", "").split(",")}
+    assert actual == expected, (
+        "sonar.text.inclusions must mirror source/test paths; it independently adds Git-tracked "
+        f"files to secret scanning. Expected {sorted(expected)}, got {sorted(actual)}"
+    )
+
+
+def test_project_identity_python_and_coverage_report_are_preserved() -> None:
+    """Scope changes preserve the Sonar project and unit coverage import settings."""
+    properties = _properties()
+    expected = {
+        "sonar.projectKey": "jorgejch_curate-d",
+        "sonar.organization": "jorge-haddad-oss",
+        "sonar.python.version": "3.12",
+        "sonar.python.coverage.reportPaths": "coverage.xml",
+    }
+    for key, value in expected.items():
+        actual = properties.get(key)
+        assert actual == value, f"{key} must remain {value!r}, got {actual!r}"

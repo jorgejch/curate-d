@@ -130,9 +130,9 @@ jobs:
               - 'tests/tox.ini'
               - 'tests/setup.cfg'
               - 'tests/pyproject.toml'
-              - 'infrastructure/postgres/**'
-              - 'infrastructure/rustfs/**'
-              - 'infrastructure/staging-compatibility.md'
+              - 'ops/postgres/**'
+              - 'ops/rustfs/**'
+              - 'ops/staging-compatibility.md'
               - 'migrations/**'
               - 'alembic.ini'
               - 'compose.yaml'
@@ -151,7 +151,7 @@ jobs:
               - '.env'
               - '.gitattributes'
               - 'tests/.gitattributes'
-              - 'infrastructure/.gitattributes'
+              - 'ops/.gitattributes'
               - 'docker/.gitattributes'
               - '.github/workflows/integration.yml'
 
@@ -481,8 +481,8 @@ jobs:
 
           Not run: this pull request changes none of the paths the suite depends on:
           `src/`, `tests/integration/`, `tests/stubs/`, `tests/__init__.py`,
-          `infrastructure/postgres/`, `infrastructure/rustfs/`,
-          `infrastructure/staging-compatibility.md`, `migrations/`, `alembic.ini`,
+          `ops/postgres/`, `ops/rustfs/`,
+          `ops/staging-compatibility.md`, `migrations/`, `alembic.ini`,
           `conftest.py`, `tests/conftest.py`, pytest's configuration files
           (`pytest.toml`, `.pytest.toml`, `pytest.ini`, `.pytest.ini`, `tox.ini`,
           `setup.cfg`, at the root or in `tests/`, and `tests/pyproject.toml`),
@@ -492,7 +492,7 @@ jobs:
           `docker/Dockerfile`,
           `docker/Dockerfile.dockerignore`, `.dockerignore`, `Makefile`,
           `pyproject.toml`, `uv.lock`, `.python-version`, `.test_durations`, `.env`,
-          `.gitattributes`, `tests/.gitattributes`, `infrastructure/.gitattributes`,
+          `.gitattributes`, `tests/.gitattributes`, `ops/.gitattributes`,
           `docker/.gitattributes`, `.github/workflows/integration.yml`.
           MD
 
@@ -580,7 +580,7 @@ jobs:
               return int(match.group(1)) if match else 0
 
           reports = sorted(Path("reports").glob("integration-*.xml"), key=group_of)
-          lines = ["### Integration suite", "", "Staging backend: RustFS only. OVH runs out of band; its results are in `infrastructure/staging-compatibility.md`.", ""]
+          lines = ["### Integration suite", "", "Staging backend: RustFS only. OVH runs out of band; its results are in `ops/staging-compatibility.md`.", ""]
           if not reports:
               lines.append("The suite did not produce a result; nothing was verified.")
           else:
@@ -610,7 +610,7 @@ jobs:
                   counts("tests.integration.test_staging_backend_checks"),
                   "",
                   "Rows 30 and 31 skip here, citing the recorded time-scaled observation "
-                  "(infrastructure/staging-compatibility.md); `make lifecycle-check` "
+                  "(ops/staging-compatibility.md); `make lifecycle-check` "
                   "re-observes them on a RustFS pin bump. On OVH they were observed "
                   "separately.",
                   "",

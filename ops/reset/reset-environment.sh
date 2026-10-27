@@ -39,7 +39,7 @@
 # scaling them to the recorded count.
 #
 # Usage:
-#   infrastructure/reset/reset-environment.sh local|dev [--execute [--yes]] [--drop-connections]
+#   ops/reset/reset-environment.sh local|dev [--execute [--yes]] [--drop-connections]
 set -euo pipefail
 
 usage() {

@@ -158,8 +158,8 @@ bounded, verified local snapshots. S3 readiness fails without filesystem fallbac
 readiness marker with provisioning smoke or I/O startup before starting CPU.
 
 See the [runtime and configuration guide](docs/staging.md),
-[provisioning smoke invocations](infrastructure/README.md#provisioning-smoke-check), and
-[compatibility evidence](infrastructure/staging-compatibility.md). The integration workflow
+[provisioning smoke invocations](ops/README.md#provisioning-smoke-check), and
+[compatibility evidence](ops/staging-compatibility.md). The integration workflow
 runs the shared contract suite and the backend checks on RustFS; `make lifecycle-check`
 re-observes lifecycle expiry and abort on a time-scaled RustFS by hand, on a pin bump. OVH
 is verified separately against the real buckets.
@@ -173,7 +173,7 @@ is verified separately against the real buckets.
   migrations/       Alembic migrations for the ledger schema
   docker/           container image build
   docs/             staging, recovery, reset and rewind guides, diagrams
-  infrastructure/   local stack config and operator scripts; deployment manifests
+  ops/              local stack config and operator scripts; deployment manifests
                     are kept outside this repository
   .github/          CI (checks, integration suite), image publishing, issue and PR templates
   openspec/

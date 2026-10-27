@@ -615,7 +615,7 @@ def test_rustfs_encryption_provisioning_fails_closed() -> None:
     RustFS starts without a valid SSE-S3 master key and refuses encrypted writes instead,
     so the probe write and its `AES256` readback are the only thing that fails stack-up.
     """
-    script = (_ROOT / "infrastructure/rustfs/initialize.sh").read_text()
+    script = (_ROOT / "ops/rustfs/initialize.sh").read_text()
     assert "RUSTFS_SSE_S3_MASTER_KEY" in (_ROOT / "compose.yaml").read_text()
     assert "rc bucket encryption set --mode sse-s3" in script
     assert '|| fail "could not set SSE-S3 as the default' in script
@@ -782,7 +782,7 @@ async def test_endpoint_transport_and_certificate_trust(
 
 def test_matrix_names_required_backend_checks() -> None:
     """Keep required named checks linked to their behavior rows without rewriting evidence."""
-    matrix = (_ROOT / "infrastructure/staging-compatibility.md").read_text()
+    matrix = (_ROOT / "ops/staging-compatibility.md").read_text()
     for row, name in {
         18: "test_reader_bucket_enumeration_matches_recorded_posture",
         20: "test_neither_runtime_identity_can_create_a_bucket",

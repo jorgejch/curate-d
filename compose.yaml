@@ -50,7 +50,7 @@ services:
       # PostgreSQL 18 images expect the mount one level up so that pg_upgrade --link
       # can move data between major-version subdirectories without crossing a mount point.
       - postgres-data:/var/lib/postgresql
-      - ./infrastructure/postgres/initdb:/docker-entrypoint-initdb.d:ro
+      - ./ops/postgres/initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U curate_d -d curate_d"]
       interval: 2s
@@ -78,7 +78,7 @@ services:
   # reaches this through the same S3 adapter it uses against OVH; only the endpoint,
   # signing region (us-east-1 here, us-east-va on OVH), addressing style, TLS trust and
   # credentials differ. Local success here is never evidence about OVH — see
-  # infrastructure/rustfs/initialize.sh. It replaced MinIO, whose upstream is archived
+  # ops/rustfs/initialize.sh. It replaced MinIO, whose upstream is archived
   # (docs/staging.md, "Local engine: RustFS").
   rustfs:
     # Pinned by digest to the multi-arch index, linux/amd64 for CI and linux/arm64 locally:
@@ -124,9 +124,9 @@ services:
       RUSTFS_STAGING_WRITER_KEY: ${CURATE_D_STAGING_WRITER_KEY:-curate-d-staging-writer}
       RUSTFS_STAGING_WRITER_SECRET: ${CURATE_D_STAGING_WRITER_SECRET:-writer-development-secret}
     volumes:
-      - ./infrastructure/rustfs/initialize.sh:/initialize.sh:ro
-      - ./infrastructure/rustfs/render_policy.sh:/render_policy.sh:ro
-      - ./infrastructure/rustfs/policies:/policies:ro
+      - ./ops/rustfs/initialize.sh:/initialize.sh:ro
+      - ./ops/rustfs/render_policy.sh:/render_policy.sh:ro
+      - ./ops/rustfs/policies:/policies:ro
     depends_on:
       rustfs:
         condition: service_healthy

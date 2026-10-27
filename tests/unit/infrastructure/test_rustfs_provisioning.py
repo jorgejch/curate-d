@@ -11,7 +11,7 @@ import yaml
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 COMPOSE = REPOSITORY_ROOT / "compose.yaml"
-RUSTFS = REPOSITORY_ROOT / "infrastructure" / "rustfs"
+RUSTFS = REPOSITORY_ROOT / "ops" / "rustfs"
 POLICIES = RUSTFS / "policies"
 RENDER = RUSTFS / "render_policy.sh"
 

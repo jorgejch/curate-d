@@ -26,7 +26,7 @@ migrations, infrastructure, deployment and CI configuration, dependency versions
 business rules. In this repository that includes, at least:
 
 - `migrations/`, and table or constraint definitions in `src/curate_d/ledger/tables.py`.
-- `.github/`, `docker/`, `infrastructure/`, `compose.yaml`, `compose.lifecycle.yaml`, `Makefile`,
+- `.github/`, `docker/`, `ops/`, `compose.yaml`, `compose.lifecycle.yaml`, `Makefile`,
   `sonar-project.properties`, `alembic.ini`.
 - Dependency pins in `pyproject.toml` and `uv.lock`; the vendored `.agents/skills/dbos-python`
   and its `skills-lock.json` pin, which only a `dbos` upgrade refreshes.
