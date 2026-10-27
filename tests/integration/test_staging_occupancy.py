@@ -41,12 +41,12 @@ from curate_d.staging.object_store import S3StagingObjectStore
 from curate_d.staging.objects import StagedObject, StagedObjectRef, StagingObjectStore
 from curate_d.staging.occupancy import StagingOccupancy
 from curate_d.staging.publish import publish
+from tests.integration.rustfs_staging import provisioned_location
 from tests.integration.staging_keys import delete_suite_reservations, suite_key
 
 pytestmark = pytest.mark.integration
 
 _ENDPOINT = "http://127.0.0.1:9100"
-_BUCKET = "curate-d-staging"
 _WRITER = ("curate-d-staging-writer", "writer-development-secret")
 
 # Small enough that a handful of 64-byte objects creates real pressure, so the tests
@@ -75,18 +75,19 @@ class KeyIssuer:
         return key
 
 
-def writer_settings(prefix: str) -> Settings:
-    """Writer-role settings for local RustFS, scoped to one test's content sub-prefix."""
+def writer_settings(sub_prefix: str) -> Settings:
+    """Return writer-role settings for local RustFS, scoped to one test's content sub-prefix."""
+    bucket, prefix = provisioned_location()
     return Settings(
         staging_s3_endpoint_url=_ENDPOINT,  # type: ignore[arg-type]
-        staging_s3_bucket=_BUCKET,
+        staging_s3_bucket=bucket,
         staging_s3_region="us-east-1",
         staging_s3_role=StagingRole.WRITER,
         staging_s3_access_key_id=_WRITER[0],  # type: ignore[arg-type]
         staging_s3_secret_access_key=_WRITER[1],  # type: ignore[arg-type]
         staging_s3_addressing_style=S3AddressingStyle.PATH,
         staging_s3_verify_tls=False,
-        staging_s3_content_prefix=prefix,
+        staging_s3_content_prefix=f"{prefix}{sub_prefix}",
     )
 
 
@@ -99,7 +100,7 @@ def new_key() -> KeyIssuer:
 @pytest.fixture
 async def store() -> AsyncIterator[S3StagingObjectStore]:
     """The writer's view of a content sub-prefix nothing else in the suite touches."""
-    subject = S3StagingObjectStore(writer_settings(f"content/occupancy-{uuid4().hex}/"))
+    subject = S3StagingObjectStore(writer_settings(f"occupancy-{uuid4().hex}/"))
     try:
         yield subject
     finally:

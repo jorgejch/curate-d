@@ -29,12 +29,12 @@ from curate_d.staging.factories import (
 )
 from curate_d.staging.keys import StagingKey
 from curate_d.staging.snapshots import LocalScratchBudget
+from tests.integration.rustfs_staging import provisioned_location
 from tests.stubs.pcloud import StubFile, StubPCloud
 
 pytestmark = pytest.mark.integration
 
 _ENDPOINT = os.environ.get("CURATE_D_TEST_RUSTFS_ENDPOINT", "http://127.0.0.1:9100")
-_BUCKET = os.environ.get("CURATE_D_TEST_RUSTFS_BUCKET", "curate-d-staging")
 _WRITER = ("curate-d-staging-writer", "writer-development-secret")
 _READER = ("curate-d-staging-reader", "reader-development-secret")
 
@@ -43,10 +43,12 @@ def _settings(
     base: Settings, role: StagingRole, credentials: tuple[str, str], scratch: Path
 ) -> Settings:
     """One staging identity against the local RustFS fixture."""
+    bucket, prefix = provisioned_location()
     return base.model_copy(
         update={
             "staging_s3_endpoint_url": HttpUrl(_ENDPOINT),
-            "staging_s3_bucket": _BUCKET,
+            "staging_s3_bucket": bucket,
+            "staging_s3_content_prefix": prefix,
             "staging_s3_region": "us-east-1",
             "staging_s3_role": role,
             "staging_s3_access_key_id": SecretStr(credentials[0]),
