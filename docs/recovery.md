@@ -169,8 +169,12 @@ kubectl -n "$NS" get statefulset/curate-d-worker-io -o json | jq --arg pod "$POD
       | .image = $image | .command = ["python", "-m", "curate_d.configuration.verify"]
     ])
   }' | kubectl -n "$NS" apply -f -
+deadline=$((SECONDS + 600))
 until phase=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.status.phase}') &&
-  [[ $phase == Succeeded || $phase == Failed ]]; do sleep 3; done
+  [[ $phase == Succeeded || $phase == Failed ]]; do
+  ((SECONDS < deadline)) || { echo "timed out in phase $phase" >&2; break; }
+  sleep 3
+done
 kubectl -n "$NS" logs "$POD"
 kubectl -n "$NS" get pod "$POD" -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}{"\n"}'
 kubectl -n "$NS" delete pod "$POD"
