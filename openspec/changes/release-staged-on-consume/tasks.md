@@ -9,7 +9,7 @@ on the one before it, so nothing here splits usefully across agents.
 
 ## 2. The staged attempt travels with the reference
 
-- [ ] 2.1 Add `attempt_id: UUID | None = None` to `StagedRef` and set it in `stage_source` (design decision 1). Verify with unit tests in `tests/unit/ingest/`: a staged result carries the published attempt; a `StagedRef` pickled without the field restores with `None`.
+- [x] 2.1 Add `attempt_id: UUID | None = None` to `StagedRef` and set it in `stage_source` (design decision 1). Verify with unit tests in `tests/unit/ingest/`: a staged result carries the published attempt; a `StagedRef` pickled without the field restores with `None`.
 
 ## 3. The release workflow
 

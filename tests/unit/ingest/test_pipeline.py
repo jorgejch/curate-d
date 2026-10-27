@@ -2,9 +2,11 @@
 
 import hashlib
 import io
+import pickle
 from collections.abc import AsyncIterator, Coroutine
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from PIL import Image, ImageDraw
@@ -33,6 +35,7 @@ from curate_d.staging.errors import (
     StagedEntrySupersededError,
     StagingCapacityExhaustedError,
 )
+from curate_d.staging.keys import StagingKey
 from curate_d.staging.snapshots import LocalScratchBudget
 from tests.stubs.pcloud import Failure, StubFile, StubPCloud
 from tests.stubs.staging import MemoryStaging
@@ -127,6 +130,31 @@ async def test_a_listed_file_is_staged_with_both_digests(
     assert result.staged.sha1 == hashlib.sha1(b"hello world").hexdigest()
     assert staging.content(result.staged.key) == b"hello world"  # type: ignore[arg-type]
     assert list((tmp_path / "fetch").iterdir()) == []
+
+
+async def test_a_staged_ref_names_the_attempt_that_published_it(
+    files: PCloudFiles, pcloud: StubPCloud, staging: MemoryStaging, tmp_path: Path
+) -> None:
+    """Its readers release that attempt, never a version restaged under the key since."""
+    stub = pcloud.file("/doc.txt", b"hello world")
+    result = await _stage(files, staging, _source(stub), tmp_path)
+
+    assert result.staged is not None
+    registration = staging.index.registrations[StagingKey(result.staged.key)]
+    assert result.staged.attempt_id == registration.attempt_id
+
+
+def test_a_staged_ref_pickled_before_attempts_restores_without_one() -> None:
+    """A checkpoint written by the previous build replays and is left to age eviction."""
+    ref = StagedRef(key="a" * 32, sha256="0" * 64, sha1="0" * 40, size_bytes=1, attempt_id=uuid4())
+    state = ref.__getstate__()
+    state["__dict__"] = {k: v for k, v in state["__dict__"].items() if k != "attempt_id"}
+    state["__pydantic_fields_set__"] = state["__pydantic_fields_set__"] - {"attempt_id"}
+    restored = StagedRef.__new__(StagedRef)
+    restored.__setstate__(state)
+
+    assert restored.attempt_id is None
+    assert pickle.loads(pickle.dumps(ref)) == ref
 
 
 async def test_bytes_whose_sha1_differs_from_the_listing_are_a_source_change(

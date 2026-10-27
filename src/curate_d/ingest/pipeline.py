@@ -59,6 +59,12 @@ class StagedRef(DomainModel):
     sha256: str = Field(min_length=64, max_length=64)
     sha1: str = Field(min_length=40, max_length=40)
     size_bytes: int = Field(ge=0)
+    attempt_id: UUID | None = Field(
+        default=None,
+        description="The upload attempt that published this version, which its readers "
+        "release once they are done. None, as in a reference built from the ledger or "
+        "pickled before attempts were carried, is released by age instead.",
+    )
 
 
 class StageOutcome(StrEnum):
@@ -160,6 +166,7 @@ async def stage_source(
             sha256=published.staged.sha256,
             sha1=published.sha1,
             size_bytes=published.staged.size_bytes,
+            attempt_id=published.staged.attempt_id,
         ),
     )
 
