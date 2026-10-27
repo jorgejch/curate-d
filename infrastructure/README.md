@@ -113,7 +113,8 @@ make lifecycle-check   # observe expiration and abort reclamation (rows 30/31) i
 ```
 
 `infrastructure/rustfs/initialize.sh`, run by `rustfs-init` with RustFS's own CLI `rc`,
-creates the bucket, sets SSE-S3 as its default, imports the expiration and
+creates the bucket the policies grant (`curate-d-staging`, prefix `content/`; it reads
+both from the policies and takes neither as input), sets SSE-S3 as its default, imports the expiration and
 `AbortIncompleteMultipartUpload` lifecycle rules, provisions the two identities from
 `infrastructure/rustfs/policies/`, and then **proves the access matrix with those
 identities**, including an encrypted probe write, before exiting zero. Both workers wait
@@ -245,7 +246,10 @@ docker compose run --rm --no-deps --entrypoint /bin/sh rustfs-init -eu -c '
 ```
 
 Run with the normal local identities (override these development defaults if local
-provisioning uses other credentials):
+provisioning uses other credentials). The bucket and prefix are not defaults: the local
+stack always stages in `curate-d-staging` under `content/`, the one grant in
+`infrastructure/rustfs/policies/`, which `rustfs-init` provisions and `compose.yaml` sets
+literally.
 
 ```bash
 CURATE_D_STAGING_S3_ENDPOINT_URL=http://127.0.0.1:9100 \
