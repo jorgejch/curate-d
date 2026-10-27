@@ -1,4 +1,5 @@
-"""The local staging bucket and prefix: one variable for workers and provisioning, rendered into the policies."""
+"""The local staging bucket and prefix: one variable for workers and provisioning,
+rendered into the policies."""
 
 import json
 import subprocess
@@ -60,7 +61,8 @@ def _resources(document: Document) -> set[str]:
 
 @pytest.mark.parametrize("worker", WORKERS)
 def test_workers_take_the_bucket_and_prefix_from_the_shared_variables(worker: str) -> None:
-    """Each worker reads the bucket and prefix from the variables rustfs-init reads, with the same defaults."""
+    """Each worker reads the bucket and prefix from the variables rustfs-init reads,
+    with the same defaults."""
     environment = _environment(worker)
     assert environment[BUCKET] == BUCKET_INPUT
     assert environment[PREFIX] == PREFIX_INPUT
@@ -81,7 +83,8 @@ def test_provisioning_is_given_the_workers_bucket_and_prefix() -> None:
 def test_a_rendered_policy_grants_exactly_the_bucket_and_prefix(
     policy: Path, bucket: str, prefix: str
 ) -> None:
-    """A rendered policy is valid JSON granting the prefix, its slashless key and the bucket, nothing more."""
+    """A rendered policy is valid JSON granting the prefix, its slashless key and the bucket,
+    nothing more."""
     result = _render(policy, bucket, prefix)
     assert result.returncode == 0, result.stderr
     assert "@" not in result.stdout
@@ -108,7 +111,8 @@ def test_render_rejects_an_unusable_bucket(bucket: str) -> None:
     ["", "content", "/content/", "a//b/", "a b/", "a*/", "a|b/", "a&b/", '"/'],
 )
 def test_render_rejects_an_unusable_prefix(prefix: str) -> None:
-    """A prefix that is empty, rooted, unslashed or outside the key alphabet never reaches a policy."""
+    """A prefix that is empty, rooted, unslashed or outside the key alphabet never reaches a
+    policy."""
     result = _render(_policies()[0], "curate-d-staging", prefix)
     assert result.returncode != 0
     assert "invalid prefix" in result.stderr
