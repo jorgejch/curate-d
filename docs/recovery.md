@@ -121,11 +121,35 @@ taxonomy check and retired fields. A version in force that it cannot read, such 
 naming a profile it dropped or a template set conditioned on an unknown `media_kind`, fails
 every read of its kind: reconciliation, classification, review resolution and dry runs fail
 with a `ConfigurationError`, `GET /configuration/<kind>` fails, and
-`PUT /configuration/taxonomy` is refused. Check the stored versions first:
+`PUT /configuration/taxonomy` is refused. Check the stored versions first, with
+`python -m curate_d.configuration.verify` run from the image about to be deployed. An
+`exec` into the running workers runs the current build instead. Run it in a one-off pod
+built, as the reset's helper pod is (`infrastructure/reset/reset-environment.sh`), from the
+I/O worker's pod template (its environment, service account and database settings), with
+only the image swapped for the new tag:
 
 ```bash
-kubectl -n <namespace> exec statefulset/curate-d-worker-io -- python -m curate_d.configuration.verify
+NS=<namespace> POD=curate-d-config-verify IMAGE=ghcr.io/jorgejch/curate-d:<new tag>
+kubectl -n "$NS" get statefulset/curate-d-worker-io -o json | jq --arg pod "$POD" --arg image "$IMAGE" '
+  .spec.template.spec as $spec | {
+    apiVersion: "v1", kind: "Pod",
+    metadata: {name: $pod, labels: {app: "curate-d", component: "config-verify"}},
+    spec: ($spec | del(.initContainers) | .restartPolicy = "Never" | .containers = [
+      .containers[] | select(.name == "worker")
+      | del(.ports, .livenessProbe, .readinessProbe, .startupProbe, .args)
+      | .image = $image | .command = ["python", "-m", "curate_d.configuration.verify"]
+    ])
+  }' | kubectl -n "$NS" apply -f -
+until phase=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.status.phase}') &&
+  [[ $phase == Succeeded || $phase == Failed ]]; do sleep 3; done
+kubectl -n "$NS" logs "$POD"
+kubectl -n "$NS" get pod "$POD" -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}{"\n"}'
+kubectl -n "$NS" delete pod "$POD"
 ```
+
+The `exitCode` read prints the exit status in the table below. A new build that needs a
+setting the current template lacks exits `2` (`configuration_verify.setup_failed`); add it to
+the container's `env` in the `jq` filter.
 
 - **When:** before the rollout, from the image about to be deployed, against the target
   database. Run from the current build, it checks nothing the new build changed.
