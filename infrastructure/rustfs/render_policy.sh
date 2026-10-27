@@ -25,6 +25,7 @@ prefix="$3"
 # S3 bucket naming: 3-63 of lowercase letters, digits, dots and hyphens, alphanumeric ends.
 case "$bucket" in
     *[!a-z0-9.-]* | [!a-z0-9]* | *[!a-z0-9]) die "invalid bucket name: ${bucket}" ;;
+    *) ;;
 esac
 [ "${#bucket}" -ge 3 ] && [ "${#bucket}" -le 63 ] || die "invalid bucket name: ${bucket}"
 
