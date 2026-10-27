@@ -10,15 +10,20 @@ same variable and placeholder names, so the change does not split.
   `rustfs-init`; mount `render_policy.sh`; render the policies in `initialize.sh`.
 - [x] 1.3 Rewrite `tests/unit/infrastructure/test_rustfs_provisioning.py`.
 - [x] 1.4 Update `infrastructure/README.md`.
+- [x] 1.5 Point the RustFS integration tests at the provisioned bucket and prefix: the same
+  variables and defaults as compose, `CURATE_D_TEST_RUSTFS_*` over them, and an INFO
+  `integration.rustfs_location_overridden` log when they are not the defaults
+  (`tests/integration/rustfs_staging.py`).
 
 ## 2. Verification
 
-- [ ] 2.1 `make check` is green. (Not run by the agent: command execution was not permitted.)
-- [ ] 2.2 `make test-stack`, `make staging-init`, and
-  `CURATE_D_STAGING_S3_BUCKET=other CURATE_D_STAGING_S3_CONTENT_PREFIX=x/ make staging-init`
-  pass the access-matrix check. (Not run by the agent.)
+- [x] 2.1 `make check` is green.
+- [x] 2.2 `make test-stack` and `rustfs-init` pass the access-matrix check on the defaults and
+  with `CURATE_D_STAGING_S3_BUCKET`/`CURATE_D_STAGING_S3_CONTENT_PREFIX` overridden; an
+  unusable bucket or prefix fails before a bucket is created. The RustFS integration tests
+  pass on both.
 
 ## Workflow follow-up
 
 - [x] Sync the delta spec into `openspec/specs/` and archive the change.
-- [ ] `uv run openspec validate --all --strict`. (Not run by the agent.)
+- [x] `uv run openspec validate --all --strict`.

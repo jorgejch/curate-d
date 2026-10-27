@@ -252,7 +252,11 @@ provisioning uses other credentials). The local bucket and prefix default to
 `curate-d-staging` and `content/`. Export `CURATE_D_STAGING_S3_BUCKET` or
 `CURATE_D_STAGING_S3_CONTENT_PREFIX` (the prefix ends with `/`) before `make stack-up` or
 `make staging-init` to change them: the workers and `rustfs-init` read the same variables, and
-`rustfs-init` renders the policies for them. Use the same values in the command below.
+`rustfs-init` renders the policies for them. The RustFS integration tests read the same
+variables and defaults (`tests/integration/rustfs_staging.py`), log
+`integration.rustfs_location_overridden` at INFO when they are not the defaults, and take
+`CURATE_D_TEST_RUSTFS_BUCKET` and `CURATE_D_TEST_RUSTFS_PREFIX` over them. Use the same values
+in the command below.
 
 ```bash
 CURATE_D_STAGING_S3_ENDPOINT_URL=http://127.0.0.1:9100 \
