@@ -12,8 +12,8 @@
         "s3:ListMultipartUploadParts"
       ],
       "Resource": [
-        "arn:aws:s3:::curate-d-staging/content",
-        "arn:aws:s3:::curate-d-staging/content/*"
+        "arn:aws:s3:::@BUCKET@/@PREFIX_KEY@",
+        "arn:aws:s3:::@BUCKET@/@PREFIX@*"
       ]
     },
     {
@@ -24,7 +24,7 @@
         "s3:ListBucketMultipartUploads",
         "s3:GetBucketLocation"
       ],
-      "Resource": ["arn:aws:s3:::curate-d-staging"]
+      "Resource": ["arn:aws:s3:::@BUCKET@"]
     }
   ]
 }

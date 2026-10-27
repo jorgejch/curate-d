@@ -12,6 +12,8 @@
 
 set -eu
 
+BUCKET="${RUSTFS_STAGING_BUCKET:?bucket name is required}"
+PREFIX="${RUSTFS_STAGING_PREFIX:-content/}"
 ENDPOINT="${RUSTFS_ENDPOINT:?endpoint is required}"
 ROOT_USER="${RUSTFS_ROOT_USER:?root user is required}"
 ROOT_PASSWORD="${RUSTFS_ROOT_PASSWORD:?root password is required}"
@@ -22,34 +24,18 @@ WRITER_SECRET="${RUSTFS_STAGING_WRITER_SECRET:?writer secret is required}"
 EXPIRE_DAYS="${RUSTFS_STAGING_EXPIRE_DAYS:-7}"
 ABORT_DAYS="${RUSTFS_STAGING_ABORT_DAYS:-1}"
 
-READER_POLICY=/policies/staging-reader.json
-WRITER_POLICY=/policies/staging-writer.json
-
 say() { echo "rustfs-init: $*"; }
 fail() { echo "rustfs-init: FAILED: $*" >&2; exit 1; }
 
-# The bucket and prefix are whatever the policies grant. A policy cannot be templated as
-# `rc` imports it, so the policies are where the two are written, and reading them here means
-# provisioning can never create a bucket or prefix that no identity is granted. Each policy
-# must carry exactly one `arn:aws:s3:::<bucket>/<prefix>*` grant, the same in both. `fail`
-# in a command substitution only ends the subshell; the assignment carries its status out.
-prefix_grant() {
-    jq -er '[.Statement[].Resource | if type == "string" then [.] else . end | .[]
-             | select(endswith("/*"))] | if length == 1 then .[0] else empty end' "$1" \
-        2>/dev/null || fail "$1 does not grant exactly one <bucket>/<prefix>* resource"
-}
-grant="$(prefix_grant "$READER_POLICY")"
-writer_grant="$(prefix_grant "$WRITER_POLICY")"
-[ "$writer_grant" = "$grant" ] \
-    || fail "${READER_POLICY} grants ${grant} but ${WRITER_POLICY} grants ${writer_grant}"
-case "$grant" in
-    arn:aws:s3:::?*/?*/\*) ;;
-    *) fail "${grant} is not of the form arn:aws:s3:::<bucket>/<prefix>/*" ;;
-esac
-grant="${grant#arn:aws:s3:::}"
-grant="${grant%\*}"
-BUCKET="${grant%%/*}"
-PREFIX="${grant#*/}"
+# `rc` imports a policy as written, so the templates in policies/ are rendered for this
+# bucket and prefix first. The render rejects an unusable bucket or prefix before anything
+# is created, so no identity is ever scoped to a grant the bucket does not match.
+READER_POLICY=/tmp/staging-reader.json
+WRITER_POLICY=/tmp/staging-writer.json
+sh /render_policy.sh /policies/staging-reader.json "$BUCKET" "$PREFIX" >"$READER_POLICY" \
+    || fail "could not render the reader policy for ${BUCKET}/${PREFIX}"
+sh /render_policy.sh /policies/staging-writer.json "$BUCKET" "$PREFIX" >"$WRITER_POLICY" \
+    || fail "could not render the writer policy for ${BUCKET}/${PREFIX}"
 
 say "waiting for ${ENDPOINT}"
 rc alias set admin "$ENDPOINT" "$ROOT_USER" "$ROOT_PASSWORD" >/dev/null \
