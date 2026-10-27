@@ -107,10 +107,29 @@ def test_no_out_of_scope_rule_suppression_remains() -> None:
 def test_scoped_configuration_files_receive_text_analysis() -> None:
     """TOML and INI files receive secret detection without pretending to be Python."""
     properties = _properties()
-    expected = {"sonar.text.inclusions.activate": "true", "sonar.text.inclusions": "**/*"}
+    expected = {"sonar.text.inclusions.activate": "true"}
     for key, value in expected.items():
         assert properties.get(key) == value, f"{key} must be {value!r} for scoped text analysis"
+    patterns = {entry.strip() for entry in properties.get("sonar.text.inclusions", "").split(",")}
+    assert {"pyproject.toml", "alembic.ini"} <= patterns, (
+        "sonar.text.inclusions misses config files"
+    )
     assert "sonar.lang.patterns.py" not in properties, "Do not classify config files as Python"
+
+
+def test_text_inclusions_do_not_expand_analysis_scope() -> None:
+    """Secret scanning cannot add docs, OpenSpec or other unselected Git-tracked files."""
+    properties = _properties()
+    expected = {
+        f"{entry.strip()}/**" if (REPOSITORY_ROOT / entry.strip()).is_dir() else entry.strip()
+        for key in ("sonar.sources", "sonar.tests")
+        for entry in properties[key].split(",")
+    }
+    actual = {entry.strip() for entry in properties.get("sonar.text.inclusions", "").split(",")}
+    assert actual == expected, (
+        "sonar.text.inclusions must mirror source/test paths; it independently adds Git-tracked "
+        f"files to secret scanning. Expected {sorted(expected)}, got {sorted(actual)}"
+    )
 
 
 def test_project_identity_python_and_coverage_report_are_preserved() -> None:

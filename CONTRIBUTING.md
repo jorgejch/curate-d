@@ -117,14 +117,16 @@ All other paths are outside ordinary Sonar analysis, including GitHub workflows,
 root files, docs and OpenSpec artifacts. This deliberately trades broad Sonar findings
 for explicit, stable scope; it does not configure other security scanners.
 
-Text inclusions cover all scoped text files so TOML and INI receive secret detection
-without pretending to be Python. This does not add general TOML/INI language rules or
-package vulnerability scanning. Docker analysis checks the image definition, not the
-built image; check scan logs for parsing warnings with newer Dockerfile syntax.
+Text inclusions mirror the source/test paths so TOML and INI receive secret detection
+without pretending to be Python. They independently add Git-tracked files to scanning:
+`**/*` would also admit docs and other unselected paths, regardless of `sonar.sources`.
+This does not add general TOML/INI language rules or package vulnerability scanning.
+Docker analysis checks the image definition, not the built image; check scan logs for
+parsing warnings with newer Dockerfile syntax.
 
 Adding an unrelated directory needs no exclusion edit. To add a source directory or file, update
-`sonar.sources`, decide whether it belongs in coverage (otherwise extend
-`sonar.coverage.exclusions`), and update the scope tests in
+`sonar.sources` and the matching `sonar.text.inclusions` pattern, decide whether it belongs
+in coverage (otherwise extend `sonar.coverage.exclusions`), and update the scope tests in
 `tests/unit/infrastructure/test_sonar_properties.py` and the release-pipeline spec.
 Keep source and test roots disjoint. `sonar.tests`, not pytest's `testpaths`, classifies
 test code for this scanner. No duplication exclusions are needed for the current roots.
