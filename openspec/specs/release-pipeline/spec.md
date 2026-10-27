@@ -439,8 +439,10 @@ run the scan, and MUST fail when its token is missing rather than skip the analy
 
 ### Requirement: SonarQube measures production code only
 SonarQube Cloud MUST count coverage on `src/` only, and duplication on `src/` and
-`infrastructure/` only. Test code under `tests/` MUST NOT count toward either metric. A new
-top-level directory MUST be excluded from both until it is deliberately added.
+`infrastructure/` only. It MUST explicitly classify `tests/` as test code, independently
+of pytest configuration, so tests count toward neither metric. Coverage MUST import
+only `coverage.xml` from the unit suite. A scope or report-path drift MUST fail the unit
+suite naming the setting.
 
 #### Scenario: Uncovered helper in infrastructure
 - **WHEN** a script under `infrastructure/` has no unit test
@@ -449,35 +451,37 @@ top-level directory MUST be excluded from both until it is deliberately added.
 
 #### Scenario: Duplicated test fixture
 - **WHEN** two test modules under `tests/` share a copied block
-- **THEN** SonarQube reports no duplication for it
+- **THEN** SonarQube classifies them as tests and reports neither coverage nor duplication
+  for them
+
+#### Scenario: Metric setting drifts
+- **WHEN** coverage exclusions no longer name only `infrastructure/**`, duplication
+  exclusions are added, or the coverage report path changes
+- **THEN** the unit suite fails naming the setting
 
 #### Scenario: New top-level directory left unlisted
-- **WHEN** a top-level directory is added and not named in the SonarQube exclusions
-- **THEN** its files count toward coverage and duplication, and the unit test pinning the
-  measured scope fails naming the directory
+- **WHEN** a top-level directory is added outside the selected source and test roots
+- **THEN** its files remain outside analysis and both metrics without adding exclusions
 
-### Requirement: SonarQube does not analyse docs/ or openspec/
-SonarQube Cloud MUST leave every file under `docs/` and `openspec/` out of its analysis, so it
-raises no issue, security hotspot or secret there. Its analysis exclusions MUST be exactly
-`docs/**` and `openspec/**`. A drift either way MUST fail the unit suite, naming the pattern
-missing or added.
+### Requirement: SonarQube analyses explicitly selected source and test trees
+SonarQube Cloud MUST use `src/` and `infrastructure/` as its only source roots and `tests/`
+as its only test root. These scopes MUST be disjoint and MUST NOT depend on pytest's
+`testpaths`. It MUST NOT enumerate other paths through exclusions or inclusions. Scope
+drift MUST fail the unit suite naming the setting. Contributor documentation MUST explain
+how to expand the roots and review metric scope.
 
-#### Scenario: Generated diagram page analysed
-- **WHEN** a pull request changes the inline script of a page under `docs/diagrams/`
-- **THEN** SonarQube Cloud's analysis of it reports no issue on that page
+#### Scenario: Existing non-source paths
+- **WHEN** a migration, Dockerfile, workflow, root file, document or OpenSpec artifact changes
+- **THEN** SonarQube does not analyse it because it is outside the selected roots
 
-#### Scenario: Change artifact analysed
-- **WHEN** a pull request adds a file under `openspec/changes/`
-- **THEN** SonarQube Cloud's analysis of it reports no issue on that file
+#### Scenario: New top-level directory
+- **WHEN** a directory outside the selected roots is added
+- **THEN** it receives no Sonar analysis, coverage or duplication measurement, without a
+  new exclusion or test update
 
-#### Scenario: Exclusion dropped
-- **WHEN** the SonarQube analysis exclusions no longer list `docs/**` or `openspec/**`
-- **THEN** the unit test pinning the analysed scope fails, naming the missing pattern
-
-#### Scenario: Another directory excluded from analysis
-- **WHEN** a pattern other than `docs/**` and `openspec/**` is added to the SonarQube analysis
-  exclusions
-- **THEN** the unit test pinning the analysed scope fails, naming the added pattern
+#### Scenario: Source and test roots drift
+- **WHEN** a source or test root changes or a source root overlaps the test tree
+- **THEN** the unit suite fails naming the setting
 
 ### Requirement: CI checkouts keep the token off disk
 The checks job, the coverage-report job and the integration job MUST check the repository

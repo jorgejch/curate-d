@@ -100,6 +100,36 @@ cleanup of unrelated code.
   local stack's containers and data (including schedules an earlier `stack-up` wrote), so
   the suite starts from a clean database as in CI.
 
+### SonarQube Cloud scope
+
+[`sonar-project.properties`](sonar-project.properties) defines the CI scanner's scope:
+
+| Tree | Classification | Coverage | Duplication |
+| --- | --- | --- | --- |
+| `src/` | Source | Unit tests only, from `coverage.xml` | Included |
+| `infrastructure/` | Source | Excluded | Included, including copies from `src/` |
+| `tests/` | Test | Not measured | Not measured |
+
+All other paths are outside ordinary Sonar analysis, including migrations, Dockerfiles,
+GitHub workflows, root files, docs and OpenSpec artifacts. This deliberately trades broad
+Sonar findings for explicit, stable scope; it does not configure other security scanners.
+
+Adding an unrelated directory needs no exclusion edit. To add a production tree, update
+`sonar.sources`, decide whether it belongs in coverage (otherwise extend
+`sonar.coverage.exclusions`), and update the scope tests in
+`tests/unit/infrastructure/test_sonar_properties.py` and the release-pipeline spec.
+Keep source and test roots disjoint. `sonar.tests`, not pytest's `testpaths`, classifies
+test code for this scanner. No duplication exclusions are needed for the current roots.
+
+CI uses SonarScanner CLI through the scan action, not SonarScanner for Python (`pysonar`).
+Keep Cloud's Automatic Analysis disabled: Python coverage requires CI-based analysis.
+After changing scope, check the next CI scan's indexed source/test files and coverage import;
+local tests validate the properties, not Cloud-side settings or computed metrics.
+
+References: [initial scope](https://docs.sonarsource.com/sonarqube-cloud/managing-your-projects/project-analysis/setting-analysis-scope/setting-initial-scope),
+[metric exclusions](https://docs.sonarsource.com/sonarqube-cloud/managing-your-projects/project-analysis/setting-analysis-scope/exclude-from-coverage-duplication),
+[Python coverage](https://docs.sonarsource.com/sonarqube-cloud/analyzing-source-code/test-coverage/python-test-coverage).
+
 ## Code conventions
 
 The full list is in [`openspec/config.yaml`](openspec/config.yaml) and

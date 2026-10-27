@@ -67,7 +67,7 @@ def test_the_two_jobs_split_on_a_protected_branch_push() -> None:
 
 def test_both_jobs_write_the_unit_coverage_report() -> None:
     """SonarQube reads coverage.xml; only the unit suite, named by path, writes it."""
-    # By path: pytest's testpaths names the whole tests tree for SonarQube, so a bare
+    # By path: pytest's testpaths controls collection of the whole tests tree, so a bare
     # run would collect the integration suite and fold it into the coverage floor.
     command = "uv run --locked --no-build pytest -n auto --cov-report=xml tests/unit"
     assert _step("checks", "Unit tests")["run"] == command
