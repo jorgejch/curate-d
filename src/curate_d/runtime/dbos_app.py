@@ -36,9 +36,10 @@ def application_name(environment: DeploymentEnvironment | None) -> str:
 
     DBOS owns every workflow, queue, schedule and version under this name. Queue and
     schedule names are unique across applications, so environments sharing a system
-    database would collide under one name; hence one name per environment, and a
-    deployment that forgets its environment fails at startup instead of idling as another
-    application.
+    database would collide under one name; hence one name per environment. Nothing rejects
+    an unset environment: a deployment that forgets `CURATE_D_ENVIRONMENT` starts and runs
+    as `curate-d-local`, sharing that name's workflows, queues and schedules with any local
+    process on the same system database, while its telemetry carries no environment label.
     """
     return f"{APPLICATION_NAME}-{(environment or DeploymentEnvironment.LOCAL).value}"
 

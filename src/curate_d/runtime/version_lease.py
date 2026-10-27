@@ -20,7 +20,8 @@ across the change, waiting a bounded time (`hold_fence_exclusive`).
 DBOS commits a fork on its own connection, not on the lock's, so a lock lost mid-sweep
 does not undo the writes made under it. Each hold can therefore ask its own session
 whether it still holds the lock (`VersionHold.still_held`, `FenceHold.still_held`); the
-sweep asks before and after every fork and stops once either answer is no.
+sweep asks before each fork and before every cancel and stops the batch once either answer
+is no.
 
 The locks are keyed by `version_lease_key` and `promotion_fence_key` in the database
 holding the DBOS system tables, under the executor lease's connection settings and pooler
