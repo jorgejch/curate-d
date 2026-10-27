@@ -68,6 +68,10 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 
+          # Commit through the GitHub API, which signs as the GitHub App: the branch rules
+          # accept only verified commits. The API can't rebase or cherry-pick.
+          use_commit_signing: true
+
           # This is an optional setting that allows Claude to read CI results on PRs
           additional_permissions: |
             actions: read
