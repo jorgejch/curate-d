@@ -50,13 +50,43 @@ def _render(template: Path, bucket: str, prefix: str) -> subprocess.CompletedPro
     )
 
 
-def _resources(document: Document) -> set[str]:
-    """Return every resource ARN a policy document's statements name."""
-    resources: set[str] = set()
-    for statement in cast(list[Document], document["Statement"]):
-        resource = statement["Resource"]
-        resources.update([resource] if isinstance(resource, str) else cast(list[str], resource))
-    return resources
+def _expected_statements(policy: str, bucket: str, prefix: str) -> list[Document]:
+    """Return the statements a policy template must render to for a bucket and prefix."""
+    objects = [f"arn:aws:s3:::{bucket}/{prefix.rstrip('/')}", f"arn:aws:s3:::{bucket}/{prefix}*"]
+    if policy == "staging-reader.json":
+        return [
+            {
+                "Sid": "ReadStagedMediaOnly",
+                "Effect": "Allow",
+                "Action": ["s3:GetObject"],
+                "Resource": objects,
+            }
+        ]
+    return [
+        {
+            "Sid": "StageAndReleaseMedia",
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetObject",
+                "s3:PutObject",
+                "s3:DeleteObject",
+                "s3:AbortMultipartUpload",
+                "s3:ListMultipartUploadParts",
+            ],
+            "Resource": objects,
+        },
+        {
+            "Sid": "AccountOccupancyAndReconcileOrphans",
+            "Effect": "Allow",
+            "Action": ["s3:ListBucket", "s3:ListBucketMultipartUploads", "s3:GetBucketLocation"],
+            "Resource": [f"arn:aws:s3:::{bucket}"],
+        },
+    ]
+
+
+def test_the_policy_templates_are_the_two_rustfs_init_renders() -> None:
+    """rustfs-init renders the reader and writer templates by name, and no others exist."""
+    assert [path.name for path in _policies()] == ["staging-reader.json", "staging-writer.json"]
 
 
 @pytest.mark.parametrize("worker", WORKERS)
@@ -83,16 +113,14 @@ def test_provisioning_is_given_the_workers_bucket_and_prefix() -> None:
 def test_a_rendered_policy_grants_exactly_the_bucket_and_prefix(
     policy: Path, bucket: str, prefix: str
 ) -> None:
-    """A rendered policy is valid JSON granting the prefix, its slashless key and the bucket,
-    nothing more."""
+    """A rendered policy is valid JSON whose every statement grants exactly its actions on the
+    prefix, its slashless key or the bucket, nothing more."""
     result = _render(policy, bucket, prefix)
     assert result.returncode == 0, result.stderr
     assert "@" not in result.stdout
-    grant = f"arn:aws:s3:::{bucket}/{prefix}*"
-    allowed = {f"arn:aws:s3:::{bucket}", f"arn:aws:s3:::{bucket}/{prefix.rstrip('/')}", grant}
-    resources = _resources(cast(Document, json.loads(result.stdout)))
-    assert grant in resources
-    assert resources <= allowed, f"{policy.name} grants {sorted(resources - allowed)}"
+    document = cast(Document, json.loads(result.stdout))
+    assert document["Version"] == "2012-10-17"
+    assert document["Statement"] == _expected_statements(policy.name, bucket, prefix)
 
 
 @pytest.mark.parametrize(
