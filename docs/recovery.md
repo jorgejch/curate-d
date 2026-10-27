@@ -81,6 +81,35 @@ Alert on these events:
 - `worker.drain_state_unknown`: a stopping worker could not read whether it left workflows
   running, so it keeps its executor lease until the process exits. If it repeats, check the
   database's reachability at shutdown.
+- `recovery_sweep.target_unregistered`: the target, DBOS's latest version, has no
+  `lease_versions` row, although its workers registered it at startup: the row was removed
+  since, by hand or by restoring a dump taken before the target registered. Without the
+  target's registration time no other version can be ordered against it, so every older
+  version's rows are in `failed`, every tick. Only a worker's startup registers a version:
+  restart a worker of the target (`kubectl -n <namespace> rollout restart
+  statefulset/curate-d-worker-io`), and the next tick forks. The new row carries the
+  restart's time, so first check `lease_versions` for a build newer than the target, as after
+  a rollback: re-registering would order the target after it, and the sweep would fork that
+  build's rows onto older code. If there is one, pause the sweep (Kill switch) until that
+  build is rolled forward.
+- `staging.supervisor_failed`: a worker's staging event loop died after startup, of an error
+  its idle cleanup does not catch (`error_type` names it). The worker keeps dequeuing, but on
+  that pod every step that stages or reads staged content fails, as staging is no longer
+  running, and on an I/O worker idle cleanup has stopped. Nothing restarts the worker: delete
+  the pod that logged it (`kubectl -n <namespace> delete pod <pod>`), which restarts it
+  through staging readiness, then find the cause in its logs.
+
+Logged at ERROR or above, not alerted on, because the restart that follows repairs them:
+
+- `executor_lease.lost` and `worker.lease_lost_exiting` (CRITICAL): a worker's lease monitor,
+  which polls every 5 s, found its lease session no longer holding every lock, or broken. The
+  worker shuts DBOS down without draining and exits with status 75. Kubernetes restarts the
+  pod, which takes the lease again before launch, and DBOS's startup recovery resumes its
+  PENDING rows; a pod that does not come back leaves them to the sweep's dead-executor
+  re-enqueue. If a worker keeps restarting with status 75, check the pooler under
+  [Connection pooling](#connection-pooling). In the operator sweep, `executor_lease.lost`
+  names `version-lease <version>`, `operator_sweep.version_lease_lost` follows, and the
+  command exits `3`: run it again.
 
 ## Connection pooling
 
