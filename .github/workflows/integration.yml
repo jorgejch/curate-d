@@ -280,7 +280,7 @@ jobs:
       # Serial: a shard has one database, and the suite tests advisory locks across
       # independent connections. The split is the plan's count, not `strategy.job-total`,
       # so a second matrix dimension cannot shrink every group. RustFS is the only staging
-      # backend here; OVH verification stays PENDING, and the report header says so.
+      # backend here; OVH is verified out of band and recorded in staging-compatibility.md.
       - name: Integration suite
         run: >-
           uv run --locked --no-build pytest tests/integration
@@ -580,7 +580,7 @@ jobs:
               return int(match.group(1)) if match else 0
 
           reports = sorted(Path("reports").glob("integration-*.xml"), key=group_of)
-          lines = ["### Integration suite", "", "OVH verification remains PENDING.", ""]
+          lines = ["### Integration suite", "", "Staging backend: RustFS only. OVH runs out of band; its results are in `infrastructure/staging-compatibility.md`.", ""]
           if not reports:
               lines.append("The suite did not produce a result; nothing was verified.")
           else:
