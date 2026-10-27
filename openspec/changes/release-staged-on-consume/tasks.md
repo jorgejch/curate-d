@@ -5,7 +5,7 @@ on the one before it, so nothing here splits usefully across agents.
 
 ## 1. Conditional release in staging
 
-- [ ] 1.1 Add `attempt_id` to `StagingOccupancy.release` (design decision 2): a named attempt that is not the registered one releases to a no-op. Verify with unit tests in `tests/unit/staging/test_occupancy.py`: matching attempt deletes; another attempt registered leaves it registered and readable; nothing registered no-ops; a download holding the entry unpublishes only; a deletion failure after the unregistration raises and a repeat no-ops; no `attempt_id` behaves as before.
+- [x] 1.1 Add `attempt_id` to `StagingOccupancy.release` (design decision 2): a named attempt that is not the registered one releases to a no-op. Verify with unit tests in `tests/unit/staging/test_occupancy.py`: matching attempt deletes; another attempt registered leaves it registered and readable; nothing registered no-ops; a download holding the entry unpublishes only; a deletion failure after the unregistration raises and a repeat no-ops; no `attempt_id` behaves as before.
 
 ## 2. The staged attempt travels with the reference
 

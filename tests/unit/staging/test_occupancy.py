@@ -874,6 +874,80 @@ async def test_a_failed_release_deletion_is_surfaced(
     assert await index.lookup(obj.key) is None
 
 
+async def test_a_release_naming_the_registered_attempt_deletes_it(
+    store: FakeObjectStore, index: FakeCacheIndex
+) -> None:
+    """A consumer's release names the version it read, and that version goes."""
+    obj = publish(index, store, seed=1, size=512)
+    subject = occupancy_for(store, index, max_bytes=10_000)
+
+    released = await subject.release(obj.key, attempt_id=obj.attempt_id)
+
+    assert (released.deleted, released.freed_bytes) == (True, 512)
+    assert store.deleted == [obj.object_key]
+    assert await index.lookup(obj.key) is None
+
+
+async def test_a_release_naming_a_replaced_attempt_leaves_the_newer_version(
+    store: FakeObjectStore, index: FakeCacheIndex
+) -> None:
+    """A key restaged since it was read holds bytes a newer version's reader needs."""
+    newer = publish(index, store, seed=1, size=512)
+    subject = occupancy_for(store, index, max_bytes=10_000)
+
+    released = await subject.release(newer.key, attempt_id=uuid4())
+
+    assert (released.deleted, released.freed_bytes) == (False, 0)
+    assert store.deleted == []
+    assert await index.lookup(newer.key) == newer
+    assert index.operations == []
+
+
+async def test_a_release_naming_an_attempt_of_an_unregistered_key_is_a_no_op(
+    store: FakeObjectStore, index: FakeCacheIndex
+) -> None:
+    """A repeated consumer release finds nothing and changes nothing."""
+    subject = occupancy_for(store, index, max_bytes=10_000)
+
+    released = await subject.release(StagingKey(f"{99:032x}"), attempt_id=uuid4())
+
+    assert released.deleted is False
+    assert index.operations == []
+
+
+async def test_a_release_naming_a_held_attempt_unpublishes_but_keeps_the_bytes(
+    store: FakeObjectStore, index: FakeCacheIndex
+) -> None:
+    """A download still reading the consumed version keeps its bytes until the sweep."""
+    obj = publish(index, store, seed=1, size=512)
+    index.held.add(obj.key)
+    subject = occupancy_for(store, index, max_bytes=10_000)
+
+    released = await subject.release(obj.key, attempt_id=obj.attempt_id)
+
+    assert released.deleted is False
+    assert store.deleted == []
+    assert index.released == [obj.key]
+    assert await index.lookup(obj.key) is None
+
+
+async def test_a_release_by_attempt_whose_deletion_failed_repeats_to_a_no_op(
+    store: FakeObjectStore, index: FakeCacheIndex
+) -> None:
+    """A retried release after a refused delete finds the row gone; reconciliation has the bytes."""
+    obj = publish(index, store, seed=1, size=512)
+    store.rejects.add(obj.object_key)
+    subject = occupancy_for(store, index, max_bytes=10_000)
+
+    with pytest.raises(StagingObjectStoreError, match="rejected"):
+        await subject.release(obj.key, attempt_id=obj.attempt_id)
+    again = await subject.release(obj.key, attempt_id=obj.attempt_id)
+
+    assert again.deleted is False
+    assert obj.object_key in store.objects
+    assert await index.lookup(obj.key) is None
+
+
 async def test_release_runs_under_the_writer_lock(
     store: FakeObjectStore, index: FakeCacheIndex
 ) -> None:

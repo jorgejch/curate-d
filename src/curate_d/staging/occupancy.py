@@ -203,7 +203,8 @@ class ReleaseReport:
     `deleted` is False both when nothing was registered — a repeated release — and when
     a download still holds the entry. Neither is a failure: the registration is gone
     either way, and in the second case the bytes are an orphan the reader keeps reading
-    and the next sweep collects.
+    and the next sweep collects. It is False too when the release named an attempt the
+    key no longer holds; that release changed nothing.
     """
 
     key: StagingKey
@@ -612,13 +613,19 @@ class StagingOccupancy:
             raise reclamation.failure
         return replace(reclamation.report, orphans_deleted=orphans_deleted)
 
-    async def release(self, key: StagingKey) -> ReleaseReport:
+    async def release(self, key: StagingKey, *, attempt_id: UUID | None = None) -> ReleaseReport:
         """Drop `key`'s registration and delete its bytes when no download holds them.
 
         Prompt rather than deferred to the next sweep, because the bytes bill until they
         are gone. Safe to repeat: a key with nothing registered releases to a no-op, so a
         completion handler retried after a lost reply does not have to know whether its
         first attempt landed.
+
+        Args:
+            key: Staging key to release.
+            attempt_id: Release only this attempt. A key restaged since then holds a
+                newer version a reader may still need, so another registered attempt
+                releases to a no-op. None releases whatever is registered.
 
         Returns:
             What was dropped, and whether the bytes went with the registration.
@@ -630,6 +637,12 @@ class StagingOccupancy:
                 a registration naming deleted bytes is not.
         """
         async with self._index.writer_lock("occupancy.release"):
+            if attempt_id is not None:
+                # Every index mutation takes the writer lock, so the attempt read here is
+                # still the registered one when the eviction below runs.
+                current = await self._index.lookup(key)
+                if current is None or current.attempt_id != attempt_id:
+                    return ReleaseReport(key=key, freed_bytes=0, deleted=False)
             registration = await self._index.evict(key)
             if registration is None:
                 # Either nothing is registered or a download holds the entry. The second
