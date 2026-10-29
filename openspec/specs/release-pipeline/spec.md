@@ -476,13 +476,22 @@ suite naming the setting.
 ### Requirement: SonarQube analyses explicitly selected source and test trees
 SonarQube Cloud MUST use `src/`, `ops/`, `migrations/`, `docker/`, `pyproject.toml`,
 `alembic.ini` and `compose.yaml` as its only sources, and `tests/` as tests. Scopes MUST be disjoint,
-independent of pytest and free of source/test filters. Scoped text MUST be eligible for
-secret detection. Scope or text-setting drift MUST fail unit tests naming the setting.
+independent of pytest and free of source/test filters. Scoped text and top-level `docs/`
+files MUST get secret detection; those files get nothing else. Scope or text-setting drift MUST fail unit tests naming the setting.
 Contributor docs MUST explain scope maintenance, metrics and language support.
 
 #### Scenario: Existing non-source paths
-- **WHEN** a workflow, unlisted root file, document or OpenSpec artifact changes
+- **WHEN** a workflow, unlisted root file or OpenSpec artifact changes
 - **THEN** SonarQube does not analyse it because it is outside the selected paths
+
+#### Scenario: Document changes
+- **WHEN** a file directly in `docs/` changes
+- **THEN** SonarQube scans it for secrets only, and it receives no other issue, coverage or
+  duplication measurement
+
+#### Scenario: Generated diagram changes
+- **WHEN** a file under `docs/diagrams/` changes
+- **THEN** SonarQube does not analyse it, secrets included
 
 #### Scenario: New top-level directory
 - **WHEN** a directory outside the selected paths is added
@@ -512,7 +521,8 @@ Contributor docs MUST explain scope maintenance, metrics and language support.
   Dockerfile-specific rules apply to Compose
 
 #### Scenario: Secret detection configuration drifts
-- **WHEN** text inclusions no longer cover all scoped text files or are deactivated
+- **WHEN** text inclusions no longer cover all scoped text files and the files directly in
+  `docs/`, add any other path, or are deactivated
 - **THEN** the unit suite fails naming the setting
 
 ### Requirement: CI checkouts keep the token off disk

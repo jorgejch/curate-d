@@ -5,6 +5,10 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 PROPERTIES = REPOSITORY_ROOT / "sonar-project.properties"
 
+# Scanned for secrets only: outside sonar.sources, so no language rules, coverage or duplication.
+# One level deep, so docs/diagrams/'s generated pages stay out.
+SECRET_SCAN_ONLY = frozenset({"docs/*"})
+
 
 def _properties() -> dict[str, str]:
     """Parse sonar-project.properties, joining backslash-continued lines."""
@@ -126,17 +130,17 @@ def test_scoped_configuration_files_receive_text_analysis() -> None:
 
 
 def test_text_inclusions_do_not_expand_analysis_scope() -> None:
-    """Secret scanning cannot add docs, OpenSpec or other unselected Git-tracked files."""
+    """Secret scanning adds the files directly in docs/ and no other unselected path."""
     properties = _properties()
     expected = {
         f"{entry.strip()}/**" if (REPOSITORY_ROOT / entry.strip()).is_dir() else entry.strip()
         for key in ("sonar.sources", "sonar.tests")
         for entry in properties[key].split(",")
-    }
+    } | SECRET_SCAN_ONLY
     actual = {entry.strip() for entry in properties.get("sonar.text.inclusions", "").split(",")}
     assert actual == expected, (
-        "sonar.text.inclusions must mirror source/test paths; it independently adds Git-tracked "
-        f"files to secret scanning. Expected {sorted(expected)}, got {sorted(actual)}"
+        "sonar.text.inclusions must mirror source/test paths plus docs/*; it independently adds "
+        f"Git-tracked files to secret scanning. Expected {sorted(expected)}, got {sorted(actual)}"
     )
 
 

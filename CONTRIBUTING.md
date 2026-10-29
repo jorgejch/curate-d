@@ -113,13 +113,17 @@ cleanup of unrelated code.
 | `pyproject.toml`, `alembic.ini` | Source (text/secret detection) | Excluded | No dedicated language analyzer |
 | `compose.yaml` | Source (including text/secret detection) | Excluded | Where supported by the analyzer |
 | `tests/` | Test | Not measured | Not measured |
+| `docs/*` (not `docs/diagrams/`) | Secret detection only (text inclusion, not a source) | Not measured | Not measured |
 
 All other paths are outside ordinary Sonar analysis, including GitHub workflows, unlisted
-root files, docs and OpenSpec artifacts. This deliberately trades broad Sonar findings
+root files, docs and OpenSpec artifacts; the files directly in `docs/` are still scanned
+for secrets. This deliberately trades broad Sonar findings
 for explicit, stable scope; it does not configure other security scanners.
 
 Text inclusions mirror the source/test paths so TOML and INI receive secret detection
-without pretending to be Python. They independently add Git-tracked files to scanning:
+without pretending to be Python, and add `docs/*` so the runbooks are scanned for leaked
+secrets without language rules. A single `*` stops at the directory, so the generated pages
+under `docs/diagrams/` are not scanned. They independently add Git-tracked files to scanning:
 `**/*` would also admit docs and other unselected paths, regardless of `sonar.sources`.
 This does not add general TOML/INI language rules or package vulnerability scanning.
 Docker analysis checks the image definition, not the built image; check scan logs for
