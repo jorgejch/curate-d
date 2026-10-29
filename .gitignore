@@ -58,6 +58,9 @@ docs/diagrams/**/*.finalize.json
 docs/diagrams/**/*.finalize-summary.json
 docs/diagrams/**/*.browser-check.json
 
+# Google Antigravity writes its built-in system skills into each open workspace.
+/skills/
+
 # Misc.
 /.logfire/
 /.hypothesis/
