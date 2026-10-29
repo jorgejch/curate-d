@@ -6,12 +6,16 @@ from contextlib import asynccontextmanager
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from logfire.testing import TestExporter
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from curate_d.api.app import ALERTING_TEST_PATH, AlertingTestError, create_app
 from curate_d.api.backends import Backends
 from curate_d.config import DeploymentEnvironment, Settings
+from curate_d.observability import trace_requests
 from tests.unit.api.fakes import StubEngine, backends
+from tests.unit.observability.capture import traced_to
 
 
 def _app(settings: Settings) -> FastAPI:
@@ -56,6 +60,27 @@ def test_the_route_raises_an_unhandled_alerting_test_error() -> None:
         pytest.raises(AlertingTestError, match="deliberate internal error"),
     ):
         client.get(ALERTING_TEST_PATH)
+
+
+def test_the_request_span_records_the_exception() -> None:
+    """The traced request's span carries the exception type and its alerting-test message."""
+    exporter = TestExporter()
+    with traced_to(SimpleSpanProcessor(exporter)):
+        app = _app(_dev())
+        trace_requests(app)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            assert client.get(ALERTING_TEST_PATH).status_code == 500
+    events = [
+        dict(event.attributes or {})
+        for span in exporter.exported_spans
+        for event in span.events
+        if event.name == "exception"
+    ]
+    assert any(
+        str(event.get("exception.type", "")).endswith("AlertingTestError")
+        and "deliberate internal error" in str(event.get("exception.message", ""))
+        for event in events
+    ), events
 
 
 def test_the_route_is_absent_in_prod_by_default() -> None:
