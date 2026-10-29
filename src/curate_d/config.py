@@ -122,7 +122,7 @@ class S3AddressingStyle(StrEnum):
 
 
 class DeploymentEnvironment(StrEnum):
-    """Identify the deployment to label on process telemetry."""
+    """Identify the deployment, to label process telemetry and pick per-deployment defaults."""
 
     LOCAL = "local"
     DEV = "dev"
@@ -155,6 +155,12 @@ class Settings(BaseSettings):
         description="Deployment this process belongs to; labels its telemetry. Unset sends "
         "no label rather than a wrong one, so a deployment that forgets it is not mistaken "
         "for local.",
+    )
+    alerting_test_routes_force_on_in_prod: bool = Field(
+        default=False,
+        description="Serve the alerting test routes (GET /__alerting_test_internal_error__, "
+        "always 500) in prod, or where no environment is named. Local and dev always serve "
+        "them, so this has no effect there.",
     )
     ledger_database_url: PostgresDsn = Field(
         default=PostgresDsn(_LOCAL_LEDGER_DSN),
@@ -534,6 +540,17 @@ class Settings(BaseSettings):
     def s3_staging_enabled(self) -> bool:
         """Return whether an S3 staging endpoint is configured for this process."""
         return self.staging_s3_endpoint_url is not None
+
+    @property
+    def alerting_test_routes_served(self) -> bool:
+        """Return whether the API serves the alerting test routes.
+
+        An unset environment is treated as prod, so a deployment that forgets its label keeps
+        the routes off unless forced on.
+        """
+        if self.environment in (DeploymentEnvironment.LOCAL, DeploymentEnvironment.DEV):
+            return True
+        return self.alerting_test_routes_force_on_in_prod
 
 
 @lru_cache(maxsize=1)

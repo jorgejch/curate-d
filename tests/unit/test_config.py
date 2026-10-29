@@ -200,6 +200,46 @@ def test_unknown_environment_is_rejected(monkeypatch: pytest.MonkeyPatch) -> Non
         Settings()
 
 
+@pytest.mark.parametrize("force", [None, "true", "false"])
+@pytest.mark.parametrize("environment", ["local", "dev"])
+def test_alerting_test_routes_are_always_served_in_local_and_dev(
+    monkeypatch: pytest.MonkeyPatch, environment: str, force: str | None
+) -> None:
+    """Local and dev serve the alerting test routes whatever the prod switch says."""
+    monkeypatch.setenv("CURATE_D_ENVIRONMENT", environment)
+    if force is None:
+        monkeypatch.delenv("CURATE_D_ALERTING_TEST_ROUTES_FORCE_ON_IN_PROD", raising=False)
+    else:
+        monkeypatch.setenv("CURATE_D_ALERTING_TEST_ROUTES_FORCE_ON_IN_PROD", force)
+    assert Settings().alerting_test_routes_served is True
+
+
+@pytest.mark.parametrize(("force", "served"), [(None, False), ("false", False), ("true", True)])
+@pytest.mark.parametrize("environment", ["prod", None])
+def test_alerting_test_routes_follow_the_switch_in_prod_and_without_an_environment(
+    monkeypatch: pytest.MonkeyPatch, environment: str | None, force: str | None, served: bool
+) -> None:
+    """Prod, or no environment, serves the routes only when forced on."""
+    if environment is None:
+        monkeypatch.delenv("CURATE_D_ENVIRONMENT", raising=False)
+    else:
+        monkeypatch.setenv("CURATE_D_ENVIRONMENT", environment)
+    if force is None:
+        monkeypatch.delenv("CURATE_D_ALERTING_TEST_ROUTES_FORCE_ON_IN_PROD", raising=False)
+    else:
+        monkeypatch.setenv("CURATE_D_ALERTING_TEST_ROUTES_FORCE_ON_IN_PROD", force)
+    assert Settings().alerting_test_routes_served is served
+
+
+def test_non_boolean_alerting_test_routes_switch_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject a value that is not a boolean instead of guessing."""
+    monkeypatch.setenv("CURATE_D_ALERTING_TEST_ROUTES_FORCE_ON_IN_PROD", "sometimes")
+    with pytest.raises(ValidationError, match="alerting_test_routes_force_on_in_prod"):
+        Settings()
+
+
 def _assert_hidden(error: ValidationError, secret: str) -> None:
     """Assert `secret` is in neither the rendered error nor its structured details."""
     assert secret not in str(error)
