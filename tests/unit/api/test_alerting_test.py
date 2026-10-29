@@ -45,10 +45,27 @@ def _dev() -> Settings:
     return Settings(environment=DeploymentEnvironment.DEV)
 
 
-def test_the_route_answers_a_generic_500() -> None:
-    """The route answers 500 without the exception's message in the body."""
+def test_the_route_answers_500_with_the_exceptions_message() -> None:
+    """The route's body is a Problem whose detail is the alerting test's message."""
     with _client(_dev(), raise_server_exceptions=False) as client:
         response = client.get(ALERTING_TEST_PATH)
+    assert response.status_code == 500
+    detail = response.json()["detail"]
+    assert detail.startswith("deliberate internal error for testing server-error alerting")
+    assert "Traceback" not in response.text
+
+
+def test_other_unhandled_errors_keep_the_generic_body() -> None:
+    """Another unhandled error's message never reaches the client where the route is served."""
+    app = _app(_dev())
+
+    @app.get("/boom")
+    async def boom() -> None:
+        """Fail with a message that must stay on the server."""
+        raise RuntimeError("postgresql://curate_d:hunter2@db/curate_d")
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/boom")
     assert response.status_code == 500
     assert response.text == "Internal Server Error"
 

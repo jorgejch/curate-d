@@ -17,7 +17,8 @@ is answered through `errors.py`.
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Response, status
+from fastapi import FastAPI, Request, Response, status
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -61,6 +62,25 @@ class AlertingTestError(RuntimeError):
 
 
 ALERTING_TEST_PATH = "/__alerting_test_internal_error__"
+
+
+async def _answer_server_error(_request: Request, error: Exception) -> Response:
+    """Answer an unhandled error: the alerting test's with its message, any other generically.
+
+    Registered for `Exception`, so it runs in Starlette's `ServerErrorMiddleware`, which
+    re-raises after sending this response: the exception still reaches the request span and
+    the server log. A handler for `AlertingTestError` alone would run in `ExceptionMiddleware`
+    and swallow it. Any other error gets Starlette's own default body, so its message (a DSN,
+    a path) never reaches a client.
+    """
+    if isinstance(error, AlertingTestError):
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content=errors.Problem(detail=str(error)).model_dump(),
+        )
+    return PlainTextResponse(
+        "Internal Server Error", status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+    )
 
 
 # Lets tests substitute a fake/in-memory engine for `create_app` without touching `app.state`.
@@ -137,6 +157,7 @@ def create_app(
         return Readiness(ready=True, ledger_reachable=True, detail=None)
 
     if resolved.alerting_test_routes_served:
+        app.add_exception_handler(Exception, _answer_server_error)
 
         @app.get(ALERTING_TEST_PATH, include_in_schema=False)
         async def alerting_test_internal_error() -> None:
