@@ -64,7 +64,7 @@ class AlertingTestError(RuntimeError):
 ALERTING_TEST_PATH = "/__alerting_test_internal_error__"
 
 
-async def _answer_server_error(_request: Request, error: Exception) -> Response:
+def _answer_server_error(_request: Request, error: Exception) -> Response:
     """Answer an unhandled error: the alerting test's with its message, any other generically.
 
     Registered for `Exception`, so it runs in Starlette's `ServerErrorMiddleware`, which
