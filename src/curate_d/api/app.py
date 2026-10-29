@@ -56,6 +56,13 @@ class Readiness(BaseModel):
     detail: str | None = None
 
 
+class AlertingTestError(RuntimeError):
+    """A deliberate failure, raised only to test server-error alerting."""
+
+
+ALERTING_TEST_PATH = "/__alerting_test_internal_error__"
+
+
 # Lets tests substitute a fake/in-memory engine for `create_app` without touching `app.state`.
 type EngineFactory = Callable[[Settings], AsyncEngine]
 
@@ -128,6 +135,23 @@ def create_app(
                 detail=f"ledger unreachable: {type(error).__name__}",
             )
         return Readiness(ready=True, ledger_reachable=True, detail=None)
+
+    if resolved.alerting_test_routes_served:
+
+        @app.get(ALERTING_TEST_PATH, include_in_schema=False)
+        async def alerting_test_internal_error() -> None:
+            """Raise an unhandled error so the request fails as a real bug would.
+
+            Raised rather than answered with a 500: only an escaping exception reaches the
+            request span and the server log, which are what the alert under test watches.
+
+            Raises:
+                AlertingTestError: always.
+            """
+            raise AlertingTestError(
+                f"deliberate internal error for testing server-error alerting "
+                f"({ALERTING_TEST_PATH})"
+            )
 
     return app
 

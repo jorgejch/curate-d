@@ -193,6 +193,7 @@ the deployment repository's checks have to hold to:
 | Worker profile names in `CURATE_D_WORKER_PROFILE` | `curate_d.runtime.profiles` |
 | Executor identity in `CURATE_D_EXECUTOR_ID`, distinct and stable per pod | `curate_d.runtime.identity` |
 | Environment names in `CURATE_D_ENVIRONMENT` (`dev`, `prod`), naming the DBOS application `curate-d-<env>` on the API and both workers and labelling each process's telemetry | `curate_d.config.DeploymentEnvironment`, `curate_d.runtime.dbos_app.application_name` |
+| `CURATE_D_ALERTING_TEST_ROUTES_FORCE_ON_IN_PROD` on the API: `local` and `dev` always serve the alerting test routes (`GET /__alerting_test_internal_error__`, always 500); `prod`, or no environment, serves them only when it is `true` | `curate_d.config.Settings.alerting_test_routes_served` |
 | Queues each profile serves | `curate_d.runtime.queues` (tested here; manifests carry only the profile) |
 | Dev image tag `dev-<UTC timestamp>-<sha>` | `.github/workflows/docker-publish.yml` (pinned by `test_release_pipeline.py`) |
 
