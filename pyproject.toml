@@ -39,7 +39,7 @@ dependencies = [
     "psycopg[binary]~=3.3.6",
     "alembic~=1.20",
     # Control plane API
-    "fastapi==0.142.2",
+    "fastapi==0.162.0",
     "uvicorn[standard]~=0.54.0",
     "pydantic~=2.13",
     "pydantic-settings~=2.15",
