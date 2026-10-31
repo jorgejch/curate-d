@@ -14,6 +14,7 @@ group 1, stream B is group 2. Group 3 runs after both.
 ## 3. Security updates (review follow-up)
 
 - [x] 3.1 Admit Dependabot security updates under category 4's conditions in `.gitar/config/approve.md`: update type from the diff's old and new versions (a security update's block names no `update-type`), indirect `uv` dependencies, a security-update approve example and a security-major refuse example, no condition on the `gitar-managed` label; correct `.github/dependabot.yml`'s header comment; update `CONTRIBUTING.md`, the main spec and this delta. Verify `openspec validate --all --strict` and `make check` pass
+- [x] 3.2 Refuse in category 4 any update that an `ignore` rule in `.github/dependabot.yml` excludes from version updates (an `aioboto3` minor by security update), with a refuse example in `.gitar/config/approve.md`, a scenario in the main spec and this delta, and the `CONTRIBUTING.md` paragraph. Verify `openspec validate --all --strict` and `make check` pass
 
 ## 4. Integration
 

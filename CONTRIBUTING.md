@@ -69,7 +69,8 @@ cleanup of unrelated code.
   unit tests, and Dependabot version and security updates limited to `uv` patches, `uv` minors of
   packages at `1.0` or above, and `docker` image patches, with the required checks as their only
   compatibility test. Never another pull request a bot opened or committed to, never a
-  `github-actions` or `dbos` update, and never one that changes `.gitar/`.
+  `github-actions` or `dbos` update or one `.github/dependabot.yml` ignores, and never one that
+  changes `.gitar/`.
 
 ## Tests
 

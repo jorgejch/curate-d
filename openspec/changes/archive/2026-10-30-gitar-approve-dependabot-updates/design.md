@@ -69,8 +69,13 @@ groups are `python-patches` (uv patches),
   of packages, or Gitar's reading of release notes. A minor opens as its own pull request, so one
   incompatible minor fails CI alone and does not hold a group back. `versioning-strategy: increase`
   rewrites the specifier when the minor leaves the declared range (`sqlalchemy~=2.1.1` →
-  `~=2.2.0`); that rewrite is a version reference and is eligible. `aioboto3` minors never
-  arrive: `dependabot.yml` ignores them until they are checked against RustFS and OVH.
+  `~=2.2.0`); that rewrite is a version reference and is eligible. `dependabot.yml` ignores
+  `aioboto3` minors until they are checked against RustFS and OVH.
+- **Refuse what `dependabot.yml` ignores.** GitHub documents that `update-types` under `allow`
+  does not reach security updates, and does not say whether the same holds under `ignore`. A
+  security update could then bring an `aioboto3` minor. Category 4 refuses any update an
+  `ignore` rule excludes from version updates, so a security update gets no path that a version
+  update does not have.
 - **No minor of a `0.x` package.** SemVer lets a `0.y` release break anything, so Dependabot's
   `semver-minor` for `0.142` → `0.162` names a breaking release. A minor is refused when the
   current or the new version's major is `0`. In `pyproject.toml` today that is `fastapi`,

@@ -87,6 +87,10 @@ request is category 4. Category 4 never combines with the others.
    - **Not `dbos`.** No entry names `dbos`. `CLAUDE.md` requires a `dbos` bump to refresh the
      vendored `.agents/skills/dbos-python` and its `skills-lock.json` pin in the same change, and
      Dependabot does neither.
+   - **Not ignored.** No entry is an update that an `ignore` rule in `.github/dependabot.yml`
+     excludes from version updates, such as an `aioboto3` minor. GitHub's documentation does not
+     say that an `ignore` rule's `update-types` also holds back a security update, so this file
+     holds the exclusion: such an update waits for a human.
    - **Version references only.** Every changed line is a version reference of a dependency the
      block names:
      - `uv.lock`: the named packages' versions, sources, sdists, wheels and hashes, and the
@@ -172,6 +176,8 @@ Refuse:
 - `dependabot[bot]` opens a security update that moves `pillow` from `12.3.0` to `13.0.0`: the
   `uv.lock` versions make it a major, though the block names no `update-type`.
 - A `python-patches` group includes a `dbos` patch: `dbos` needs its skill refreshed.
+- `dependabot[bot]` opens a security update that moves `aioboto3` from `15.5.0` to `15.6.0`:
+  `dependabot.yml` ignores `aioboto3` minors until they are re-verified against RustFS and OVH.
 - A maintainer pushes a fix onto a Dependabot pull request: a commit not authored by
   `dependabot[bot]`.
 - A `python-patches` update adds a new package to `uv.lock`: the lock gains a package.

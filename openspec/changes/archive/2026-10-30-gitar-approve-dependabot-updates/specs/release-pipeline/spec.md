@@ -138,6 +138,18 @@ unapproved, with the condition named.
 - **WHEN** an eligible Dependabot pull request gains a commit authored by any other account
 - **THEN** it is not approved
 
+### Requirement: Dependabot updates that dependabot.yml ignores are not auto-approved
+The auto-approve policy MUST leave unapproved a Dependabot update, version or security, that
+names a dependency update an `ignore` rule in `.github/dependabot.yml` excludes from version
+updates, with the ignored update named. A security update MUST NOT get a path to auto-approval
+that a version update of the same dependency does not have.
+
+#### Scenario: Security update that dependabot.yml ignores
+- **WHEN** a Dependabot security update moves `aioboto3` from `15.5.0` to `15.6.0`, a minor that
+  `.github/dependabot.yml` ignores for version updates
+- **THEN** it is not approved, because a new `aioboto3` minor must first be re-verified against
+  RustFS and OVH
+
 ### Requirement: An auto-approved Dependabot update changes only version references
 An eligible Dependabot pull request MUST change only the version references of the dependencies its
 metadata names: `uv.lock` and those dependencies' specifiers in `pyproject.toml`, or the tag and
