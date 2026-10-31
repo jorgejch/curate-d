@@ -7,12 +7,35 @@
 
 ## MODIFIED Requirements
 
+### Requirement: Dependency version updates are proposed against dev
+The repository MUST hold a Dependabot configuration that checks `pyproject.toml` with
+`uv.lock` (ecosystem `uv`, directory `/`), the workflow files (`github-actions`, `/`) and
+`docker/Dockerfile` (`docker`, `/docker`) for version updates once a week, on Friday late
+afternoon America/Los_Angeles, and opens every resulting pull request against `dev`. It MUST
+NOT configure Compose images. A unit test MUST pin the ecosystems, the target branch and
+the schedule.
+
+#### Scenario: Weekly run
+- **WHEN** Dependabot's scheduled run finds an outdated dependency in any of the three
+  ecosystems
+- **THEN** it opens a pull request whose base is `dev`, which the merge gate then checks
+  like any other pull request
+
+#### Scenario: Security update
+- **WHEN** GitHub raises a Dependabot security update
+- **THEN** it opens against the default branch, `dev`, and carries the entry's labels; the
+  version-update groups and schedule do not apply to it
+
+#### Scenario: Target branch dropped
+- **WHEN** an ecosystem entry loses `target-branch: dev`, an ecosystem is removed, a
+  Compose ecosystem is added, or the schedule leaves weekly Friday Pacific
+- **THEN** the unit suite fails naming the entry
+
 ### Requirement: A repository auto-approve policy admits only low-risk changes
 `.gitar/config/approve.md` on `dev` MUST let Gitar approve only a pull request into `dev` whose
 every changed file is documentation prose, a comment- or docstring-only code change, or an added
-unit test, or that is an eligible Dependabot version update. Any other change, an unavailable or
-above-low risk assessment, or a criterion Gitar can't establish MUST leave the pull request
-unapproved.
+unit test, or that is an eligible Dependabot update. Any other change, an unavailable or above-low
+risk assessment, or a criterion Gitar can't establish MUST leave the pull request unapproved.
 
 #### Scenario: Documentation typo
 - **WHEN** a human's pull request into `dev` corrects a typo in `docs/staging.md`, Gitar's review
@@ -30,7 +53,7 @@ unapproved.
 ### Requirement: Bot-written pull requests are auto-approved only as eligible Dependabot updates
 The auto-approve policy MUST refuse a pull request opened by a bot or app account, or carrying a
 commit authored or committed by one, so a bot's change merges only after a human reads it. The one
-exception is an eligible Dependabot version update. When an author's or committer's identity can't
+exception is an eligible Dependabot update. When an author's or committer's identity can't
 be established, the pull request MUST NOT be approved.
 
 #### Scenario: Pull request opened by @claude
@@ -42,34 +65,34 @@ be established, the pull request MUST NOT be approved.
 - **THEN** it is not approved
 
 #### Scenario: Dependabot update
-- **WHEN** `dependabot[bot]` opens a pull request that is not an eligible Dependabot version update
+- **WHEN** `dependabot[bot]` opens a pull request that is not an eligible Dependabot update
 - **THEN** it is not approved
 
 ## ADDED Requirements
 
 ### Requirement: Only Python patches and minors and image patches from Dependabot are auto-approved
-The auto-approve policy MUST admit a Dependabot pull request only when it is a version update (it
-carries the `gitar-managed` label), Dependabot wrote every commit, and every dependency it names is
-a `uv` patch, a `uv` minor whose old and new major are not `0`, or a `docker` patch. Any other
-update, any `github-actions` update, a `dbos` update, or update metadata Gitar can't read MUST leave
-it unapproved, with the condition named.
+The auto-approve policy MUST admit a Dependabot version or security update only when Dependabot
+wrote every commit and every dependency it names is a `uv` patch, a `uv` minor whose old and new
+major are not `0`, or a `docker` patch, judged from the old and new versions in the diff. Any other
+update, any `github-actions` or `dbos` update, or a version Gitar can't compare MUST leave it
+unapproved, with the condition named.
 
 #### Scenario: Grouped Python patches
-- **WHEN** `dependabot[bot]` opens the `python-patches` group pull request into `dev`, labelled
-  `gitar-managed`, whose commit metadata gives `version-update:semver-patch` for every dependency,
-  and the review has no blocking finding and the risk assessment is low
+- **WHEN** `dependabot[bot]` opens the `python-patches` group pull request into `dev`, whose commit
+  metadata gives `version-update:semver-patch` for every dependency, and the review has no blocking
+  finding and the risk assessment is low
 - **THEN** the policy allows approval, provided the organization criteria allow it too
 
 #### Scenario: GitHub Actions patch
 - **WHEN** Dependabot's `actions-patches-and-minors` pull request moves an action from `v8.3.0` to
-  `v8.3.1`, labelled `gitar-managed`, with no blocking finding and a low risk assessment
+  `v8.3.1`, with no blocking finding and a low risk assessment
 - **THEN** it is not approved, because a new action release runs in CI with the repository's
   secrets
 
 #### Scenario: Python minor outside the declared range
 - **WHEN** Dependabot opens a pull request whose metadata gives `version-update:semver-minor` for
   a `uv` dependency, its diff rewrites that dependency's specifier in `pyproject.toml` and changes
-  `uv.lock`, labelled `gitar-managed`, with no blocking finding and a low risk assessment
+  `uv.lock`, with no blocking finding and a low risk assessment
 - **THEN** the policy allows approval, provided the organization criteria allow it too, and the
   required checks are the only test of compatibility
 
@@ -96,9 +119,15 @@ it unapproved, with the condition named.
 - **WHEN** Dependabot changes a `FROM` image's digest under the same tag
 - **THEN** it is not approved
 
-#### Scenario: Security update
-- **WHEN** Dependabot opens a security update, which carries no `gitar-managed` label
-- **THEN** it is not approved
+#### Scenario: Security update within the limits
+- **WHEN** Dependabot opens a security update whose metadata gives no `update-type`, and its
+  `uv.lock` diff moves `pypdf` from `6.21.0` to `6.21.1`, with no blocking finding and a low risk
+  assessment
+- **THEN** the policy allows approval, provided the organization criteria allow it too
+
+#### Scenario: Security update across a major
+- **WHEN** a Dependabot security update moves `pillow` from `12.3.0` to `13.0.0`
+- **THEN** it is not approved, and Gitar names the major
 
 #### Scenario: DBOS update
 - **WHEN** a Dependabot pull request includes a `dbos` patch or minor update

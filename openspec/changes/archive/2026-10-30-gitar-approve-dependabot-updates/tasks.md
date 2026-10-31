@@ -11,9 +11,13 @@ group 1, stream B is group 2. Group 3 runs after both.
 
 - [x] 2.1 In `CONTRIBUTING.md`'s Gitar paragraph, add Dependabot `uv` patch updates, `uv` minor updates of packages at `1.0` or above, and `docker` patch updates to what `approve.md` may approve, and change "never a pull request a bot opened or committed to" to except them; verify the paragraph matches `approve.md`'s categories and the link resolves (`ls .gitar/config/approve.md`)
 
-## 3. Integration
+## 3. Security updates (review follow-up)
 
-- [x] 3.1 Verify `make check` passes and `openspec validate gitar-approve-dependabot-updates --strict` passes
+- [x] 3.1 Admit Dependabot security updates under category 4's conditions in `.gitar/config/approve.md`: update type from the diff's old and new versions (a security update's block names no `update-type`), indirect `uv` dependencies, a security-update approve example and a security-major refuse example, no condition on the `gitar-managed` label; correct `.github/dependabot.yml`'s header comment; update `CONTRIBUTING.md`, the main spec and this delta. Verify `openspec validate --all --strict` and `make check` pass
+
+## 4. Integration
+
+- [x] 4.1 Verify `make check` passes and `openspec validate gitar-approve-dependabot-updates --strict` passes
 
 ## Workflow follow-up
 

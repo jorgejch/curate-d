@@ -19,8 +19,14 @@ What a Dependabot version update looks like here (PR #124, `python-patches`, rea
 - Within `~=` specifiers only `uv.lock` changes. `versioning-strategy: increase` rewrites a
   specifier in `pyproject.toml` only when the new version falls outside it.
 
-`.github/dependabot.yml` labels only version updates `gitar-managed`: GitHub applies none of an
-entry's options to a security update. Its groups are `python-patches` (uv patches),
+A security update (PRs #81 and #92) differs: its branch has no target segment
+(`dependabot/uv/uv-<hash>`), its block gives no `update-type`, it can bump indirect dependencies,
+and it can cross a major (`pillow` to `13.0.0` in #81).
+
+`.github/dependabot.yml` labels every entry `gitar-managed`, Gitar's own label for pull requests it
+manages. GitHub's `labels` option reaches security updates "unless you use `target-branch` to check
+for version updates on a non-default branch"; `target-branch: dev` names the default branch. Its
+groups are `python-patches` (uv patches),
 `image-patches` (docker patches) and `actions-patches-and-minors`; anything else opens on its own.
 
 ## Goals / Non-Goals
@@ -33,19 +39,21 @@ entry's options to a security update. Its groups are `python-patches` (uv patche
 - GitHub Actions updates. A new action release runs in CI with the repository's secrets (Sonar,
   Claude, the image registry) as soon as it merges, so a hijacked release would run unreviewed.
   `.github/` stays human-only.
-- Changing `.github/dependabot.yml` (a cooldown, new groups) or `apply.md`.
+- Changing `.github/dependabot.yml` beyond its header comment (a cooldown, new groups), or
+  `apply.md`.
+- Any condition on the `gitar-managed` label. It keeps its Gitar-defined behaviour.
 
 ## Decisions
 
-- **Identify a version update by the `gitar-managed` label plus Dependabot authorship.** The label
-  alone could be added by anyone with triage rights; authorship alone would admit security
-  updates, which ignore the configuration and so carry no label. Both together are readable and
-  tie the pull request to the reviewed `dependabot.yml`. Alternative rejected: matching the PR
-  title (`bump the python-patches group`), which is presentation and changes across Dependabot
-  versions.
-- **Judge update type from the commit's `updated-dependencies` metadata, per dependency.** A
-  group can mix types only if the configuration changes, so checking every entry is cheap and
-  stays correct if it does. Missing or unparsable metadata refuses.
+- **Version and security updates follow the same conditions** (owner's decision in review).
+  Authorship, commits and diff content decide; nothing tells the two kinds apart, so nothing
+  needs to. The first draft used the `gitar-managed` label to keep security updates out; that was
+  dropped, as the label is Gitar's and must not gate approval.
+- **Judge update type from the old and new versions in the diff, per dependency.** A security
+  update's `updated-dependencies` block names no `update-type`, so the block can't be the source.
+  The `uv.lock` `version` and the `FROM` tag are in every diff; their first three numeric parts
+  give patch, minor or major. A block that does name an `update-type` must agree; a version that
+  can't be compared refuses.
 - **Allow `web-flow` as committer only on a commit `dependabot[bot]` authored.** That is how
   GitHub records Dependabot's own signed commits, including its rebases. A commit authored by
   anyone else, human or bot, refuses: once someone pushes to the branch, the diff is no longer

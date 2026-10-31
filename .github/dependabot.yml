@@ -1,5 +1,7 @@
-# Version updates only. Security updates ignore this file: with target-branch set, GitHub
-# applies none of an entry's options to them and opens them against the default branch.
+# Security updates open against the default branch, dev, and take an entry's labels: GitHub
+# drops an entry's options for them only when target-branch names a non-default branch. The
+# gitar-managed label hands both kinds of update to Gitar. Groups and schedules here apply to
+# version updates only.
 # Patches are grouped and minors and majors are not: every pull request touching a
 # declared path runs the whole integration suite, again after every rebase onto dev.
 version: 2

@@ -66,8 +66,8 @@ cleanup of unrelated code.
   fixes, and the file turns nothing on: auto-apply is enabled per pull request.
   [`.gitar/config/approve.md`](.gitar/config/approve.md) bounds which pull requests it may
   approve, and so auto-merge: documentation prose, comment- and docstring-only changes, added
-  unit tests, and Dependabot version updates limited to `uv` patches, `uv` minors of packages
-  at `1.0` or above, and `docker` image patches, with the required checks as their only
+  unit tests, and Dependabot version and security updates limited to `uv` patches, `uv` minors of
+  packages at `1.0` or above, and `docker` image patches, with the required checks as their only
   compatibility test. Never another pull request a bot opened or committed to, never a
   `github-actions` or `dbos` update, and never one that changes `.gitar/`.
 
