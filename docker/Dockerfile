@@ -78,6 +78,10 @@ ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONDONTWRITEBYTECODE=1 \
     CURATE_D_BUILD_REVISION=${CURATE_D_BUILD_REVISION}
 
+# The API defaults to loopback for a bare run on a workstation. In a container the network
+# namespace is the boundary, and port publishing and a Kubernetes Service need every interface.
+ENV CURATE_D_API_LISTEN_HOST=0.0.0.0
+
 USER 65532:65532
 
 # Every workload sets `command:` explicitly, so this default is only what you get from a
