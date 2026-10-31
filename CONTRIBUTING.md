@@ -63,7 +63,11 @@ cleanup of unrelated code.
 - **Gitar reviews pull requests.** [`.gitar/config/apply.md`](.gitar/config/apply.md)
   bounds which of its code-review findings it may fix by itself, on top of the organization's
   criteria. Gitar reads it from `dev`, so a pull request can't change the criteria for its own
-  fixes, and the file turns nothing on: auto-apply is enabled per pull request.
+  fixes, and the file turns nothing on: the `gitar-managed` label turns auto-apply on for one
+  pull request. [`label-owner-prs.yml`](.github/workflows/label-owner-prs.yml) adds it to every
+  pull request the repository owner opens; Dependabot's never get it, since a Gitar commit would
+  end their auto-approval. `gitar auto-apply:off` turns it off on one pull request. A fix Gitar
+  commits always waits for a human review, as below.
   [`.gitar/config/approve.md`](.gitar/config/approve.md) bounds which pull requests it may
   approve, and so auto-merge: documentation prose, comment- and docstring-only changes, added
   unit tests, and Dependabot version and security updates limited to `uv` patches, `uv` minors of

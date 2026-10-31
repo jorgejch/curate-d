@@ -1,0 +1,32 @@
+name: Label owner pull requests
+
+# Labels a pull request the repository owner opens `gitar-managed`, which turns on Gitar's
+# auto-apply for it. The pull request's author decides, not its commits: a bot's
+# `Co-Authored-By` trailer changes nothing. Dependabot's and every other author's pull requests,
+# and any from a fork, are left alone (.github/dependabot.yml says why Dependabot's are).
+#
+# Only `opened`: a label the owner removes later stays removed. Not a required check; when the
+# label can't be added the run fails and the owner adds it by hand.
+on:
+  pull_request:
+    types: [opened]
+
+permissions: {}
+
+jobs:
+  label:
+    if: >-
+      github.event.pull_request.user.login == github.repository_owner &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write # Add a label to the pull request
+    steps:
+      # No checkout: nothing from the branch runs here.
+      - name: Add gitar-managed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: gh api --method POST "repos/$REPOSITORY/issues/$NUMBER/labels" -f 'labels[]=gitar-managed'
