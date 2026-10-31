@@ -34,7 +34,7 @@ jobs:
       # The checks job's install, so `make lint`, `make typecheck` and `make test` run here as
       # they do in CI.
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
 
@@ -58,7 +58,7 @@ jobs:
 
       - name: Run Claude Code
         id: claude
-        uses: anthropics/claude-code-action@ae68417a745a5df4b2124873632bd73a2255e6f6 # v1
+        uses: anthropics/claude-code-action@d70510b174a1244958df0b03166a54912811f3e6 # v1
         env:
           # Read by the MCP servers through `${...}` in --mcp-config below. An unset one leaves
           # its server unavailable for the run; the run goes on without it.
