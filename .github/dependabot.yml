@@ -1,7 +1,7 @@
-# Security updates open against the default branch, dev, and take an entry's labels: GitHub
-# drops an entry's options for them only when target-branch names a non-default branch. The
-# gitar-managed label hands both kinds of update to Gitar. Groups and schedules here apply to
-# version updates only.
+# Security updates open against the default branch, dev: GitHub drops an entry's options for
+# them only when target-branch names a non-default branch. Groups and schedules here apply to
+# version updates only. No entry sets labels: gitar-managed turns on Gitar's auto-apply, and a
+# Gitar commit on a Dependabot pull request ends its auto-approval (.gitar/config/approve.md).
 # Patches are grouped and minors and majors are not: every pull request touching a
 # declared path runs the whole integration suite, again after every rebase onto dev.
 version: 2
@@ -9,8 +9,6 @@ updates:
   - package-ecosystem: uv
     directory: /
     target-branch: dev
-    labels:
-      - gitar-managed
     schedule:
       interval: weekly
       day: friday
@@ -31,8 +29,6 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     target-branch: dev
-    labels:
-      - gitar-managed
     schedule:
       interval: weekly
       day: friday
@@ -47,8 +43,6 @@ updates:
   - package-ecosystem: docker
     directory: /docker
     target-branch: dev
-    labels:
-      - gitar-managed
     schedule:
       interval: weekly
       day: friday
