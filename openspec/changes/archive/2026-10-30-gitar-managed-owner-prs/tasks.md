@@ -13,6 +13,7 @@ The three groups touch disjoint files and can start at once. Group 4 waits on al
 ## 3. Contributor documentation
 
 - [x] 3.1 In `CONTRIBUTING.md`'s Gitar paragraph, replace "auto-apply is enabled per pull request" with which pull requests open with `gitar-managed` (the owner's, by the labelling workflow; never Dependabot's) and that `gitar auto-apply:off` stops it on one pull request. Verify the paragraph names `label-owner-prs.yml` and `ls .github/workflows/label-owner-prs.yml` resolves
+- [x] 3.2 Add the rule "Pull before you push, and check `git log` for Gitar commits before you force-push" (owner's rule, review follow-up) to `CONTRIBUTING.md`'s Branches, commits and pull requests section and the steward skill's Commits section: Gitar is a second writer on a `gitar-managed` branch, and `--force-with-lease` does not protect a commit a fetch already brought in. Verify `grep -c "Pull before you push" CONTRIBUTING.md .claude/skills/steward/SKILL.md` finds both
 
 ## 4. Integration
 

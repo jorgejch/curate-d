@@ -60,6 +60,12 @@ cleanup of unrelated code.
   and a boot of the application image built from it, and be up to date with its base,
   before it merges. A merge re-runs nothing that gates: only the image build on `dev` and
   the SonarQube coverage refresh, which re-runs the unit suite for coverage alone.
+- **Pull before you push, and check `git log` for Gitar commits before you force-push.** On a
+  `gitar-managed` pull request, Gitar commits its fixes to the branch on GitHub, so the branch
+  has a second writer. Run `git pull` before `git push`. Before any force-push, run `git fetch`
+  and `git log --format='%h %an %s' origin/dev..origin/<branch>`: if it lists a commit you did
+  not write, merge `origin/dev` in instead of rebasing. `--force-with-lease` does not protect
+  that commit once a fetch has brought it in.
 - **Gitar reviews pull requests.** [`.gitar/config/apply.md`](.gitar/config/apply.md)
   bounds which of its code-review findings it may fix by itself, on top of the organization's
   criteria. Gitar reads it from `dev`, so a pull request can't change the criteria for its own

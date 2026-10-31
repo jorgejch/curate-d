@@ -52,6 +52,10 @@ Gitar.
 
 ## Risks / Trade-offs
 
+- [Gitar is a second writer on every owner branch: a plain push is refused until its commits are
+  pulled, and a rebase with `--force-with-lease` after a fetch drops them silently] → Owner's
+  rule, in `CONTRIBUTING.md` and the steward skill: pull before you push, and check `git log`
+  for commits you did not write before a force-push; if there is one, merge instead of rebasing.
 - [A Gitar fix on the owner's pull request ends its auto-approval: `approve.md` refuses a pull
   request that carries a bot's commit] → Intended, and confirmed by the owner on 2026-10-30: the
   owner reviews every change Gitar adds and merges those pull requests. `approve.md` keeps
