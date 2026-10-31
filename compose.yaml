@@ -45,7 +45,8 @@ services:
       # differ between a developer's machine and the cluster.
       POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
     ports:
-      - "${CURATE_D_POSTGRES_PORT:-5433}:5432"
+      # Loopback only: development credentials on the database that holds the whole state.
+      - "127.0.0.1:${CURATE_D_POSTGRES_PORT:-5433}:5432"
     volumes:
       # PostgreSQL 18 images expect the mount one level up so that pg_upgrade --link
       # can move data between major-version subdirectories without crossing a mount point.
@@ -143,7 +144,8 @@ services:
       # (send_to_logfire="if-token-present").
       LOGFIRE_TOKEN:
     ports:
-      - "${CURATE_D_API_PORT:-8000}:8000"
+      # Loopback only: the API is unauthenticated, and would otherwise serve the local network.
+      - "127.0.0.1:${CURATE_D_API_PORT:-8000}:8000"
     # The API's own readiness route, so `--wait` means serving and reaching the ledger, not
     # merely started. Python rather than curl: the image carries no HTTP client, and
     # urlopen fails on the route's 503.
