@@ -6,10 +6,10 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 PROPERTIES = REPOSITORY_ROOT / "sonar-project.properties"
 
 # Scanned for secrets only: outside sonar.sources, so no language rules, coverage or duplication.
-SECRET_SCAN_ONLY = frozenset({"docs/**"})
+SECRET_SCAN_ONLY = frozenset({"docs/**/*"})
 
 # The one analysis filter: generated pages docs/** would otherwise add to secret scanning.
-ANALYSIS_EXCLUSIONS = frozenset({"docs/diagrams/**"})
+ANALYSIS_EXCLUSIONS = frozenset({"docs/diagrams/**/*"})
 
 
 def _properties() -> dict[str, str]:
@@ -89,7 +89,14 @@ def test_coverage_counts_src_only() -> None:
     """Non-application sources are analysed without lowering application coverage."""
     _assert_excludes_exactly(
         "sonar.coverage.exclusions",
-        {"ops/**", "migrations/**", "docker/**", "pyproject.toml", "alembic.ini", "compose.yaml"},
+        {
+            "ops/**/*",
+            "migrations/**/*",
+            "docker/**/*",
+            "pyproject.toml",
+            "alembic.ini",
+            "compose.yaml",
+        },
     )
 
 
@@ -136,17 +143,22 @@ def test_scoped_configuration_files_receive_text_analysis() -> None:
 
 
 def test_text_inclusions_do_not_expand_analysis_scope() -> None:
-    """Secret scanning adds docs/ and no other unselected Git-tracked path, OpenSpec included."""
+    """Secret scanning adds docs/ and .env* paths without expanding other analysis scope."""
     properties = _properties()
-    expected = {
-        f"{entry.strip()}/**" if (REPOSITORY_ROOT / entry.strip()).is_dir() else entry.strip()
-        for key in ("sonar.sources", "sonar.tests")
-        for entry in properties[key].split(",")
-    } | SECRET_SCAN_ONLY
+    expected = (
+        {
+            f"{entry.strip()}/**/*" if (REPOSITORY_ROOT / entry.strip()).is_dir() else entry.strip()
+            for key in ("sonar.sources", "sonar.tests")
+            for entry in properties[key].split(",")
+        }
+        | SECRET_SCAN_ONLY
+        | {"**/*.env*"}
+    )
     actual = {entry.strip() for entry in properties.get("sonar.text.inclusions", "").split(",")}
     assert actual == expected, (
-        "sonar.text.inclusions must mirror source/test paths plus docs/**; it independently adds "
-        f"Git-tracked files to secret scanning. Expected {sorted(expected)}, got {sorted(actual)}"
+        "sonar.text.inclusions must mirror source/test paths and include docs/** plus **/*.env*; "
+        "it independently adds Git-tracked files to secret scanning. "
+        f"Expected {sorted(expected)}, got {sorted(actual)}"
     )
 
 
