@@ -4,8 +4,9 @@ Repository criteria for Gitar's auto-approve. An approval here can arm GitHub's 
 merge into `dev` publishes the dev image the running system pulls, so approve only what could not
 change what runs: a change a human reviewer would pass without reading it twice. curate.d moves
 people's files between clouds and may release the originals; anything that could touch that path
-waits for a human. Project rules: `CLAUDE.md`, `CONTRIBUTING.md`, and the contracts in
-`openspec/specs/`.
+waits for a human. The one exception is a narrow class of Dependabot updates (category 4 below),
+whose compatibility the required checks alone judge. Project rules: `CLAUDE.md`,
+`CONTRIBUTING.md`, and the contracts in `openspec/specs/`.
 
 ## Reach of this file
 
@@ -27,23 +28,26 @@ waits for a human. Project rules: `CLAUDE.md`, `CONTRIBUTING.md`, and the contra
 Any one of these refuses the pull request:
 
 - **Written by a bot.** It was opened by a bot or app account: a login ending in `[bot]`, such as
-  `claude[bot]`, `dependabot[bot]` or `github-actions[bot]`, or any other automation account. A
-  bot's change reaches a human before it merges.
+  `claude[bot]` or `github-actions[bot]`, or any other automation account. A bot's change reaches
+  a human before it merges. The only exception is an eligible Dependabot update (category 4).
 - **Carries a bot's commit.** Any commit in it was authored or committed by such an account, for
   instance `@claude` pushing to a human's pull request. A `Co-Authored-By` trailer is not an
-  account: a commit a human authored and pushed stays eligible.
+  account: a commit a human authored and pushed stays eligible. The only exception is a category 4
+  pull request's own commits, as that category defines them.
 - **Identity unknown.** The author of the pull request, or of any commit in it, can't be
   established.
 - **From a fork**, or into any base but `dev`. `main` takes release merges only.
 - **Draft.**
 - **Risk above low**, or no risk assessment available.
-- **Too large**: more than 10 changed files or 200 changed lines.
+- **Too large**: more than 10 changed files or 200 changed lines. Category 4 is exempt: its diff
+  rules bound it instead, since a grouped `uv.lock` update passes 200 lines in wheel hashes alone.
 - **Deletes, renames or moves a file**, or adds or changes a binary file.
 - **Any changed file outside the eligible changes below.**
 
 ## Eligible changes
 
-Approve only when every changed file is one of these.
+Approve only when every changed file falls under one of categories 1 to 3, or the whole pull
+request is category 4. Category 4 never combines with the others.
 
 1. **Documentation prose**: `README.md` and files under `docs/` (including `docs/diagrams/`),
    where the change is to wording, spelling, links or formatting. Not the runbooks an operator
@@ -55,13 +59,60 @@ Approve only when every changed file is one of these.
 3. **Added unit tests**: new test functions under `tests/unit/` that add assertions without
    changing, loosening, skipping or deleting an existing test, and without touching a fixture,
    `conftest.py`, a fake or test configuration. A new test can fail CI; it can't change what runs.
+4. **Dependabot updates**: a version or a security update that meets every one of these
+   conditions. The two kinds follow the same conditions.
+   - **Author.** `dependabot[bot]` opened it, from a branch in this repository.
+   - **Commits.** `dependabot[bot]` authored every commit. Each commit's committer is
+     `dependabot[bot]` or `web-flow`, the account GitHub records for the signed commits it
+     creates for Dependabot, rebases included. A commit authored by any other account, human or
+     bot, refuses: the diff is then no longer Dependabot's alone.
+   - **Update types.** The last commit's message ends in an `updated-dependencies:` block that
+     names every dependency the pull request changes. Judge each entry's update type from its old
+     and new versions in the diff (the `version` in `uv.lock`, the `FROM` tag), never from the
+     block alone: a security update's block carries no `update-type`. Compare the versions'
+     first three numeric parts: the same major and minor is a patch, the same major and a higher
+     minor is a minor, anything else is a major. When the block does give an `update-type`, it
+     must agree with the versions. Every entry is one of:
+     - a `uv` patch, direct or indirect;
+     - a `uv` minor whose old and new versions both have a major of `1` or more. SemVer lets a
+       `0.y` minor break anything, so a minor of a `0.x` package (`fastapi`, `uvicorn`, `httpx`,
+       `ruff`, among others) is refused. A patch of a `0.x` package stays eligible;
+     - a `docker` image patch.
+
+     The ecosystem is the one in the branch name (`dependabot/uv/...`, `dependabot/docker/...`).
+     A `github-actions` update of any type is refused: a new action release runs in CI with the
+     repository's secrets as soon as it merges. A major, a `docker` minor, a version whose parts
+     can't be compared, an `update-type` that disagrees with the versions, and a block that is
+     missing, can't be read or leaves out a changed dependency all refuse.
+   - **Not `dbos`.** No entry names `dbos`. `CLAUDE.md` requires a `dbos` bump to refresh the
+     vendored `.agents/skills/dbos-python` and its `skills-lock.json` pin in the same change, and
+     Dependabot does neither.
+   - **Not ignored.** No entry is an update that an `ignore` rule in `.github/dependabot.yml`
+     excludes from version updates, such as an `aioboto3` minor. GitHub's documentation does not
+     say that an `ignore` rule's `update-types` also holds back a security update, so this file
+     holds the exclusion: such an update waits for a human.
+   - **Version references only.** Every changed line is a version reference of a dependency the
+     block names:
+     - `uv.lock`: the named packages' versions, sources, sdists, wheels and hashes, and the
+       root project's copy of each named dependency's specifier (under `[package.metadata]`
+       `requires-dist` or `[package.metadata.requires-dev]`) when it matches the
+       `pyproject.toml` rewrite. A package added to or removed from the lock refuses; name it.
+     - `pyproject.toml`: only the named dependencies' version specifiers, rewritten when the new
+       version leaves the declared range (`sqlalchemy~=2.1.1` to `~=2.2.0`). A comment, another
+       key or another dependency refuses.
+     - `docker/Dockerfile`: only the tag and `@sha256:` digest of `FROM` lines. A digest that
+       changes under the same tag is a digest-only refresh with no version to judge, and refuses.
+
+   No other file may change. For a `uv` minor, the required checks are the only test of
+   compatibility: say so in the approval.
 
 Everything else needs a human, including, at least:
 
 - Executable code anywhere: `src/`, `migrations/`, `tests/local/`, scripts.
 - CI, build and infrastructure: `.github/`, `docker/`, `ops/`, `compose.yaml`,
   `compose.lifecycle.yaml`, `Makefile`, `alembic.ini`, `sonar-project.properties`.
-- Dependencies: `pyproject.toml`, `uv.lock`, `.agents/skills/dbos-python` and `skills-lock.json`.
+- Dependencies: `pyproject.toml` and `uv.lock` outside category 4, `.agents/skills/dbos-python`
+  and `skills-lock.json`. The `docker/Dockerfile` `FROM` lines are eligible only in category 4.
 - Instructions to agents and reviewers: `CLAUDE.md` (and `AGENTS.md`, which links to it),
   `CONTRIBUTING.md`, `.claude/`, `.agents/`, `.gitar/`, `.github/pull_request_template.md`.
 - Specifications and plans: anything under `openspec/`, even a typo. A spec is the contract code
@@ -76,8 +127,13 @@ what would establish it. A pull request that is close to eligible is not eligibl
 
 ## Reporting
 
-- On approval, name the eligible category each changed file falls under, and state that the
-  author and every commit's author and committer are human accounts.
+- On approval under categories 1 to 3, name the eligible category each changed file falls under,
+  and state that the author and every commit's author and committer are human accounts.
+- On approval under category 4, say whether it is a version or a security update, list each
+  dependency with its old and new version and the update type those versions give, and state that
+  `dependabot[bot]` authored every commit and that no package was added to or removed from
+  `uv.lock`. For a `uv` minor, state that no compatibility check other than the
+  required checks applies.
 - On refusal, name the first condition that refused it.
 - Never claim a test, lint or check ran or passed; Gitar runs none. The ruleset decides merge
   readiness.
@@ -92,13 +148,39 @@ Approve:
   `Return the...`, and nothing else in the file changes.
 - A new test function in `tests/unit/` pins an edge case the spec names, using the existing
   fixtures unchanged.
+- `dependabot[bot]` opens "bump the python-patches group with 4 updates". Its one commit, signed
+  by `web-flow`, gives `semver-patch` for every entry, and only those four packages change in
+  `uv.lock`. A patch of `fastapi` from `0.142.2` to `0.142.3`
+  in that group is eligible too.
+- `dependabot[bot]` bumps `sqlalchemy` from `2.1.1` to `2.2.0` as `semver-minor`, rewriting
+  `~=2.1.1` to `~=2.2.0` in `pyproject.toml` and in `uv.lock`'s `requires-dist`, and the package
+  in `uv.lock`. Approve, and state that the required checks are the only compatibility test.
+- `dependabot[bot]` bumps the `python` image from `3.12.15-slim-trixie` to
+  `3.12.16-slim-trixie` as `semver-patch`, changing the tag and digest on each `FROM` line.
+- `dependabot[bot]` opens a security update that moves `pypdf` from `6.21.0` to `6.21.1` and the
+  indirect `certifi` from `2026.10.5` to `2026.10.19`. Its block gives no `update-type`; the
+  `uv.lock` versions make both patches.
 
 Refuse:
 
 - `claude[bot]` opens a pull request that only edits `README.md`: written by a bot.
 - A maintainer's docs pull request gains a commit from `claude[bot]` after a review comment asked
   `@claude` for a fix: carries a bot's commit.
-- `dependabot[bot]` bumps a patch version: written by a bot, and a dependency.
+- `dependabot[bot]` bumps an action from `v8.3.0` to `v8.3.1` in the
+  `actions-patches-and-minors` group: a `github-actions` update.
+- `dependabot[bot]` bumps `pydantic` from `2.13` to `3.0` as `semver-major`: a major update.
+- `dependabot[bot]` bumps `fastapi` from `0.142.2` to `0.162.0` as `semver-minor`: a minor of a
+  `0.x` package.
+- `dependabot[bot]` bumps the `uv` image from `0.13.5` to `0.14.0`: a `docker` minor.
+- `dependabot[bot]` changes a `FROM` digest under the same tag: a digest-only refresh.
+- `dependabot[bot]` opens a security update that moves `pillow` from `12.3.0` to `13.0.0`: the
+  `uv.lock` versions make it a major, though the block names no `update-type`.
+- A `python-patches` group includes a `dbos` patch: `dbos` needs its skill refreshed.
+- `dependabot[bot]` opens a security update that moves `aioboto3` from `15.5.0` to `15.6.0`:
+  `dependabot.yml` ignores `aioboto3` minors until they are re-verified against RustFS and OVH.
+- A maintainer pushes a fix onto a Dependabot pull request: a commit not authored by
+  `dependabot[bot]`.
+- A `python-patches` update adds a new package to `uv.lock`: the lock gains a package.
 - A docs fix also corrects a log message in `src/`: a log message is code.
 - A step in `docs/recovery.md` is reworded: a runbook.
 - A typo fix in `openspec/specs/`: a specification.

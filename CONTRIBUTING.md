@@ -65,8 +65,11 @@ cleanup of unrelated code.
   criteria. Gitar reads it from `dev`, so a pull request can't change the criteria for its own
   fixes, and the file turns nothing on: auto-apply is enabled per pull request.
   [`.gitar/config/approve.md`](.gitar/config/approve.md) bounds which pull requests it may
-  approve, and so auto-merge: documentation prose, comment- and docstring-only changes and
-  added unit tests, never a pull request a bot opened or committed to, and never one that
+  approve, and so auto-merge: documentation prose, comment- and docstring-only changes, added
+  unit tests, and Dependabot version and security updates limited to `uv` patches, `uv` minors of
+  packages at `1.0` or above, and `docker` image patches, with the required checks as their only
+  compatibility test. Never another pull request a bot opened or committed to, never a
+  `github-actions` or `dbos` update or one `.github/dependabot.yml` ignores, and never one that
   changes `.gitar/`.
 
 ## Tests
