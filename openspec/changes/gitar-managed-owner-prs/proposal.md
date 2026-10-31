@@ -43,7 +43,8 @@ None.
 - `.github/dependabot.yml` (labels removed, header comment).
 - `.github/workflows/label-owner-prs.yml` (new). It uses no third-party action and no secret, only
   `GITHUB_TOKEN` with `pull-requests: write`. It is not a required check.
-- `CONTRIBUTING.md` (Gitar paragraph).
+- `CONTRIBUTING.md` (Gitar paragraph; a pull-before-push and force-push rule) and the steward
+  skill's Commits section (the same rule).
 - No tests: the label exists only for Gitar, an external service, and the owner's rule is not to
   pin such configuration in tests. Verification is `actionlint`, a YAML read and an observed pull
   request after the merge.

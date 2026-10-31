@@ -72,6 +72,11 @@ it passing.
   and `git push --force-with-lease`. Rebase only a branch you created and no one else has
   pushed to. On a branch someone else pushed to, merge `origin/<base>` in instead: never
   rewrite their history.
+- Gitar counts as someone else: on a `gitar-managed` pull request it commits its fixes to the
+  branch. Pull before you push. Before any force-push, `git fetch origin <branch>` and check
+  `git log --format='%h %an %s' origin/<base>..origin/<branch>`; a commit you did not write
+  there, Gitar's or anyone's, means merge, not rebase. `--force-with-lease` does not protect a
+  commit that a fetch already brought in.
 - The `claude.yml` Action never merges, rebases or force-pushes: its own system prompt
   forbids it, whatever tools it is granted. As that Action, don't attempt the update: say
   on the PR that it is behind its base and leave it to a Claude Code session or the owner.
