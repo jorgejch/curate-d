@@ -98,6 +98,36 @@ def test_main_passes_the_resolved_port_to_uvicorn(monkeypatch: pytest.MonkeyPatc
     assert ports == [8080]
 
 
+def test_main_passes_the_resolved_host_to_uvicorn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hand uvicorn the address CURATE_D_API_LISTEN_HOST names."""
+    hosts: list[object] = []
+    monkeypatch.setattr(
+        "curate_d.api.__main__.uvicorn.run",
+        lambda *_args, **kwargs: hosts.append(kwargs["host"]),
+    )
+    monkeypatch.setattr(entry, "configure_logging", lambda **_kwargs: None)
+    monkeypatch.setattr(entry, "configure_tracing", lambda **_kwargs: None)
+    monkeypatch.setenv(entry.LISTEN_HOST_ENV, "0.0.0.0")
+
+    assert entry.main() == 0
+    assert hosts == ["0.0.0.0"]
+
+
+def test_invalid_host_stops_main_before_uvicorn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An invalid CURATE_D_API_LISTEN_HOST never reaches uvicorn."""
+    runs: list[object] = []
+    monkeypatch.setattr(
+        "curate_d.api.__main__.uvicorn.run", lambda *args, **kwargs: runs.append(kwargs)
+    )
+    monkeypatch.setattr(entry, "configure_logging", lambda **_kwargs: None)
+    monkeypatch.setattr(entry, "configure_tracing", lambda **_kwargs: None)
+    monkeypatch.setenv(entry.LISTEN_HOST_ENV, "localhost")
+
+    with pytest.raises(ValueError, match=entry.LISTEN_HOST_ENV):
+        entry.main()
+    assert runs == []
+
+
 def test_main_labels_telemetry_with_the_configured_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

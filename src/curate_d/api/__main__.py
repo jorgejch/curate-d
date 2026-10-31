@@ -75,7 +75,7 @@ def main() -> int:
     uvicorn.run(
         "curate_d.api.app:create_traced_app",
         factory=True,
-        host="0.0.0.0",
+        host=listen_host(),
         port=listen_port(),
         access_log=False,
     )
