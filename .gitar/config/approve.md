@@ -87,8 +87,10 @@ request is category 4. Category 4 never combines with the others.
      Dependabot does neither.
    - **Version references only.** Every changed line is a version reference of a dependency the
      block names:
-     - `uv.lock`: the named packages' versions, sources, sdists, wheels and hashes. A package added
-       to or removed from the lock refuses; name it.
+     - `uv.lock`: the named packages' versions, sources, sdists, wheels and hashes, and the
+       root project's copy of each named dependency's specifier (under `[package.metadata]`
+       `requires-dist` or `[package.metadata.requires-dev]`) when it matches the
+       `pyproject.toml` rewrite. A package added to or removed from the lock refuses; name it.
      - `pyproject.toml`: only the named dependencies' version specifiers, rewritten when the new
        version leaves the declared range (`sqlalchemy~=2.1.1` to `~=2.2.0`). A comment, another
        key or another dependency refuses.
@@ -144,8 +146,8 @@ Approve:
   only those four packages change in `uv.lock`. A patch of `fastapi` from `0.142.2` to `0.142.3`
   in that group is eligible too.
 - `dependabot[bot]` bumps `sqlalchemy` from `2.1.1` to `2.2.0` as `semver-minor`, rewriting
-  `~=2.1.1` to `~=2.2.0` in `pyproject.toml` and the package in `uv.lock`. Approve, and state
-  that the required checks are the only compatibility test.
+  `~=2.1.1` to `~=2.2.0` in `pyproject.toml` and in `uv.lock`'s `requires-dist`, and the package
+  in `uv.lock`. Approve, and state that the required checks are the only compatibility test.
 - `dependabot[bot]` bumps the `python` image from `3.12.15-slim-trixie` to
   `3.12.16-slim-trixie` as `semver-patch`, changing the tag and digest on each `FROM` line.
 
