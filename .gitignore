@@ -32,6 +32,8 @@ htmlcov/
 /curate-d.coverage
 /curate-d.xml
 /coverage.xml
+# make test-integration-parallel's shard logs and JUnit reports.
+/.integration-runs/
 /.mcp.json
 # Agent tool state stays local; the vendored dbos-python skill (skills-lock.json) and the
 # repo's own steward skill are tracked.

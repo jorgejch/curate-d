@@ -5,7 +5,7 @@
 # staging backend.
 
 .PHONY: help install lint format typecheck test coverage test-stack test-integration \
-	test-durations check staging-init lifecycle-check stack-up stack-down stack-reset \
+	test-integration-parallel test-durations check staging-init lifecycle-check stack-up stack-down stack-reset \
 	migrate image
 
 help:
@@ -66,6 +66,14 @@ test-stack: ## Reset the local stack, then start only the integration suite's se
 # the collection, so a reproduced shard must collect the same ids.
 test-integration: ## Integration suite (needs `make test-stack`); GROUP=<n> reruns one CI shard; no coverage gate
 	uv run pytest tests/integration --no-cov -m integration$(if $(GROUP), --staging-backend=rustfs --splits $(SPLITS) --group $(GROUP) --splitting-algorithm least_duration)
+
+# CI's shards at once, each in its own Compose project (curate-d-it-<n>) on its own loopback
+# ports, never the default project, so a stack-up stack keeps running. One stack per shard,
+# not `pytest -n` on one: a shard's tests share one database's advisory locks and DBOS's
+# latest application version. Logs and JUnit reports go to .integration-runs/<UTC time>/;
+# every shard stack is removed afterwards, on failure and on Ctrl-C too.
+test-integration-parallel: ## CI's SPLITS shards at once, each on its own stack; leaves stack-up alone
+	uv run $(TEST_STACK_UV_FLAGS) python -m tests.parallel_integration --splits '$(SPLITS)'
 
 # Generated with CI's backend flag so the node ids match. Drift only affects shard balance.
 test-durations: ## Regenerate .test_durations from a whole run; needs make test-stack
