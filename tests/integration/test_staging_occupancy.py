@@ -41,12 +41,11 @@ from curate_d.staging.object_store import S3StagingObjectStore
 from curate_d.staging.objects import StagedObject, StagedObjectRef, StagingObjectStore
 from curate_d.staging.occupancy import StagingOccupancy
 from curate_d.staging.publish import publish
-from tests.integration.rustfs_staging import provisioned_location
+from tests.integration.rustfs_staging import ENDPOINT, provisioned_location
 from tests.integration.staging_keys import delete_suite_reservations, suite_key
 
 pytestmark = pytest.mark.integration
 
-_ENDPOINT = "http://127.0.0.1:9100"
 _WRITER = ("curate-d-staging-writer", "writer-development-secret")
 
 # Small enough that a handful of 64-byte objects creates real pressure, so the tests
@@ -79,7 +78,7 @@ def writer_settings(sub_prefix: str) -> Settings:
     """Return writer-role settings for local RustFS, scoped to one test's content sub-prefix."""
     bucket, prefix = provisioned_location()
     return Settings(
-        staging_s3_endpoint_url=_ENDPOINT,  # type: ignore[arg-type]
+        staging_s3_endpoint_url=ENDPOINT,  # type: ignore[arg-type]
         staging_s3_bucket=bucket,
         staging_s3_region="us-east-1",
         staging_s3_role=StagingRole.WRITER,

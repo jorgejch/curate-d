@@ -34,7 +34,7 @@ from curate_d.staging.errors import (
 from curate_d.staging.keys import StagingKey
 from curate_d.staging.object_store import S3StagingObjectStore, build_client_factory
 from curate_d.staging.objects import StagedObject, StagingObjectStore
-from tests.integration.rustfs_staging import provisioned_location
+from tests.integration.rustfs_staging import ENDPOINT, provisioned_location
 
 if TYPE_CHECKING:
     from botocore.awsrequest import AWSPreparedRequest
@@ -42,8 +42,9 @@ if TYPE_CHECKING:
 
 pytestmark = pytest.mark.integration
 _PART_SIZE = 5 * 1024 * 1024
-# The loopback ports compose.yaml publishes for each local engine.
-_LOCAL_ENDPOINTS = {"rustfs": "http://127.0.0.1:9100"}
+# Each local engine's endpoint: the stack the run points at, else the port compose.yaml
+# publishes.
+_LOCAL_ENDPOINTS = {"rustfs": ENDPOINT}
 
 
 @dataclass
