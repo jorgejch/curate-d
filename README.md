@@ -121,6 +121,7 @@ make test              # isolated unit tests + 80% coverage gate
 make coverage          # unit coverage data in curate-d.coverage, importable by PyCharm
 make test-stack        # reset the stack, then only PostgreSQL, RustFS and rclone, migrated, for integration tests
 make test-integration  # integration tests (needs make test-stack, not stack-up); GROUP=<n> reruns one CI shard
+make test-integration-parallel  # CI's shards at once, each on its own stack; leaves stack-up running
 make test-durations    # regenerate .test_durations for shard balancing (needs make test-stack)
 make check             # lint + typecheck + test; PRs touching the suite's inputs also run the full integration suite
 make image             # build the container image
