@@ -153,9 +153,11 @@ class ShardPlan:
     def env(self, base: Mapping[str, str]) -> dict[str, str]:
         """Return the shard's process environment: `base` with the shard's settings over it.
 
-        A key the developer exported is kept, as TEST_STACK_COMPOSE keeps it.
+        An empty exported key counts as unset; a non-empty key is kept, as TEST_STACK_COMPOSE
+        keeps it.
         """
-        return {ENCRYPTION_KEY_VARIABLE: DUMMY_ENCRYPTION_KEY, **base, **self.environment}
+        key = base.get(ENCRYPTION_KEY_VARIABLE) or DUMMY_ENCRYPTION_KEY
+        return {**base, ENCRYPTION_KEY_VARIABLE: key, **self.environment}
 
 
 def _tool(name: str) -> str:

@@ -198,6 +198,12 @@ def test_an_exported_encryption_key_is_kept() -> None:
     assert env[runner.ENCRYPTION_KEY_VARIABLE] == "developer-key"
 
 
+def test_an_empty_exported_encryption_key_falls_back_to_the_dummy() -> None:
+    """An empty exported key counts as unset, like `${VAR:-default}` in Compose."""
+    env = shard_plan(1, 4, RUN_DIR).env({runner.ENCRYPTION_KEY_VARIABLE: ""})
+    assert env[runner.ENCRYPTION_KEY_VARIABLE] == runner.DUMMY_ENCRYPTION_KEY
+
+
 # --- Steps --------------------------------------------------------------------------------
 
 
