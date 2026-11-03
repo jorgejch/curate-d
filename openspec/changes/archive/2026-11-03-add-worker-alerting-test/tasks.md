@@ -16,9 +16,10 @@ Two work streams. Stream 1 has no dependency and starts at once. Stream 2 import
 ## 3. Whole change
 
 - [x] 3.1 `make check`
-- [ ] 3.2 In dev, after deploy: `POST` the route for `io`, then `cpu`; confirm the worker alert fires once per profile and the notification arrives
 
 ## Workflow follow-up
 
 - Sync the delta spec into `openspec/specs/control-plane/spec.md`, then archive the change.
 - Run `openspec validate --all --strict` on the archive.
+- In dev, after deploy: `POST` the route for `io`, then `cpu`; confirm the worker alert fires
+  once per profile and its notification arrives.
