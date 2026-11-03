@@ -114,7 +114,7 @@ class _Workflows:
     """Records enqueues."""
 
     def __init__(self) -> None:
-        """Nothing enqueued yet."""
+        """Start with nothing enqueued."""
         self.enqueued: list[tuple[EnqueueOptions, str]] = []
 
     async def enqueue_async(self, options: EnqueueOptions, profile: str) -> None:

@@ -84,7 +84,7 @@ def throughput(request: Request) -> ThroughputBackend:
 
 
 def worker_alerting_test(request: Request) -> WorkerAlertingTestBackend:
-    """The worker alerting test backend."""
+    """Return the worker alerting test backend."""
     return of(request).worker_alerting_test
 
 
