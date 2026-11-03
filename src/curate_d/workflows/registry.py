@@ -9,6 +9,7 @@ from dbos import ScheduleInput
 from curate_d.config import Settings
 from curate_d.runtime.profiles import WorkerProfile
 from curate_d.workflows import (
+    alerting_test,
     classify,
     connections,
     dry_run,
@@ -23,7 +24,7 @@ from curate_d.workflows import (
 )
 
 # Imported for their DBOS registrations; nothing here calls them directly.
-_REGISTERED = (dry_run, ingest, placement)
+_REGISTERED = (alerting_test, dry_run, ingest, placement)
 
 
 def schedules_for(profile: WorkerProfile, settings: Settings) -> list[ScheduleInput]:
