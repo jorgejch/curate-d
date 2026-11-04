@@ -556,6 +556,39 @@ def test_a_shard_starts_no_step_after_an_interrupt() -> None:
     assert run.fake.of(2) == ["reset", "up", "rustfs-init", "migrate", "teardown"]
 
 
+class SignalDuringSummary(io.StringIO):
+    """Output whose first summary write interrupts the run, as a signal handler would."""
+
+    def __init__(self) -> None:
+        """Create the output; set `executor` before the run starts."""
+        super().__init__()
+        self.executor: ShardExecutor | None = None
+
+    def write(self, text: str) -> int:
+        """Write `text`, interrupting the run at the summary's first write."""
+        if "Summary" in text and self.executor is not None:
+            executor, self.executor = self.executor, None
+            executor.interrupt(signal.SIGINT)
+        return super().write(text)
+
+
+def test_a_signal_while_the_summary_prints_neither_hangs_nor_is_lost() -> None:
+    """The handler runs on the thread that holds the output lock, so it prints nothing."""
+    plans = _plans(2)
+    fake = FakeRunner(plans)
+    out = SignalDuringSummary()
+    executor = ShardExecutor(plans, fake, base_env={}, out=out)
+    out.executor = executor
+    codes: list[int] = []
+    # A daemon thread, so a deadlock fails this test instead of hanging the suite.
+    thread = threading.Thread(target=lambda: codes.append(executor.run()), daemon=True)
+    thread.start()
+    thread.join(_WAIT)
+    assert not thread.is_alive()
+    assert codes == [130]
+    assert fake.terminations == 1
+
+
 # --- Process runner -----------------------------------------------------------------------
 
 

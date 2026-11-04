@@ -409,11 +409,16 @@ class ShardExecutor:
         ]
         for thread in threads:
             thread.start()
+        announced = False
         for thread in threads:
             # A bounded join keeps the main thread returning to the interpreter, where
             # signal handlers run.
             while thread.is_alive():
                 thread.join(0.2)
+                announced = announced or self._announce_stop()
+        if not announced:
+            # A signal in the last join: shown before the summary, not lost.
+            self._announce_stop()
         results = [self._result(plan) for plan in self._plans]
         self._summarize(results)
         if self._signal is not None:
@@ -423,14 +428,23 @@ class ShardExecutor:
     def interrupt(self, signum: int) -> None:
         """Stop the run: terminate the running steps and start no further one.
 
-        Each shard still removes its stack. Only the first call acts.
+        Each shard still removes its stack. Only the first call acts. It prints nothing: the
+        signal handler that calls it runs on the main thread, which may hold the output lock
+        mid-print, so `run` announces the stop instead.
         """
         if self._stop.is_set():
             return
         self._signal = signum
         self._stop.set()
-        self._say(f"{signal.Signals(signum).name}: stopping the shards and removing their stacks")
         self._runner.terminate()
+
+    def _announce_stop(self) -> bool:
+        """Print that the run is stopping, once it is; return whether it printed."""
+        if self._signal is None:
+            return False
+        name = signal.Signals(self._signal).name
+        self._say(f"{name}: stopping the shards and removing their stacks")
+        return True
 
     def _result(self, plan: ShardPlan) -> ShardResult:
         """Return a shard's result, or a failure when its thread ended without one."""
