@@ -100,7 +100,8 @@ confirm() {
 # --- local ---------------------------------------------------------------------------
 
 local_helper() {
-  docker compose run --rm --no-deps -T -e RESET_PY="$RESET_PY" worker-io sh -c "$1"
+  local steps=$1
+  docker compose run --rm --no-deps -T -e RESET_PY="$RESET_PY" worker-io sh -c "$steps"
 }
 
 local_reset() {
@@ -137,9 +138,10 @@ local_reset() {
 # reduces `$$` to `$` in a container's command and env values, so both are escaped: unescaped,
 # reset.py's `DO $$` reached Postgres as `DO $`.
 dev_helper() {
+  local steps=$1
   "${K[@]}" delete pod "$HELPER_POD" --ignore-not-found --wait >/dev/null
   "${K[@]}" get "$WORKER_IO" -o json | jq \
-    --arg name "$HELPER_POD" --arg steps "$1" --arg code "$RESET_PY" '
+    --arg name "$HELPER_POD" --arg steps "$steps" --arg code "$RESET_PY" '
     def k8s_literal: gsub("\\$"; "$$");
     ($steps | k8s_literal) as $steps | ($code | k8s_literal) as $code
     | .spec.template as $t | {
@@ -220,4 +222,5 @@ dev_reset() {
 case $ENVIRONMENT in
   local) local_reset ;;
   dev) dev_reset ;;
+  *) usage ;;
 esac
