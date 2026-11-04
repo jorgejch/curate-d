@@ -259,10 +259,12 @@ would run against another agent's half-finished edit.
   documents must be byte-identical.
 - **Whole change:**
   1. The IDE check (task 8.2): after the streams merge into this worktree, the user runs
-     "Analyze VCS Changed Files" from the SonarQube for IDE Report tab. The orchestrator then
-     reads a copy of `KNOWN_FINDINGS` with the plugin's own H2 driver
-     (`sloop/lib/h2-2.4.240.jar`) and checks the changed files: no finding of a planned rule
-     and no new finding. This uses the server's rules, except `pythonbugs:S2583`.
+     "Analyze All Project Files" from the SonarQube for IDE Report tab. "Analyze VCS Changed
+     Files" is not enough: it reads only uncommitted files, and the merged fixes are
+     committed. The plugin keeps the report in memory and does not write it to
+     `KNOWN_FINDINGS` at once, so the user gives the orchestrator the report's findings. No
+     finding of a planned rule and no new finding may remain in the changed files. This
+     uses the server's rules, except `pythonbugs:S2583`.
   2. `make test-stack`, then the whole integration suite (`make test-integration`, fresh
      stack, per `CLAUDE.md`)
   3. `make image`
