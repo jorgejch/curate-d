@@ -117,6 +117,22 @@ async def test_a_missing_root_is_a_request_error(files: PCloudFiles) -> None:
         await files.resolve_folder("/nope")
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"result": 0, "metadata": "x"},
+        {"result": 0, "metadata": {"folderid": "7"}},
+    ],
+)
+async def test_a_malformed_folder_resolution_is_not_trusted(
+    files: PCloudFiles, pcloud: StubPCloud, body: dict[str, object]
+) -> None:
+    """A resolution without an integer folder id is a bad answer named after its operation."""
+    pcloud.fail("listfolder", "/Photos", Failure(times=1, body=body))
+    with pytest.raises(ProviderUnavailableError, match="resolve folder failed: malformed"):
+        await files.resolve_folder("/Photos")
+
+
 def test_a_host_outside_pcloud_is_refused() -> None:
     """The client never sends the token anywhere but pCloud."""
     with pytest.raises(ProviderRequestError):
