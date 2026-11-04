@@ -280,6 +280,7 @@ class FakeRunner:
         outcomes: Mapping[tuple[int, str], Outcome] | None = None,
         hook: Hook | None = None,
     ) -> None:
+        """Create a runner for `plans` that answers from `outcomes`, 0 for a command not in it."""
         # Migrate and pytest share their command line across shards, so the shard is
         # recognized by the port its environment carries.
         self._shards = {str(plan.ports.postgres): plan.index for plan in plans}
@@ -445,6 +446,7 @@ class Interruption:
     """A fake run whose shards block in pytest until a simulated signal terminates them."""
 
     def __init__(self, splits: int, blocking: Mapping[int, str] | None = None) -> None:
+        """Create a run of `splits` shards, each blocked in pytest or the step `blocking` names."""
         self.plans = _plans(splits)
         # The step each shard blocks in, until terminated; pytest unless named here.
         self._blocking = {plan.index: "pytest" for plan in self.plans} | dict(blocking or {})

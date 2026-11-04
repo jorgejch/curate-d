@@ -272,6 +272,7 @@ class ProcessRunner:
     """
 
     def __init__(self, grace_seconds: float = TERMINATE_GRACE_SECONDS) -> None:
+        """Create a runner that gives a terminated child `grace_seconds` before SIGKILL."""
         self._grace_seconds = grace_seconds
         self._lock = threading.Lock()
         # The children `terminate` stops: a teardown or logs command is never among them.
@@ -374,6 +375,15 @@ class ShardExecutor:
         out: TextIO,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        """Create an executor for `plans` that runs commands through `runner`.
+
+        Args:
+            plans: The shards, run at once.
+            runner: Runs each step, logs and teardown command.
+            base_env: The environment each shard's settings are laid over.
+            out: Where progress and the summary are written.
+            clock: The time source for each shard's duration.
+        """
         self._plans = tuple(plans)
         self._runner = runner
         self._base_env = dict(base_env)
