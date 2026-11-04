@@ -12,7 +12,7 @@ has no credential field.
 from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Final, Protocol
+from typing import Annotated, Final, Protocol, assert_never
 
 import httpx
 from fastapi import APIRouter, Cookie, Depends, Request, Response, status
@@ -208,6 +208,14 @@ class LedgerConnections:
         Raises:
             UnavailableError: pCloud authorization or the credential key is not configured.
         """
+        match provider:
+            case Provider.PCLOUD:
+                return self._begin_pcloud()
+            case _:
+                assert_never(provider)
+
+    def _begin_pcloud(self) -> StartedAuthorization:
+        """Start authorizing a pCloud account against its OAuth registration."""
         try:
             pending = begin_pcloud_authorization(
                 pcloud_oauth_config(self._settings), self._states()
@@ -234,6 +242,18 @@ class LedgerConnections:
             UnavailableError: authorization is not configured, or pCloud refused or could
                 not be reached; the message names the provider, account and operation.
         """
+        match provider:
+            case Provider.PCLOUD:
+                return await self._complete_pcloud(
+                    code=code, state=state, hostname=hostname, browser_nonce=browser_nonce
+                )
+            case _:
+                assert_never(provider)
+
+    async def _complete_pcloud(
+        self, *, code: str, state: str, hostname: str, browser_nonce: str | None
+    ) -> ConnectionHealth:
+        """Finish a pCloud authorization and store the connection it names."""
         cipher = self._cipher()
         try:
             config = pcloud_oauth_config(self._settings)
