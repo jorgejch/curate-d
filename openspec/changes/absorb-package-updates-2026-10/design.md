@@ -117,6 +117,17 @@ See proposal.md, "Why". Observed state on `dev` `62068e5` with the bumped lock i
      After rewriting it prints every other line that still names a previous SDK version.
      No report file (pytest did not run) exits 2 without writing. Any failing test exits 1
      after writing the `FAIL` cells, so a red run is recorded, as the matrix requires.
+     These also exit 2 without writing, as runs that are not evidence:
+       - a report in which no test passed: a stack that is down, or OVH settings the
+         fixture refuses, errors every test, and says nothing about the SDK;
+       - OVH selected without `CURATE_D_TEST_OVH_BUCKET` and `_ENDPOINT`, checked before
+         the run;
+       - an installed `aioboto3`, `aiobotocore` or `botocore` that is not the locked
+         version (`importlib.metadata`), checked before any run: the cells name the lock's
+         versions, so the suite must run on them. `make staging-sdk-evidence` runs through
+         `uv run`, which syncs the environment first.
+     The suite runs without the caller's `PYTEST_ADDOPTS`: a `-k` there would deselect
+     tests, and a deselected test leaves no entry in the report to detect.
    The column order is taken from the table header line, not assumed, and a row whose cell
    count differs from the header is an error.
 

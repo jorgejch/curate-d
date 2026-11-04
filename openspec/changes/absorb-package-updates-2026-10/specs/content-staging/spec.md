@@ -32,8 +32,16 @@ cell or prose.
 - **THEN** that backend's cell records the failure, the test name and the date, the command exits non-zero, and no cell is marked pass
 
 #### Scenario: The suite cannot run
-- **WHEN** the selected backend's stack or credentials are unavailable and the suite produces no report
-- **THEN** the command exits non-zero without rewriting the matrix
+- **WHEN** the selected backend's stack or settings are unavailable, so the suite produces no report or no test in it passes
+- **THEN** the command exits non-zero without rewriting the matrix, and the previous evidence stays in every cell
+
+#### Scenario: The installed SDK is not the locked one
+- **WHEN** the environment that would run the suite has an SDK package at a version other than the locked one
+- **THEN** the command exits non-zero before running the suite, naming the package with both versions, and leaves the matrix unchanged
+
+#### Scenario: Inherited test selection
+- **WHEN** the caller's environment carries pytest options that would deselect contract tests
+- **THEN** the command still runs the whole contract suite, so its result cannot stand for part of it
 
 #### Scenario: Dry run
 - **WHEN** the command is asked for a dry run
