@@ -30,6 +30,7 @@ from contextlib import (
     asynccontextmanager,
     contextmanager,
 )
+from functools import partial
 from pathlib import Path
 from typing import BinaryIO, Final, Protocol, runtime_checkable
 from uuid import uuid4
@@ -261,7 +262,7 @@ class LocalSnapshotReader:
             # open, so unlinking only removes the name: the bytes stay reachable through
             # that descriptor and through nothing else.
             cleanup.callback(path.unlink, missing_ok=True)
-            sink = await asyncio.to_thread(path.open, "xb")
+            sink = await _create_scratch(path)
             with sink:
                 await self._store.download(obj, sink)
             return path
@@ -275,6 +276,29 @@ class LocalSnapshotReader:
         """
         name = f"{obj.key}.{uuid4().hex}.snapshot"
         return require_within_root(self._scratch_root, self._scratch_root / name)
+
+
+async def _create_scratch(path: Path) -> BinaryIO:
+    """Create `path` exclusively off the event loop, and discard it if the read is cancelled.
+
+    Cancelling the await does not stop the thread, so the file can appear after the
+    caller's cleanup already unlinked the name. A cancelled create therefore closes its
+    handle and removes the name once the thread returns.
+    """
+    creating = asyncio.ensure_future(asyncio.to_thread(path.open, "xb"))
+    try:
+        return await asyncio.shield(creating)
+    except asyncio.CancelledError:
+        creating.add_done_callback(partial(_discard_created, path))
+        raise
+
+
+def _discard_created(path: Path, creating: asyncio.Future[BinaryIO]) -> None:
+    """Close and unlink a scratch file whose create finished after its read was cancelled."""
+    if creating.cancelled() or creating.exception() is not None:
+        return
+    creating.result().close()
+    path.unlink(missing_ok=True)
 
 
 def _open_verified(path: Path, obj: StagedObject, cleanup: ExitStack) -> BinaryIO:
