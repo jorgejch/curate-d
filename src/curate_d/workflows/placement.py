@@ -173,7 +173,7 @@ async def _copy_step(
     destination_fs = await remotes.fs_for(request.destination.provider, request.destination.account)
     group = placement_workflow_for(request)
 
-    async def report(done: int, total: int) -> None:
+    def report(done: int, total: int) -> None:
         """Log how far the copy has got."""
         logger.info("placement.progress", workflow_id=group, bytes=done, total_bytes=total)
 

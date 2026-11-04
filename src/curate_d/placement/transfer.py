@@ -10,7 +10,7 @@ The source is never written: every call on the source side is a read.
 """
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from typing import Final
 
 from pydantic import Field
@@ -80,7 +80,7 @@ async def copy_and_collect(
     rclone: RcloneClient,
     spec: TransferSpec,
     *,
-    on_progress: Callable[[int, int], Awaitable[None]] | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
     poll_seconds: float = 0.25,
 ) -> TransferEvidence:
     """Copy one file and return the evidence both sides leave.
@@ -105,7 +105,7 @@ async def copy_and_collect(
         if on_progress is not None:
             stats = await rclone.stats(spec.group)
             done, total = stats.get("bytes"), stats.get("totalBytes")
-            await on_progress(
+            on_progress(
                 done if isinstance(done, int) else 0,
                 total if isinstance(total, int) and total else spec.size_bytes,
             )
