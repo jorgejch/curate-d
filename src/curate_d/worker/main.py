@@ -330,20 +330,29 @@ class StagingSupervisor:
         """Run the staging event loop until shutdown, recording why it ended."""
         try:
             asyncio.run(self._serve())
+        except (Exception, asyncio.CancelledError) as failure:
+            self._record_failure(failure)
         except BaseException as failure:
-            already_started = self._settled.is_set()
-            self._failure = failure
-            if already_started:
-                # Nobody is waiting on `_failure` any more, so this is the only place it
-                # can be seen: without it the worker serves on with cleanup silently dead.
-                logger.error(
-                    "staging.supervisor_failed",
-                    profile=self._profile.value,
-                    error_type=type(failure).__name__,
-                )
+            # An exit signal is recorded for `start` like any failure, then left to the
+            # thread's excepthook, which ignores SystemExit.
+            self._record_failure(failure)
+            raise
         finally:
             # Unblocks `start` whether readiness passed, failed, or never got that far.
             self._settled.set()
+
+    def _record_failure(self, failure: BaseException) -> None:
+        """Keep why the loop ended for `start`, and log it if `start` has already returned."""
+        already_started = self._settled.is_set()
+        self._failure = failure
+        if already_started:
+            # Nobody is waiting on `_failure` any more, so this is the only place it
+            # can be seen: without it the worker serves on with cleanup silently dead.
+            logger.error(
+                "staging.supervisor_failed",
+                profile=self._profile.value,
+                error_type=type(failure).__name__,
+            )
 
     async def _serve(self) -> None:
         """Build the backend, prove it ready, then serve the loop until asked to stop."""
