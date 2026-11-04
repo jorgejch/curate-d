@@ -107,6 +107,18 @@ cleanup of unrelated code.
   `make test-durations` against a `make test-stack` stack and commit `.test_durations` when
   you add or remove a slow test, or when the shard times in the `Integration tests` summary
   drift apart.
+- **To run the whole suite as CI's shards, at once**, run `make test-integration-parallel`.
+  Each shard gets its own Compose project (`curate-d-it-<n>`) and loopback ports, is
+  provisioned and migrated, and runs CI's shard command serially against its own stack. It
+  never touches the default project, so a `make stack-up` stack keeps running beside it.
+  Each shard's `stack.log`, `pytest.log` and `junit.xml` go to
+  `.integration-runs/<UTC time>/shard-<n>/`, and the summary names a failed shard's files.
+  Every shard stack and its data is removed afterwards, also on Ctrl-C. One run goes at a
+  time: the shard projects are the same for every run, so a second run, from any worktree of
+  the clone, exits naming the lock file in Git's common directory. Four stacks need
+  more memory than one: on a smaller host, pass `SPLITS=2`. If a killed run leaves one
+  behind, the next run removes it, or remove it yourself with
+  `docker compose -p curate-d-it-<n> down -v`.
 - **Don't run them against `make stack-up`.** Its workers apply the persisted schedules, and
   the suite's own DBOS process then fires them: a recovery or refresh tick runs against the
   test rows. `make test-stack` runs `make stack-reset` first, which destroys the

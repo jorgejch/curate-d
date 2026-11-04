@@ -35,7 +35,7 @@ from curate_d.config import S3AddressingStyle, Settings, StagingRole
 from curate_d.staging.errors import StagingNotReadyError
 from curate_d.staging.factories import check_staging_ready, refresh_readiness_marker
 from curate_d.staging.object_store import S3StagingObjectStore
-from tests.integration.rustfs_staging import provisioned_location
+from tests.integration.rustfs_staging import ENDPOINT, provisioned_location
 
 if TYPE_CHECKING:
     from types_aiobotocore_s3.client import S3Client
@@ -44,8 +44,9 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.integration
 _PART_SIZE = 5 * 1024 * 1024
 _ROOT = Path(__file__).resolve().parents[2]
-# The loopback ports compose.yaml publishes for each local engine.
-_LOCAL_ENDPOINTS = {"rustfs": "http://127.0.0.1:9100"}
+# Each local engine's endpoint: the stack the run points at, else the port compose.yaml
+# publishes.
+_LOCAL_ENDPOINTS = {"rustfs": ENDPOINT}
 # compose.yaml's development root credentials, overridable as CURATE_D_TEST_<ENGINE>_ROOT_*.
 _LOCAL_ROOT_DEFAULTS = {"rustfs": "rustfsadmin"}
 
