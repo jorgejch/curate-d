@@ -265,3 +265,16 @@ def test_the_capture_time_source_is_recorded() -> None:
         classify_deterministic(from_nothing, local_timezone=_ZONE).evidence["captured_at_source"]
         is None
     )
+
+
+def test_a_pdf_date_of_a_bare_year_in_utc_is_the_first_of_january() -> None:
+    """Every part after the year is optional; a zone alone places a bare year."""
+    metadata = pdf_metadata(io.BytesIO(media.pdf(["x"], created="D:2026Z")))
+    assert metadata.captured_at == datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def test_a_pdf_date_offset_is_read_without_its_quotes() -> None:
+    """The apostrophes in the offset are optional, and a negative offset is applied as written."""
+    metadata = pdf_metadata(io.BytesIO(media.pdf(["x"], created="D:20260301120000-0500")))
+    assert metadata.captured_at == datetime(2026, 3, 1, 12, 0, tzinfo=timezone(timedelta(hours=-5)))
+    assert metadata.captured_at == datetime(2026, 3, 1, 17, 0, tzinfo=UTC)

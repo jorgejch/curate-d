@@ -34,8 +34,17 @@ _GPS_TIME, _GPS_DATE = 7, 29
 
 _EXIF_TIME: Final = "%Y:%m:%d %H:%M:%S"
 _OFFSET: Final = re.compile(r"\A([+-])(\d{2}):(\d{2})\Z")
+# A PDF date (ISO 32000-1, 7.9.4): D:YYYYMMDDHHmmSSOHH'mm', every part after the year
+# optional. Seven positional groups, read by `_pdf_date` in this order.
 _PDF_DATE: Final = re.compile(
-    r"\AD:(\d{4})(\d{2})?(\d{2})?(\d{2})?(\d{2})?(\d{2})?(Z|[+-]\d{2}'?\d{2}'?)?"
+    r"\AD:"
+    r"(\d{4})"  # year
+    r"(\d\d)?"  # month
+    r"(\d\d)?"  # day
+    r"(\d\d)?"  # hour
+    r"(\d\d)?"  # minute
+    r"(\d\d)?"  # second
+    r"(Z|[+-]\d\d'?\d\d'?)?"  # zone: Z, or a signed HH'mm' offset, apostrophes optional
 )
 
 
