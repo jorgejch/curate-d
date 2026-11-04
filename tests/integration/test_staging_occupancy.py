@@ -85,7 +85,8 @@ def writer_settings(sub_prefix: str) -> Settings:
         staging_s3_access_key_id=_WRITER[0],  # type: ignore[arg-type]
         staging_s3_secret_access_key=_WRITER[1],  # type: ignore[arg-type]
         staging_s3_addressing_style=S3AddressingStyle.PATH,
-        staging_s3_verify_tls=False,
+        # Verified when the stack the run points at serves HTTPS, as the contract fixture does.
+        staging_s3_verify_tls=ENDPOINT.startswith("https://"),
         staging_s3_content_prefix=f"{prefix}{sub_prefix}",
     )
 
