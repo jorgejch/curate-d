@@ -207,8 +207,12 @@ cell or prose.
 - **THEN** that backend's cell records the failure, the test name and the date, the command exits non-zero, and no cell is marked pass
 
 #### Scenario: The suite cannot run
-- **WHEN** the selected backend's stack or settings are unavailable, so the suite produces no report or no test in it passes
+- **WHEN** the selected backend's endpoint does not accept a connection before the run, the suite produces no report, every test in it is skipped, or a failure in it shows the backend was never reached or its settings were refused
 - **THEN** the command exits non-zero without rewriting the matrix, and the previous evidence stays in every cell
+
+#### Scenario: Every contract test fails against a reachable backend
+- **WHEN** the backend accepts connections and answers, and it rejects every test, as it would an SDK default it does not support
+- **THEN** that backend's cells record the failure as for any failing test; the run is not treated as one that could not run
 
 #### Scenario: The installed SDK is not the locked one
 - **WHEN** the environment that would run the suite has an SDK package at a version other than the locked one

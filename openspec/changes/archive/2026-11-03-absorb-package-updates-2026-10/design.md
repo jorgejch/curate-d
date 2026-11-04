@@ -118,8 +118,15 @@ See proposal.md, "Why". Observed state on `dev` `62068e5` with the bumped lock i
      No report file (pytest did not run) exits 2 without writing. Any failing test exits 1
      after writing the `FAIL` cells, so a red run is recorded, as the matrix requires.
      These also exit 2 without writing, as runs that are not evidence:
-       - a report in which no test passed: a stack that is down, or OVH settings the
-         fixture refuses, errors every test, and says nothing about the SDK;
+       - a backend whose endpoint does not accept a TCP connection, checked before the
+         run (`make test-stack` not up, a wrong endpoint);
+       - a report in which a failure never reached the backend: its text names a refused or
+         timed-out connection, an unknown host (botocore's `Could not connect to the
+         endpoint URL`, aiohttp's `Cannot connect to host`) or the OVH fixture's `PENDING
+         OVH verification` refusal. That is the stack, also when it dies mid-run;
+       - a report in which every test was skipped.
+     A failure the backend answered is evidence, even when every test fails: an SDK
+     default the backend rejects fails every upload, and that is what the matrix must show.
        - OVH selected without `CURATE_D_TEST_OVH_BUCKET` and `_ENDPOINT`, checked before
          the run;
        - an installed `aioboto3`, `aiobotocore` or `botocore` that is not the locked
@@ -202,7 +209,7 @@ directory did not clear S8707: Sonar does not take `Path.is_relative_to` as a sa
 options had no use outside the unit tests, so a second `fix(staging)` commit removes them
 (decision 4): the command line takes no path at all.
 
-Final diff against `dev` (task 4.1): 24 files, 2221 insertions, 174 deletions, all in the
+Final diff against `dev` (task 4.1): 24 files, 2474 insertions, 174 deletions, all in the
 streams' files: the vendored skill and `skills-lock.json`, `pyproject.toml` and `uv.lock`,
 `sdk_evidence.py` and its two unit test modules, `Makefile`, `ops/README.md`,
 `ops/staging-compatibility.md`, `README.md`, `openspec/config.yaml`, `CLAUDE.md`, the
@@ -217,3 +224,13 @@ suite runs without the caller's `PYTEST_ADDOPTS`. A dry run on a fresh `make tes
 `PYTEST_ADDOPTS=-k test_default_sdk_checksum_headers_are_accepted` still ran all 20 contract
 tests. The delta is synced into `openspec/specs/content-staging/spec.md` and the change
 archived in this PR.
+
+That first fix also treated an SDK break that fails every test as "not run": the rule "no test
+passed" cannot tell a down stack from a backend that rejects every upload. It is replaced by
+`fix(staging): tell an unreachable backend from an SDK break`: a TCP probe of the endpoint
+before the run, and the failure text after it (connection refused or timed out, unknown host,
+the OVH fixture's refusal), decide "not run"; a failure the backend answered is recorded as
+FAIL, even when every test fails. Checked against a real report from the suite run on an
+endpoint that does not answer (classified "never reached the backend"), a dry run on that
+endpoint (exit 2 in under a second, before any test), and a dry run on a fresh stack (20
+passed, no write).

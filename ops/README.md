@@ -120,7 +120,9 @@ earned under, and a unit test fails when `uv.lock` resolves different ones.
 (default `rustfs`; add `ovh` with the `CURATE_D_TEST_OVH_*` settings) and rewrites the
 `SDK` row and rows 32–35 from the run. A backend left out reads `PENDING`. `DRY_RUN=1` prints
 the rewritten rows without writing. Exit 1 means a test failed and its `FAIL` cells were
-written; exit 2 means nothing was recorded.
+written, also when every test failed against a backend that answered. Exit 2 means nothing
+was recorded: the endpoint did not accept a connection, a failure never reached the backend,
+the backend's settings were missing, or the installed SDK is not the locked one.
 
 `ops/rustfs/initialize.sh`, run by `rustfs-init` with RustFS's own CLI `rc`,
 creates the bucket (`CURATE_D_STAGING_S3_BUCKET`, default `curate-d-staging`), sets SSE-S3
