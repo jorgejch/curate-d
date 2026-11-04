@@ -104,7 +104,7 @@ def prepare(
             else ExtractedText(text="", source=TextSource.NONE)
         )
         extracted.append(text)
-        return classify_local(item, deterministic(), text)
+        return classify_local(deterministic(), text)
 
     decision, attempts = run_tiers(
         [deterministic, local],

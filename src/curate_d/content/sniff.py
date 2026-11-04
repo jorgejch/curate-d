@@ -8,15 +8,16 @@ library is made of. Anything unrecognised is `application/octet-stream`, never a
 from typing import BinaryIO, Final
 
 OCTET_STREAM: Final = "application/octet-stream"
+_HEIC: Final = "image/heic"
 _HEAD_BYTES: Final = 4096
 
 # Brands in an ISO base media file's `ftyp` box, which HEIF images and MP4/QuickTime
 # video share as a container.
 _FTYP_BRANDS: Final = {
-    b"heic": "image/heic",
-    b"heix": "image/heic",
-    b"heim": "image/heic",
-    b"heis": "image/heic",
+    b"heic": _HEIC,
+    b"heix": _HEIC,
+    b"heim": _HEIC,
+    b"heis": _HEIC,
     b"mif1": "image/heif",
     b"msf1": "image/heif",
     b"avif": "image/avif",

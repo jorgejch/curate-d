@@ -10,13 +10,14 @@ The source is never written: every call on the source side is a read.
 """
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from typing import Final
 
 from pydantic import Field
 
 from curate_d.domain import DomainModel, HashAlgorithm
 from curate_d.placement.rclone import (
+    JobStatus,
     ObjectInfo,
     RcloneClient,
     RcloneError,
@@ -76,11 +77,77 @@ def _relative(path: str) -> str:
     return path.lstrip("/")
 
 
+async def _poll_until_finished(
+    rclone: RcloneClient,
+    job: int,
+    spec: TransferSpec,
+    on_progress: Callable[[int, int], None] | None,
+    poll_seconds: float,
+) -> JobStatus:
+    """Poll the job until it finishes, reporting the group's progress between polls."""
+    while True:
+        status = await rclone.job_status(job)
+        if status.finished:
+            return status
+        if on_progress is not None:
+            stats = await rclone.stats(spec.group)
+            done, total = stats.get("bytes"), stats.get("totalBytes")
+            on_progress(
+                done if isinstance(done, int) else 0,
+                total if isinstance(total, int) and total else spec.size_bytes,
+            )
+        await asyncio.sleep(poll_seconds)
+
+
+def _failed_copy(spec: TransferSpec, status: JobStatus) -> TransferEvidence:
+    """Return the evidence a copy rclone's own check rejected, or raise for any other failure.
+
+    Raises:
+        ScratchExhaustedError: local scratch ran out; retry later.
+        TransferFailedError: the copy failed for another reason.
+    """
+    corrupt = corrupted_transfer(status.error)
+    if corrupt is not None:
+        return TransferEvidence(
+            source=SideEvidence(),
+            destination=SideEvidence(
+                present=False, unavailable=("rclone deleted the corrupt copy",)
+            ),
+            corrupt=corrupt,
+        )
+    if out_of_space(status.error):
+        raise ScratchExhaustedError(f"scratch exhausted copying {spec.source_path}: {status.error}")
+    raise TransferFailedError(f"copying {spec.source_path} failed: {status.error}")
+
+
+async def _read_back(
+    rclone: RcloneClient, spec: TransferSpec, source: SideEvidence, destination: SideEvidence
+) -> SideEvidence:
+    """Hash the copy in the strongest algorithm the source reports that the backend can compute."""
+    reasons: list[str] = []
+    offered = {h.algorithm for h in source.reported}
+    for algorithm in (a for a in _READ_BACK_PREFERENCE if a in offered):
+        try:
+            computed = await rclone.hashsum_file(
+                spec.destination_fs, _relative(spec.destination_path), algorithm, download=True
+            )
+        except RcloneError as error:
+            reasons.append(f"read-back {algorithm.value} failed: {error.message}")
+            continue
+        destination = destination.model_copy(update={"computed": (computed,)})
+        break
+    if reasons:
+        destination = destination.model_copy(
+            update={"unavailable": (*destination.unavailable, *reasons)}
+        )
+    return destination
+
+
 async def copy_and_collect(
     rclone: RcloneClient,
     spec: TransferSpec,
     *,
-    on_progress: Callable[[int, int], Awaitable[None]] | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
     poll_seconds: float = 0.25,
 ) -> TransferEvidence:
     """Copy one file and return the evidence both sides leave.
@@ -98,33 +165,9 @@ async def copy_and_collect(
         group=spec.group,
         config=transfer_config(spec),
     )
-    while True:
-        status = await rclone.job_status(job)
-        if status.finished:
-            break
-        if on_progress is not None:
-            stats = await rclone.stats(spec.group)
-            done, total = stats.get("bytes"), stats.get("totalBytes")
-            await on_progress(
-                done if isinstance(done, int) else 0,
-                total if isinstance(total, int) and total else spec.size_bytes,
-            )
-        await asyncio.sleep(poll_seconds)
+    status = await _poll_until_finished(rclone, job, spec, on_progress, poll_seconds)
     if not status.success:
-        corrupt = corrupted_transfer(status.error)
-        if corrupt is not None:
-            return TransferEvidence(
-                source=SideEvidence(),
-                destination=SideEvidence(
-                    present=False, unavailable=("rclone deleted the corrupt copy",)
-                ),
-                corrupt=corrupt,
-            )
-        if out_of_space(status.error):
-            raise ScratchExhaustedError(
-                f"scratch exhausted copying {spec.source_path}: {status.error}"
-            )
-        raise TransferFailedError(f"copying {spec.source_path} failed: {status.error}")
+        return _failed_copy(spec, status)
 
     source = _side(
         await rclone.stat(spec.source_fs, _relative(spec.source_path)),
@@ -141,21 +184,5 @@ async def copy_and_collect(
                 update={"unavailable": (*destination.unavailable, "the source reports no digest")}
             )
         return TransferEvidence(source=source, destination=destination)
-
-    reasons: list[str] = []
-    offered = {h.algorithm for h in source.reported}
-    for algorithm in (a for a in _READ_BACK_PREFERENCE if a in offered):
-        try:
-            computed = await rclone.hashsum_file(
-                spec.destination_fs, _relative(spec.destination_path), algorithm, download=True
-            )
-        except RcloneError as error:
-            reasons.append(f"read-back {algorithm.value} failed: {error.message}")
-            continue
-        destination = destination.model_copy(update={"computed": (computed,)})
-        break
-    if reasons:
-        destination = destination.model_copy(
-            update={"unavailable": (*destination.unavailable, *reasons)}
-        )
+    destination = await _read_back(rclone, spec, source, destination)
     return TransferEvidence(source=source, destination=destination)

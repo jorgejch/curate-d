@@ -4,7 +4,7 @@ A backend says what went wrong in domain terms; the mapping to a status code liv
 once, so every endpoint answers an unknown identifier or a refused change the same way.
 """
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from typing import Final
 
 from fastapi import FastAPI, Request, status
@@ -46,13 +46,13 @@ def problems(*codes: int) -> Responses:
     return {code: {"model": Problem} for code in codes}
 
 
-type Handler = Callable[[Request, Exception], Awaitable[JSONResponse]]
+type Handler = Callable[[Request, Exception], JSONResponse]
 
 
 def _answer(code: int) -> Handler:
     """A handler answering `code` with the error's message."""
 
-    async def handle(_request: Request, error: Exception) -> JSONResponse:
+    def handle(_request: Request, error: Exception) -> JSONResponse:
         """Answer with the error's message."""
         return JSONResponse(status_code=code, content=Problem(detail=str(error)).model_dump())
 

@@ -42,6 +42,7 @@ _CORRUPT_HASHES: Final = re.compile(
 )
 _NO_SPACE: Final = re.compile(r"(?i)no space left on device|disk quota exceeded")
 _NOT_FOUND: Final = re.compile(r"(?i)directory not found")
+_STAT: Final = "operations/stat"
 
 
 class RcloneError(RuntimeError):
@@ -93,36 +94,41 @@ def out_of_space(error: str) -> bool:
     return _NO_SPACE.search(error) is not None
 
 
+def _modified_at(item: Mapping[str, object]) -> datetime | None:
+    """Return an lsjson item's modification time, or None when it is unusable or unzoned."""
+    modified = item.get("ModTime")
+    if not isinstance(modified, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(modified)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def _hashes(item: Mapping[str, object]) -> tuple[StrongFingerprint, ...]:
+    """Return the known, well-formed digests an lsjson item reports, by algorithm name."""
+    raw = item.get("Hashes")
+    if not isinstance(raw, Mapping):
+        return ()
+    hashes: list[StrongFingerprint] = []
+    for name, digest in raw.items():
+        algorithm = _HASH_NAMES.get(str(name).lower())
+        if algorithm is None or not isinstance(digest, str) or not digest:
+            continue
+        try:
+            hashes.append(StrongFingerprint(algorithm=algorithm, digest=digest.lower()))
+        except ValueError:
+            continue
+    return tuple(sorted(hashes, key=lambda h: h.algorithm.value))
+
+
 def _object_info(item: Mapping[str, object]) -> ObjectInfo:
     """Translate an lsjson item."""
     size = item.get("Size")
     if not isinstance(size, int) or isinstance(size, bool):
-        raise RcloneError("operations/stat", "item has no size")
-    modified = item.get("ModTime")
-    parsed: datetime | None = None
-    if isinstance(modified, str):
-        try:
-            parsed = datetime.fromisoformat(modified)
-        except ValueError:
-            parsed = None
-        if parsed is not None and parsed.tzinfo is None:
-            parsed = None
-    hashes: list[StrongFingerprint] = []
-    raw = item.get("Hashes")
-    if isinstance(raw, Mapping):
-        for name, digest in raw.items():
-            algorithm = _HASH_NAMES.get(str(name).lower())
-            if algorithm is None or not isinstance(digest, str) or not digest:
-                continue
-            try:
-                hashes.append(StrongFingerprint(algorithm=algorithm, digest=digest.lower()))
-            except ValueError:
-                continue
-    return ObjectInfo(
-        size_bytes=size,
-        modified_at=parsed,
-        hashes=tuple(sorted(hashes, key=lambda h: h.algorithm.value)),
-    )
+        raise RcloneError(_STAT, "item has no size")
+    return ObjectInfo(size_bytes=size, modified_at=_modified_at(item), hashes=_hashes(item))
 
 
 class RcloneClient:
@@ -230,14 +236,14 @@ class RcloneClient:
     async def stat(self, fs: str, remote: str) -> ObjectInfo | None:
         """Size, time and every hash the backend reports for one object; None if absent."""
         body = await self.call(
-            "operations/stat",
+            _STAT,
             {"fs": fs, "remote": remote, "opt": {"showHash": True, "filesOnly": True}},
         )
         item = body.get("item")
         if item is None:
             return None
         if not isinstance(item, Mapping):
-            raise RcloneError("operations/stat", "item is not an object")
+            raise RcloneError(_STAT, "item is not an object")
         return _object_info(item)
 
     async def hashsum_file(

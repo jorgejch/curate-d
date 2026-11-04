@@ -12,7 +12,7 @@ has no credential field.
 from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Final, Protocol
+from typing import Annotated, Final, Protocol, assert_never
 
 import httpx
 from fastapi import APIRouter, Cookie, Depends, Request, Response, status
@@ -36,6 +36,8 @@ from curate_d.providers.errors import ProviderError
 from curate_d.providers.health import assess_health
 
 NONCE_COOKIE: Final = "curate_d_authorization"
+_PREFIX: Final = "/connections"
+"""The router prefix, and the path the nonce cookie is scoped to."""
 
 
 class ConnectionStatus(BaseModel):
@@ -104,10 +106,10 @@ def status_of(health: ConnectionHealth) -> ConnectionStatus:
 
 def router(backend: Callable[[Request], ConnectionsBackend]) -> APIRouter:
     """The connection endpoints over `backend`."""
-    routes = APIRouter(prefix="/connections", tags=["connections"])
+    routes = APIRouter(prefix=_PREFIX, tags=["connections"])
     uses = Depends(backend)
 
-    @routes.get("", response_model=list[ConnectionStatus])
+    @routes.get("")
     async def list_connections(
         connections: Annotated[ConnectionsBackend, uses],
     ) -> list[ConnectionStatus]:
@@ -117,7 +119,6 @@ def router(backend: Callable[[Request], ConnectionsBackend]) -> APIRouter:
     @routes.post(
         "/{provider}/authorizations",
         status_code=status.HTTP_201_CREATED,
-        response_model=AuthorizationStarted,
         responses=problems(REJECTED, UNAVAILABLE),
     )
     async def start_authorization(
@@ -128,18 +129,14 @@ def router(backend: Callable[[Request], ConnectionsBackend]) -> APIRouter:
         response.set_cookie(
             NONCE_COOKIE,
             started.browser_nonce.get_secret_value(),
-            path="/connections",
+            path=_PREFIX,
             httponly=True,
             secure=True,
             samesite="lax",
         )
         return AuthorizationStarted(provider=provider, redirect_url=started.redirect_url)
 
-    @routes.get(
-        "/{provider}/callback",
-        response_model=ConnectionStatus,
-        responses=problems(REJECTED, UNAVAILABLE),
-    )
+    @routes.get("/{provider}/callback", responses=problems(REJECTED, UNAVAILABLE))
     async def finish_authorization(
         provider: Provider,
         code: str,
@@ -157,7 +154,7 @@ def router(backend: Callable[[Request], ConnectionsBackend]) -> APIRouter:
             hostname=hostname,
             browser_nonce=nonce,
         )
-        response.delete_cookie(NONCE_COOKIE, path="/connections")
+        response.delete_cookie(NONCE_COOKIE, path=_PREFIX)
         return status_of(health)
 
     return routes
@@ -211,6 +208,14 @@ class LedgerConnections:
         Raises:
             UnavailableError: pCloud authorization or the credential key is not configured.
         """
+        match provider:
+            case Provider.PCLOUD:
+                return self._begin_pcloud()
+            case _:
+                assert_never(provider)
+
+    def _begin_pcloud(self) -> StartedAuthorization:
+        """Start authorizing a pCloud account against its OAuth registration."""
         try:
             pending = begin_pcloud_authorization(
                 pcloud_oauth_config(self._settings), self._states()
@@ -237,6 +242,18 @@ class LedgerConnections:
             UnavailableError: authorization is not configured, or pCloud refused or could
                 not be reached; the message names the provider, account and operation.
         """
+        match provider:
+            case Provider.PCLOUD:
+                return await self._complete_pcloud(
+                    code=code, state=state, hostname=hostname, browser_nonce=browser_nonce
+                )
+            case _:
+                assert_never(provider)
+
+    async def _complete_pcloud(
+        self, *, code: str, state: str, hostname: str, browser_nonce: str | None
+    ) -> ConnectionHealth:
+        """Finish a pCloud authorization and store the connection it names."""
         cipher = self._cipher()
         try:
             config = pcloud_oauth_config(self._settings)

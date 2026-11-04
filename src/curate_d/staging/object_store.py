@@ -569,7 +569,7 @@ class S3StagingObjectStore:
                 # unhandled task exception; the cancellation is what propagates.
                 abort.exception()
             raise
-        except BaseException as error:
+        except Exception as error:
             raise StagingObjectStoreError(
                 f"uploading {key} failed and its multipart upload {upload_id} could not "
                 f"be aborted ({error}); its parts stay billed until the backend's "

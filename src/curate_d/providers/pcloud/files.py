@@ -31,6 +31,7 @@ from curate_d.providers.errors import ProviderUnavailableError
 from curate_d.providers.pcloud.api import JsonObject, call, classify_http, require_api_host
 
 _OP_LIST: Final = "list folder"
+_OP_RESOLVE: Final = "resolve folder"
 _OP_CHECKSUM: Final = "read reported digests"
 _OP_DOWNLOAD: Final = "download file"
 _HEX: Final = re.compile(r"\A[0-9a-fA-F]+\Z")
@@ -202,15 +203,15 @@ class PCloudFiles:
             "GET",
             f"https://{self._host}/listfolder",
             account=self._account,
-            operation="resolve folder",
+            operation=_OP_RESOLVE,
             params={"path": path, "nofiles": "1", "noshares": "1"},
             headers=self._headers(),
         )
         metadata = body.get("metadata")
         if not isinstance(metadata, Mapping):
-            raise _malformed(self._account, "resolve folder", "metadata")
+            raise _malformed(self._account, _OP_RESOLVE, "metadata")
         return PendingFolder(
-            folder_id=str(_integer(metadata, "folderid", self._account, "resolve folder")),
+            folder_id=str(_integer(metadata, "folderid", self._account, _OP_RESOLVE)),
             path=path,
         )
 

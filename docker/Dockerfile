@@ -32,18 +32,21 @@ ENV UV_COMPILE_BYTECODE=1 \
 WORKDIR /app
 
 # Locked, no dev group, no project: this layer is only the third-party tree.
+# `--no-build`: dependencies install from the lockfile's wheels, never by running a
+# source distribution's build scripts.
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
     --mount=type=bind,source=uv.lock,target=uv.lock \
-    uv sync --locked --no-install-project --no-dev
+    uv sync --locked --no-build --no-install-project --no-dev
 
 COPY pyproject.toml uv.lock README.md LICENSE NOTICE ./
 COPY src ./src
 COPY migrations ./migrations
 COPY alembic.ini ./
 
+# `--no-build` blocks third-party builds only; the project is still built by its backend.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev
+    uv sync --locked --no-build --no-dev
 
 # ---------------------------------------------------------------------------
 # Runtime.
@@ -57,7 +60,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     apt-get update \
     && apt-get install --no-install-recommends --yes \
-        tesseract-ocr=${TESSERACT_VERSION} \
+        "tesseract-ocr=${TESSERACT_VERSION}" \
         libpq5 \
     && rm -rf /var/lib/apt/lists/*
 

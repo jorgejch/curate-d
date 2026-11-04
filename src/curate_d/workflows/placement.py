@@ -173,7 +173,7 @@ async def _copy_step(
     destination_fs = await remotes.fs_for(request.destination.provider, request.destination.account)
     group = placement_workflow_for(request)
 
-    async def report(done: int, total: int) -> None:
+    def report(done: int, total: int) -> None:
         """Log how far the copy has got."""
         logger.info("placement.progress", workflow_id=group, bytes=done, total_bytes=total)
 
@@ -301,6 +301,11 @@ def _recorded(result: bool | None) -> bool:
     return result is not False
 
 
+def _log_superseded(placement: Placement) -> None:
+    """Log that a newer attempt or a conclusion overtook this one's write."""
+    logger.info("placement.superseded", placement_id=str(placement.id), attempt=placement.attempts)
+
+
 def _unstarted(placement: Placement) -> PlaceOutcome:
     """Return how a workflow whose start copied nothing ends.
 
@@ -310,7 +315,7 @@ def _unstarted(placement: Placement) -> PlaceOutcome:
     """
     if placement.state is PlacementState.PRESENT:
         return PlaceOutcome.ALREADY_PRESENT
-    logger.info("placement.superseded", placement_id=str(placement.id), attempt=placement.attempts)
+    _log_superseded(placement)
     return PlaceOutcome.SUPERSEDED
 
 
@@ -356,11 +361,7 @@ async def place_content(request: PlacementRequest) -> PlaceOutcome:
                 {"name": "defer_placement"}, _defer_tx, placement.id, failure, placement.attempts
             )
             if not _recorded(deferred):
-                logger.info(
-                    "placement.superseded",
-                    placement_id=str(placement.id),
-                    attempt=placement.attempts,
-                )
+                _log_superseded(placement)
                 return PlaceOutcome.SUPERSEDED
             await DBOS.sleep_async(wait)
             wait = min(wait * 2, first_wait * _MAX_WAIT_FACTOR)
@@ -382,18 +383,14 @@ async def place_content(request: PlacementRequest) -> PlaceOutcome:
             await _placement_now_step(),
         )
         if not _recorded(failed):
-            logger.info(
-                "placement.superseded", placement_id=str(placement.id), attempt=placement.attempts
-            )
+            _log_superseded(placement)
             return PlaceOutcome.SUPERSEDED
         return PlaceOutcome.FAILED
     recorded = await datasource.run_tx_step_async(
         {"name": "record_evidence"}, _evidence_tx, placement.id, evidence, placement.attempts
     )
     if not _recorded(recorded):
-        logger.info(
-            "placement.superseded", placement_id=str(placement.id), attempt=placement.attempts
-        )
+        _log_superseded(placement)
         return PlaceOutcome.SUPERSEDED
     with (
         PropagateOtelContext(),

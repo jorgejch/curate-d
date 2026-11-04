@@ -104,6 +104,9 @@ REDISPATCH_VERSION_ATTRIBUTE: Final = "curate_d.recovery_redispatch_version"
 _DEQUEUED_QUEUES: Final = frozenset(queue.value for queue in QueueName)
 """The queues some curate.d worker dequeues; a fork or redispatch onto any other is refused."""
 
+_SKIPPED_EVENT: Final = "recovery_sweep.skipped"
+"""The event logged, with a reason, for rows the sweep leaves to a later tick."""
+
 
 class RecoveryAction(StrEnum):
     """What a stranded workflow needs before any live worker will run it."""
@@ -503,6 +506,58 @@ async def _cancel_verified(control: RecoveryControl, original: str) -> str | Non
     return "missing" if after is None else str(after.status)
 
 
+async def _lost_to_concurrent_fork(
+    control: RecoveryControl, original: str, successor: str, error: IntegrityError
+) -> bool:
+    """Return whether `error` is the workflow-ID conflict of a confirmed matching successor."""
+    # Only the workflow primary-key conflict means another sweep won.
+    # Other constraints must remain failures, even if a successor exists.
+    if not _is_workflow_id_conflict(error):
+        return False
+    return await _confirmed_successor(control, original, successor)
+
+
+async def _fork_successor(
+    control: RecoveryControl, original: str, successor: str, version: str, *, lost: LockCheck
+) -> bool:
+    """Fork `original` onto `version` as `successor` unless a re-read finds it settled."""
+    # Re-read after planning: another sweep may have retired this row, or an operator
+    # may have completed/cancelled it. Never fork a terminal snapshot back to life.
+    status = await control.status(original)
+    if status is None or status.status not in {PENDING, ENQUEUED}:
+        if not await _confirmed_successor(control, original, successor):
+            raise ValueError(f"workflow {original!r} is no longer eligible for recovery")
+        return False
+    if status.was_forked_from:
+        if not await _confirmed_successor(control, original, successor):
+            raise ValueError(
+                f"workflow {original!r} already has a fork but no recovery successor; "
+                "inspect its existing lineage before recovering it"
+            )
+        return False
+    start_step = await _fork_start_step(control, original)
+    lock = await lost()
+    if lock is not None:
+        raise _LockLostError(f"{lock} lost before fork")
+    created = False
+    try:
+        await control.fork(
+            original,
+            successor,
+            start_step,
+            application_version=version,
+            queue_name=status.queue_name,
+            queue_partition_key=status.queue_partition_key,
+        )
+        created = True
+    except IntegrityError as error:
+        if not await _lost_to_concurrent_fork(control, original, successor, error):
+            raise
+    if not await _confirmed_successor(control, original, successor):
+        raise ValueError(f"fork of {original!r} did not publish its expected successor")
+    return created
+
+
 async def _recover_version(
     control: RecoveryControl, workflow: PendingWorkflow, version: str, *, lost: LockCheck
 ) -> tuple[str, bool]:
@@ -535,42 +590,7 @@ async def _recover_version(
     successor = recovery_successor_id(original)
     created = False
     if not await _confirmed_successor(control, original, successor):
-        # Re-read after planning: another sweep may have retired this row, or an operator
-        # may have completed/cancelled it. Never fork a terminal snapshot back to life.
-        status = await control.status(original)
-        if status is None or status.status not in {PENDING, ENQUEUED}:
-            if not await _confirmed_successor(control, original, successor):
-                raise ValueError(f"workflow {original!r} is no longer eligible for recovery")
-        elif status.was_forked_from:
-            if not await _confirmed_successor(control, original, successor):
-                raise ValueError(
-                    f"workflow {original!r} already has a fork but no recovery successor; "
-                    "inspect its existing lineage before recovering it"
-                )
-        else:
-            start_step = await _fork_start_step(control, original)
-            lock = await lost()
-            if lock is not None:
-                raise _LockLostError(f"{lock} lost before fork")
-            try:
-                await control.fork(
-                    original,
-                    successor,
-                    start_step,
-                    application_version=version,
-                    queue_name=status.queue_name,
-                    queue_partition_key=status.queue_partition_key,
-                )
-                created = True
-            except IntegrityError as error:
-                # Only the workflow primary-key conflict means another sweep won.
-                # Other constraints must remain failures, even if a successor exists.
-                if not _is_workflow_id_conflict(error):
-                    raise
-                if not await _confirmed_successor(control, original, successor):
-                    raise
-            if not await _confirmed_successor(control, original, successor):
-                raise ValueError(f"fork of {original!r} did not publish its expected successor")
+        created = await _fork_successor(control, original, successor, version, lost=lost)
     lock = await lost()
     unverified = await _cancel_verified(control, original)
     if lock is not None:
@@ -1002,7 +1022,7 @@ class _Sweep:
                 if latest != self.target:
                     self.tally.skipped.extend(ids)
                     logger.warning(
-                        "recovery_sweep.skipped",
+                        _SKIPPED_EVENT,
                         reason="the latest version changed mid-sweep",
                         target=self.target,
                         latest=latest,
@@ -1054,7 +1074,7 @@ class _Sweep:
         if latest != self.target:
             self.tally.skipped.extend(ids)
             logger.warning(
-                "recovery_sweep.skipped",
+                _SKIPPED_EVENT,
                 reason="the latest version changed mid-sweep",
                 target=self.target,
                 latest=latest,
@@ -1104,6 +1124,48 @@ class _Sweep:
                     entry.workflow.workflow_id for _, rest in remaining for entry in rest
                 )
                 break
+
+    async def recover_under_fence(
+        self,
+        fence: PromotionFence,
+        versioned: list[StrandedWorkflow],
+        unlocked: list[StrandedWorkflow],
+        by_version: Mapping[str, list[StrandedWorkflow]],
+        registry: Mapping[str, datetime],
+    ) -> None:
+        """Take the promotion fence once and recover `versioned` under it, or skip it all."""
+        ids = [entry.workflow.workflow_id for entry in versioned]
+        try:
+            async with fence() as fenced:
+                if fenced.held:
+                    self.fence = fenced
+                    await self.recover_fenced(unlocked, by_version, registry)
+                else:
+                    self.tally.skipped.extend(ids)
+                    logger.warning(
+                        _SKIPPED_EVENT,
+                        reason="a promotion is in progress",
+                        target=self.target,
+                        rows=len(ids),
+                    )
+        except Exception as error:  # A fence that cannot be taken forks nothing.
+            self.fail_unfinished(ids, f"holding the promotion fence failed: {error}")
+            logger.error("recovery_sweep.fence_failed", error=str(error))
+
+
+def _partition_by_version(
+    versioned: list[StrandedWorkflow], target: str
+) -> tuple[list[StrandedWorkflow], dict[str, list[StrandedWorkflow]]]:
+    """Split fork and retire rows into the unlocked ones and the rest by source version."""
+    by_version: dict[str, list[StrandedWorkflow]] = {}
+    unlocked: list[StrandedWorkflow] = []
+    for entry in versioned:
+        version = entry.workflow.application_version
+        if version is None or version == target:
+            unlocked.append(entry)
+        else:
+            by_version.setdefault(version, []).append(entry)
+    return unlocked, by_version
 
 
 async def run_recovery_sweep(
@@ -1163,14 +1225,7 @@ async def run_recovery_sweep(
     reenqueues = [entry for entry in plan if entry.action is RecoveryAction.REENQUEUE]
     versioned = [entry for entry in plan if entry.action is not RecoveryAction.REENQUEUE]
     on_target = own_version == target
-    by_version: dict[str, list[StrandedWorkflow]] = {}
-    unlocked: list[StrandedWorkflow] = []
-    for entry in versioned:
-        version = entry.workflow.application_version
-        if version is None or version == target:
-            unlocked.append(entry)
-        else:
-            by_version.setdefault(version, []).append(entry)
+    unlocked, by_version = _partition_by_version(versioned, target)
 
     # Read before any write, so an unreadable registry leaves everything as it was.
     registry: Mapping[str, datetime] = (
@@ -1183,7 +1238,7 @@ async def run_recovery_sweep(
         sweep.tally.skipped.extend(entry.workflow.workflow_id for entry in versioned)
         if versioned:
             logger.info(
-                "recovery_sweep.skipped",
+                _SKIPPED_EVENT,
                 reason="this sweeper is not on the target version",
                 own_version=own_version,
                 target=target,
@@ -1194,21 +1249,5 @@ async def run_recovery_sweep(
     if not versioned:
         return sweep.tally.outcome()
 
-    ids = [entry.workflow.workflow_id for entry in versioned]
-    try:
-        async with fence() as fenced:
-            if fenced.held:
-                sweep.fence = fenced
-                await sweep.recover_fenced(unlocked, by_version, registry)
-            else:
-                sweep.tally.skipped.extend(ids)
-                logger.warning(
-                    "recovery_sweep.skipped",
-                    reason="a promotion is in progress",
-                    target=target,
-                    rows=len(ids),
-                )
-    except Exception as error:  # A fence that cannot be taken forks nothing.
-        sweep.fail_unfinished(ids, f"holding the promotion fence failed: {error}")
-        logger.error("recovery_sweep.fence_failed", error=str(error))
+    await sweep.recover_under_fence(fence, versioned, unlocked, by_version, registry)
     return sweep.tally.outcome()

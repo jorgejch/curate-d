@@ -1,5 +1,7 @@
 """Size-class routing and the transfer byte budget."""
 
+import math
+
 import pytest
 
 from curate_d.placement.admission import (
@@ -62,7 +64,9 @@ def test_the_budget_is_returned_even_when_the_transfer_fails() -> None:
     assert admission.in_flight(SizeClass.LARGE) == 0
 
 
-@pytest.mark.parametrize(("budget", "share"), [(0, 0.5), (10, 0.0), (10, 1.0)])
+@pytest.mark.parametrize(
+    ("budget", "share"), [(0, 0.5), (10, 0.0), (10, 1.0), (10, math.nan), (-1, 0.5)]
+)
 def test_an_unusable_budget_is_rejected(budget: int, share: float) -> None:
     """Configuration errors fail at construction."""
     with pytest.raises(ValueError):

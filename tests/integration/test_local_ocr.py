@@ -39,7 +39,7 @@ def test_a_scanned_invoice_is_read_and_filed_as_a_finance_document() -> None:
     deterministic = classify_deterministic(item, local_timezone=None)
 
     extracted = extract_text(io.BytesIO(content), item, ocr=tesseract)
-    result = classify_local(item, deterministic, extracted)
+    result = classify_local(deterministic, extracted)
 
     assert extracted.source is TextSource.OCR
     assert "invoice" in extracted.text.lower()

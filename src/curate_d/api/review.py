@@ -154,12 +154,12 @@ def router(backend: Callable[[Request], ReviewBackend]) -> APIRouter:
         """Items awaiting a person, oldest first."""
         return await review.open_items(limit=limit, offset=offset)
 
-    @routes.get("/{item_id}", response_model=Entry, responses=problems(NOT_FOUND))
+    @routes.get("/{item_id}", responses=problems(NOT_FOUND))
     async def get_entry(item_id: UUID, review: Annotated[ReviewBackend, uses]) -> Entry:
         """One item and the facts recorded for its content."""
         return await review.entry(item_id)
 
-    @routes.post("/{item_id}/facts", response_model=Entry, responses=problems(NOT_FOUND, REJECTED))
+    @routes.post("/{item_id}/facts", responses=problems(NOT_FOUND, REJECTED))
     async def resolve(
         item_id: UUID,
         facts: SubmittedFacts,
@@ -169,9 +169,7 @@ def router(backend: Callable[[Request], ReviewBackend]) -> APIRouter:
         """Resolve by assigning facts; the content becomes eligible for placement."""
         return await review.resolve(item_id, facts, by=who)
 
-    @routes.post(
-        "/{item_id}/taxonomy", response_model=Promoted, responses=problems(NOT_FOUND, REJECTED)
-    )
+    @routes.post("/{item_id}/taxonomy", responses=problems(NOT_FOUND, REJECTED))
     async def extend_taxonomy(
         item_id: UUID,
         promotion: Promotion,
@@ -181,9 +179,7 @@ def router(backend: Callable[[Request], ReviewBackend]) -> APIRouter:
         """Promote values the item rejected into the taxonomy; resolve with them next."""
         return await review.promote(item_id, promotion.values, by=who)
 
-    @routes.post(
-        "/{item_id}/exclusion", response_model=Entry, responses=problems(NOT_FOUND, REJECTED)
-    )
+    @routes.post("/{item_id}/exclusion", responses=problems(NOT_FOUND, REJECTED))
     async def exclude(
         item_id: UUID,
         exclusion: Exclusion,

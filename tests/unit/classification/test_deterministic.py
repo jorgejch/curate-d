@@ -14,7 +14,12 @@ from curate_d.classification.deterministic import (
     date_from_name,
     media_kind_of,
 )
-from curate_d.classification.metadata import extract_metadata, image_metadata, pdf_metadata
+from curate_d.classification.metadata import (
+    EmbeddedMetadata,
+    extract_metadata,
+    image_metadata,
+    pdf_metadata,
+)
 from curate_d.content.sniff import sniff_bytes
 from curate_d.domain import ContentObjectId, MediaKind
 from tests.stubs import media
@@ -181,3 +186,95 @@ def test_the_fixture_offset_is_what_the_capture_time_carries() -> None:
     assert metadata.captured_at == datetime(
         2026, 7, 14, 10, 0, tzinfo=timezone(timedelta(hours=-3))
     )
+
+
+def _item(media_type: str, path: str, **metadata: object) -> ClassificationInput:
+    """Build an input with `media_type` at `path`, with the given metadata fields set."""
+    return ClassificationInput(
+        content_object_id=ContentObjectId(uuid4()),
+        media_type=media_type,
+        size_bytes=1,
+        paths=(path,),
+        metadata=EmbeddedMetadata.model_validate(metadata),
+    )
+
+
+@pytest.mark.parametrize(
+    ("item", "category", "subcategory", "confidence", "rule"),
+    [
+        (
+            _item("image/png", "/a/Screenshot 1.png"),
+            "Photos",
+            "Screenshots",
+            0.9,
+            "screenshot name",
+        ),
+        (_item("image/jpeg", "/a/x.jpg", camera="Nikon"), "Photos", "Camera", 0.95, "camera exif"),
+        (_item("image/jpeg", "/a/IMG_1.JPG"), "Photos", "Camera", 0.85, "camera name"),
+        (_item("image/jpeg", "/a/holiday.jpg"), "Photos", None, 0.6, "image without provenance"),
+        (_item("video/mp4", "/a/MVI_0001.mp4"), "Videos", "Camera", 0.85, "camera name"),
+        (_item("video/mp4", "/a/clip.mp4"), "Videos", None, 0.7, "video without provenance"),
+        (_item("audio/mpeg", "/a/Voice Memo 1.mp3"), "Audio", "Recordings", 0.85, "recording name"),
+        (_item("audio/mpeg", "/a/Track 03.mp3"), "Audio", "Music", 0.75, "audio file"),
+        (_item("application/zip", "/a/backup.zip"), "Archives", None, 0.9, "archive type"),
+        (_item("application/pdf", "/a/x.pdf"), "Documents", None, 0.4, "document type"),
+        (_item("application/octet-stream", "/a/blob.bin"), None, None, 0.2, "unrecognised"),
+    ],
+    ids=lambda value: value if isinstance(value, str) else "",
+)
+def test_each_rule_names_itself_in_the_evidence(
+    item: ClassificationInput,
+    category: str | None,
+    subcategory: str | None,
+    confidence: float,
+    rule: str,
+) -> None:
+    """Every kind's rule fixes the category, the subcategory, the confidence and its name."""
+    result = classify_deterministic(item, local_timezone=_ZONE)
+    assert (result.facts.category, result.facts.subcategory) == (category, subcategory)
+    assert result.confidence == confidence
+    assert result.evidence["rule"] == rule
+
+
+def test_a_screenshot_named_photo_with_exif_is_still_a_screenshot() -> None:
+    """The screenshot name is checked before the EXIF camera, and that before the camera name."""
+    both = _item("image/png", "/a/Screenshot IMG_1.png", camera="Nikon")
+    assert classify_deterministic(both, local_timezone=_ZONE).evidence["rule"] == "screenshot name"
+    exif_and_name = _item("image/jpeg", "/a/IMG_1.JPG", camera="Nikon")
+    assert (
+        classify_deterministic(exif_and_name, local_timezone=_ZONE).evidence["rule"]
+        == "camera exif"
+    )
+
+
+def test_the_capture_time_source_is_recorded() -> None:
+    """Metadata wins over a name date; a name date is named; no date leaves no source."""
+    taken = datetime(2026, 1, 2, 10, 11, 12, tzinfo=UTC)
+    from_metadata = _item("image/jpeg", "/a/IMG_20260102_101112.jpg", captured_at=taken)
+    from_name = _item("image/jpeg", "/a/IMG_20260102_101112.jpg")
+    from_nothing = _item("image/jpeg", "/a/holiday.jpg")
+    assert (
+        classify_deterministic(from_metadata, local_timezone=_ZONE).evidence["captured_at_source"]
+        == "metadata"
+    )
+    assert (
+        classify_deterministic(from_name, local_timezone=_ZONE).evidence["captured_at_source"]
+        == "name"
+    )
+    assert (
+        classify_deterministic(from_nothing, local_timezone=_ZONE).evidence["captured_at_source"]
+        is None
+    )
+
+
+def test_a_pdf_date_of_a_bare_year_in_utc_is_the_first_of_january() -> None:
+    """Every part after the year is optional; a zone alone places a bare year."""
+    metadata = pdf_metadata(io.BytesIO(media.pdf(["x"], created="D:2026Z")))
+    assert metadata.captured_at == datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def test_a_pdf_date_offset_is_read_without_its_quotes() -> None:
+    """The apostrophes in the offset are optional, and a negative offset is applied as written."""
+    metadata = pdf_metadata(io.BytesIO(media.pdf(["x"], created="D:20260301120000-0500")))
+    assert metadata.captured_at == datetime(2026, 3, 1, 12, 0, tzinfo=timezone(timedelta(hours=-5)))
+    assert metadata.captured_at == datetime(2026, 3, 1, 17, 0, tzinfo=UTC)

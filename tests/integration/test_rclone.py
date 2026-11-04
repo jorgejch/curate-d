@@ -104,7 +104,7 @@ async def test_a_copy_records_both_sides_digests_with_their_algorithms(
     await rclone.upload("/", f"{workspace}/source/Photos", "a.jpg", content)
     progress: list[tuple[int, int]] = []
 
-    async def record(done: int, total: int) -> None:
+    def record(done: int, total: int) -> None:
         """Keep each progress report."""
         progress.append((done, total))
 

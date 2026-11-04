@@ -9,6 +9,7 @@ import asyncio
 import errno
 import hashlib
 import inspect
+import threading
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime
@@ -426,6 +427,81 @@ async def test_another_local_failure_is_unreadable_content(
     with pytest.raises(StagedContentUnreadableError, match="could not be written"):
         async with reader.open(key):
             pass
+
+
+async def test_a_scratch_open_that_fails_is_a_local_failure(
+    reader: LocalSnapshotReader,
+    index: FakeIndex,
+    store: FakeObjectStore,
+    scratch: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A volume that refuses the create is named as scratch exhaustion, not a download."""
+    key = stage(index, store, b"no room to create")
+    real_open = Path.open
+
+    def refuse_create(path: Path, mode: str = "r") -> BinaryIO:
+        """Fail only the exclusive create the download writes into."""
+        if mode == "xb":
+            raise OSError(errno.EDQUOT, "Disk quota exceeded")
+        return cast("BinaryIO", real_open(path, mode))
+
+    monkeypatch.setattr(Path, "open", refuse_create)
+
+    with pytest.raises(StagingCapacityExhaustedError, match="ran out of room"):
+        async with reader.open(key):
+            pass
+
+    assert store.downloads == []
+    assert scratch_files(scratch) == []
+
+
+async def test_a_read_cancelled_during_the_scratch_create_leaves_no_file(
+    reader: LocalSnapshotReader,
+    index: FakeIndex,
+    store: FakeObjectStore,
+    scratch: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A create that finishes after its read was cancelled is closed and unlinked."""
+    key = stage(index, store, b"cancelled mid-create")
+    real_open = Path.open
+    entered, release, created = threading.Event(), threading.Event(), threading.Event()
+    sinks: list[BinaryIO] = []
+
+    def slow_create(path: Path, mode: str = "r") -> BinaryIO:
+        """Hold the exclusive create until the test releases it, then create the file."""
+        if mode != "xb":
+            return cast("BinaryIO", real_open(path, mode))
+        entered.set()
+        release.wait(5)
+        sink = cast("BinaryIO", real_open(path, mode))
+        sinks.append(sink)
+        created.set()
+        return sink
+
+    monkeypatch.setattr(Path, "open", slow_create)
+
+    async def read() -> None:
+        """Open the snapshot; the test cancels it before the create returns."""
+        async with reader.open(key):
+            pass
+
+    task = asyncio.create_task(read())
+    assert await asyncio.to_thread(entered.wait, 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    release.set()
+    assert await asyncio.to_thread(created.wait, 5)
+    for _ in range(100):
+        if not scratch_files(scratch) and sinks[0].closed:
+            break
+        await asyncio.sleep(0.01)
+
+    assert scratch_files(scratch) == []
+    assert sinks[0].closed
+    assert store.downloads == []
 
 
 async def test_a_failed_cleanup_unlink_does_not_leak_the_read_handle(

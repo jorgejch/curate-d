@@ -8,6 +8,8 @@ Timestamps are all timezone-aware. A naive timestamp on a file's modification ti
 silent correctness bug the moment two providers disagree about local time.
 """
 
+from typing import Final
+
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -61,6 +63,10 @@ NAMING_CONVENTION = {
 
 metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
+_CONTENT_OBJECT_ID: Final = "content_objects.id"
+_SIZE_NON_NEGATIVE: Final = "size_bytes >= 0"
+_EMPTY_JSON_ARRAY: Final = "'[]'::jsonb"
+
 
 def enum_check(column: str, *members: str) -> str:
     """SQL fragment restricting a text column to an enumeration's members."""
@@ -110,7 +116,7 @@ source_objects = Table(
     Column(
         "content_object_id",
         UUID(as_uuid=True),
-        ForeignKey("content_objects.id", ondelete="RESTRICT"),
+        ForeignKey(_CONTENT_OBJECT_ID, ondelete="RESTRICT"),
         nullable=True,
         index=True,
         comment="Set once the file's content has been fingerprinted.",
@@ -138,7 +144,7 @@ source_objects = Table(
         enum_check("change_signal", *(member.value for member in ChangeSignal)),
         name="change_signal_known",
     ),
-    CheckConstraint("size_bytes >= 0", name="size_non_negative"),
+    CheckConstraint(_SIZE_NON_NEGATIVE, name="size_non_negative"),
     CheckConstraint("reported_sha1 ~ '^[0-9a-f]{40}$'", name="reported_sha1_shape"),
     CheckConstraint("reported_sha256 ~ '^[0-9a-f]{64}$'", name="reported_sha256_shape"),
     CheckConstraint("reported_md5 ~ '^[0-9a-f]{32}$'", name="reported_md5_shape"),
@@ -184,7 +190,7 @@ content_objects = Table(
         name="fingerprint_algorithm_known",
     ),
     CheckConstraint("fingerprint_digest ~ '^[0-9a-f]+$'", name="fingerprint_digest_is_hex"),
-    CheckConstraint("size_bytes >= 0", name="size_non_negative"),
+    CheckConstraint(_SIZE_NON_NEGATIVE, name="size_non_negative"),
     CheckConstraint("media_type ~ '^[a-z0-9][^/]*/[a-z0-9][^/]*$'", name="media_type_shape"),
 )
 
@@ -220,7 +226,7 @@ placements = Table(
     Column(
         "content_object_id",
         UUID(as_uuid=True),
-        ForeignKey("content_objects.id", ondelete="RESTRICT"),
+        ForeignKey(_CONTENT_OBJECT_ID, ondelete="RESTRICT"),
         nullable=False,
     ),
     Column(
@@ -392,7 +398,7 @@ staged_objects = Table(
         "LastModified. Not the row's insertion time, which is only what the server "
         "default supplies; age-based eviction reads the same value from the S3 listing.",
     ),
-    CheckConstraint("size_bytes >= 0", name="size_non_negative"),
+    CheckConstraint(_SIZE_NON_NEGATIVE, name="size_non_negative"),
     CheckConstraint("sha256 ~ '^[0-9a-f]{64}$'", name="sha256_lowercase_hex"),
     CheckConstraint("staging_key ~ '^[0-9a-f]{32}$'", name="key_is_derived_identifier"),
 )
@@ -541,7 +547,7 @@ classifications = Table(
     Column(
         "content_object_id",
         UUID(as_uuid=True),
-        ForeignKey("content_objects.id", ondelete="RESTRICT"),
+        ForeignKey(_CONTENT_OBJECT_ID, ondelete="RESTRICT"),
         primary_key=True,
         comment="One classification per content fingerprint: repeat content reuses it.",
     ),
@@ -583,7 +589,7 @@ review_items = Table(
     Column(
         "content_object_id",
         UUID(as_uuid=True),
-        ForeignKey("content_objects.id", ondelete="RESTRICT"),
+        ForeignKey(_CONTENT_OBJECT_ID, ondelete="RESTRICT"),
         nullable=False,
     ),
     Column("reason", Text, nullable=False),
@@ -592,7 +598,7 @@ review_items = Table(
         "rejected_values",
         JSONB,
         nullable=False,
-        server_default=text("'[]'::jsonb"),
+        server_default=text(_EMPTY_JSON_ARRAY),
         comment="Serialized RejectedValue list, validated by the application.",
     ),
     Column("status", Text, nullable=False, server_default=ReviewStatus.OPEN.value),
@@ -657,7 +663,7 @@ classification_holds = Table(
     Column(
         "content_object_id",
         UUID(as_uuid=True),
-        ForeignKey("content_objects.id", ondelete="RESTRICT"),
+        ForeignKey(_CONTENT_OBJECT_ID, ondelete="RESTRICT"),
         primary_key=True,
     ),
     Column("period", Text, nullable=False, comment="The spend period whose cap held it."),
@@ -697,7 +703,7 @@ dry_runs = Table(
         "policy_rules",
         JSONB,
         nullable=False,
-        server_default=text("'[]'::jsonb"),
+        server_default=text(_EMPTY_JSON_ARRAY),
         comment="The names of the placement rules evaluated, in policy order.",
     ),
     Column(
@@ -761,14 +767,14 @@ dry_run_items = Table(
         "rejected_values",
         JSONB,
         nullable=False,
-        server_default=text("'[]'::jsonb"),
+        server_default=text(_EMPTY_JSON_ARRAY),
         comment="Taxonomy values refused for this content, to inform refinement.",
     ),
     Column(
         "rules",
         JSONB,
         nullable=False,
-        server_default=text("'[]'::jsonb"),
+        server_default=text(_EMPTY_JSON_ARRAY),
         comment="The placement rules that selected this destination, each as its index in "
         "dry_runs.policy_rules and its name; empty when the run named its destinations.",
     ),

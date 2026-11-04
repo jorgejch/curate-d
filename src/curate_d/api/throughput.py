@@ -113,7 +113,7 @@ def router(backend: Callable[[Request], ThroughputBackend]) -> APIRouter:
         """Every stage's concurrency and rate limits."""
         return await throughput.limits()
 
-    @routes.patch("/{stage}", response_model=StageLimits, responses=problems(NOT_FOUND, REJECTED))
+    @routes.patch("/{stage}", responses=problems(NOT_FOUND, REJECTED))
     async def change_limits(
         stage: QueueName, change: LimitsChange, throughput: Annotated[ThroughputBackend, uses]
     ) -> StageLimits:

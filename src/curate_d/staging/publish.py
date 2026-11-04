@@ -90,7 +90,11 @@ class _ReservationPhases:
 
         def span(start: float | None, end: float | None) -> float | None:
             """Return a phase's duration, None when it never started."""
-            return None if start is None else (ended if end is None else end) - start
+            if start is None:
+                return None
+            if end is None:
+                end = ended
+            return end - start
 
         admission = None if self.reservation is None else self.reservation.admission
         registered = None if self.reservation is None else self.reservation.registered_at

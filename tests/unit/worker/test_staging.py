@@ -218,6 +218,68 @@ def test_readiness_has_bounded_timeout(effects: Mock) -> None:
     effects.closed.assert_awaited_once()
 
 
+def test_a_loop_that_dies_after_readiness_is_reported(
+    effects: Mock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A supervisor failure once the worker is serving is logged, since nobody waits on it."""
+    release = threading.Event()
+
+    async def die(backend: StagingWriterBackend) -> CleanupReport:
+        await asyncio.to_thread(release.wait, 2)
+        raise RuntimeError("cleanup loop died")
+
+    log = Mock()
+    monkeypatch.setattr(worker, "logger", log)
+    effects.cleanup.side_effect = die
+    supervisor = worker.StagingSupervisor(settings_for(), WorkerProfile.IO)
+    try:
+        supervisor.start()
+        thread = supervisor._thread
+        assert thread is not None
+        release.set()
+        thread.join(2)
+        assert not thread.is_alive()
+    finally:
+        supervisor.stop()
+    log.error.assert_called_once_with(
+        "staging.supervisor_failed", profile="io", error_type="RuntimeError"
+    )
+    effects.closed.assert_awaited_once()
+
+
+def test_a_cancelled_readiness_fails_start(effects: Mock, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A CancelledError before readiness reaches `start`, and is not reported as a dead loop."""
+    log = Mock()
+    monkeypatch.setattr(worker, "logger", log)
+    effects.ready.side_effect = asyncio.CancelledError()
+    supervisor = worker.StagingSupervisor(settings_for(), WorkerProfile.IO)
+    with pytest.raises(asyncio.CancelledError):
+        supervisor.start()
+    assert supervisor._thread is None
+    log.error.assert_not_called()
+    effects.closed.assert_awaited_once()
+
+
+def test_a_system_exit_before_readiness_fails_start(
+    effects: Mock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A SystemExit before readiness reaches `start` with its status, and is not logged."""
+    log = Mock()
+    monkeypatch.setattr(worker, "logger", log)
+    escaped: list[type[BaseException] | None] = []
+    monkeypatch.setattr(threading, "excepthook", lambda args: escaped.append(args.exc_type))
+    effects.ready.side_effect = SystemExit(3)
+    supervisor = worker.StagingSupervisor(settings_for(), WorkerProfile.IO)
+    with pytest.raises(SystemExit) as caught:
+        supervisor.start()
+    assert caught.value.code == 3
+    assert supervisor._thread is None
+    # The thread re-raises the exit signal after recording it; it ends there, not in a log.
+    assert escaped == [SystemExit]
+    log.error.assert_not_called()
+    effects.closed.assert_awaited_once()
+
+
 def test_submit_before_start_closes_coroutine() -> None:
     """Refuse a step without a running loop and close its unawaited coroutine."""
     supervisor = worker.StagingSupervisor(settings_for(), WorkerProfile.IO)
