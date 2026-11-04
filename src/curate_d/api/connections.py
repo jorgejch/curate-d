@@ -107,7 +107,7 @@ def router(backend: Callable[[Request], ConnectionsBackend]) -> APIRouter:
     routes = APIRouter(prefix="/connections", tags=["connections"])
     uses = Depends(backend)
 
-    @routes.get("", response_model=list[ConnectionStatus])
+    @routes.get("")
     async def list_connections(
         connections: Annotated[ConnectionsBackend, uses],
     ) -> list[ConnectionStatus]:
@@ -117,7 +117,6 @@ def router(backend: Callable[[Request], ConnectionsBackend]) -> APIRouter:
     @routes.post(
         "/{provider}/authorizations",
         status_code=status.HTTP_201_CREATED,
-        response_model=AuthorizationStarted,
         responses=problems(REJECTED, UNAVAILABLE),
     )
     async def start_authorization(
@@ -135,11 +134,7 @@ def router(backend: Callable[[Request], ConnectionsBackend]) -> APIRouter:
         )
         return AuthorizationStarted(provider=provider, redirect_url=started.redirect_url)
 
-    @routes.get(
-        "/{provider}/callback",
-        response_model=ConnectionStatus,
-        responses=problems(REJECTED, UNAVAILABLE),
-    )
+    @routes.get("/{provider}/callback", responses=problems(REJECTED, UNAVAILABLE))
     async def finish_authorization(
         provider: Provider,
         code: str,

@@ -178,7 +178,7 @@ def router(backend: Callable[[Request], ConfigurationBackend]) -> APIRouter:
     uses = Depends(backend)
     by = Depends(operator)
 
-    @routes.get("/taxonomy", response_model=TaxonomyConfiguration)
+    @routes.get("/taxonomy")
     async def get_taxonomy(
         configuration: Annotated[ConfigurationBackend, uses],
     ) -> TaxonomyConfiguration:
@@ -186,7 +186,7 @@ def router(backend: Callable[[Request], ConfigurationBackend]) -> APIRouter:
         version, document = await configuration.active(ConfigurationKind.TAXONOMY)
         return TaxonomyConfiguration(version=version, document=_as(document, Taxonomy))
 
-    @routes.put("/taxonomy", response_model=TaxonomyConfiguration, responses=problems(REJECTED))
+    @routes.put("/taxonomy", responses=problems(REJECTED))
     async def put_taxonomy(
         document: SubmittedTaxonomy,
         configuration: Annotated[ConfigurationBackend, uses],
@@ -198,7 +198,7 @@ def router(backend: Callable[[Request], ConfigurationBackend]) -> APIRouter:
             version=activated.version, document=document, orphaned=activated.orphaned
         )
 
-    @routes.get("/templates", response_model=TemplatesConfiguration)
+    @routes.get("/templates")
     async def get_templates(
         configuration: Annotated[ConfigurationBackend, uses],
     ) -> TemplatesConfiguration:
@@ -206,7 +206,7 @@ def router(backend: Callable[[Request], ConfigurationBackend]) -> APIRouter:
         version, document = await configuration.active(ConfigurationKind.TEMPLATES)
         return TemplatesConfiguration(version=version, document=_as(document, TemplateSet))
 
-    @routes.put("/templates", response_model=TemplatesConfiguration, responses=problems(REJECTED))
+    @routes.put("/templates", responses=problems(REJECTED))
     async def put_templates(
         document: SubmittedTemplates,
         configuration: Annotated[ConfigurationBackend, uses],
@@ -216,7 +216,7 @@ def router(backend: Callable[[Request], ConfigurationBackend]) -> APIRouter:
         activated = await configuration.activate(ConfigurationKind.TEMPLATES, document, by=who)
         return TemplatesConfiguration(version=activated.version, document=document)
 
-    @routes.get("/policy", response_model=PolicyConfiguration)
+    @routes.get("/policy")
     async def get_policy(
         configuration: Annotated[ConfigurationBackend, uses],
     ) -> PolicyConfiguration:
@@ -224,7 +224,7 @@ def router(backend: Callable[[Request], ConfigurationBackend]) -> APIRouter:
         version, document = await configuration.active(ConfigurationKind.POLICY)
         return PolicyConfiguration(version=version, document=_as(document, PlacementPolicy))
 
-    @routes.put("/policy", response_model=PolicyConfiguration, responses=problems(REJECTED))
+    @routes.put("/policy", responses=problems(REJECTED))
     async def put_policy(
         document: SubmittedPolicy,
         configuration: Annotated[ConfigurationBackend, uses],

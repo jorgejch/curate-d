@@ -143,9 +143,7 @@ def router(backend: Callable[[Request], AuditBackend]) -> APIRouter:
     routes = APIRouter(prefix="/content", tags=["audit"])
     uses = Depends(backend)
 
-    @routes.get(
-        "/{content_object_id}/history", response_model=History, responses=problems(NOT_FOUND)
-    )
+    @routes.get("/{content_object_id}/history", responses=problems(NOT_FOUND))
     async def get_history(
         content_object_id: ContentObjectId, audit: Annotated[AuditBackend, uses]
     ) -> History:

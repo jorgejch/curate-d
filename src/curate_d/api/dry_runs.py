@@ -328,12 +328,7 @@ def router(backend: Callable[[Request], DryRunsBackend]) -> APIRouter:
     routes = APIRouter(prefix="/dry-runs", tags=["dry runs"])
     uses = Depends(backend)
 
-    @routes.post(
-        "",
-        status_code=status.HTTP_202_ACCEPTED,
-        response_model=DryRunStarted,
-        responses=problems(REJECTED),
-    )
+    @routes.post("", status_code=status.HTTP_202_ACCEPTED, responses=problems(REJECTED))
     async def start(order: DryRunOrder, runs: Annotated[DryRunsBackend, uses]) -> DryRunStarted:
         """Start a dry run, with drafts if given; poll its status, then export it."""
         run_id = uuid4()
@@ -347,12 +342,12 @@ def router(backend: Callable[[Request], DryRunsBackend]) -> APIRouter:
         )
         return DryRunStarted(run_id=run_id, workflow_id=workflow_id)
 
-    @routes.get("/{run_id}", response_model=DryRunStatus, responses=problems(NOT_FOUND))
+    @routes.get("/{run_id}", responses=problems(NOT_FOUND))
     async def get_status(run_id: UUID, runs: Annotated[DryRunsBackend, uses]) -> DryRunStatus:
         """Whether the run has finished, and what it evaluated with."""
         return await runs.status(run_id)
 
-    @routes.get("/{run_id}/export", response_model=DryRunExport, responses=problems(NOT_FOUND))
+    @routes.get("/{run_id}/export", responses=problems(NOT_FOUND))
     async def export(run_id: UUID, runs: Annotated[DryRunsBackend, uses]) -> DryRunExport:
         """Return every evaluated object with its facts, locators, rules and unresolved reasons."""
         run = await runs.status(run_id)
