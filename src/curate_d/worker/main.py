@@ -515,63 +515,65 @@ def prepare_services(
         profile: Which half of the pipeline this process serves.
         staging: The started staging supervisor, or None where staging is not configured.
     """
-
-    async def create() -> Services:
-        """Create the datasource and release the connections creation opened."""
-        datasource = await create_ledger_datasource(settings)
-        await datasource.engine.dispose()
-        cipher = (
-            CredentialCipher.from_settings(settings)
-            if settings.credential_encryption_key is not None and profile is WorkerProfile.IO
-            else None
-        )
-        access = (
-            ConnectedAccounts(
-                datasource.engine,
-                cipher,
-                {
-                    provider: Pacer(
-                        Quota(requests=settings.provider_requests_per_minute, period_seconds=60.0)
-                    )
-                    for provider in Provider
-                },
-            )
-            if cipher is not None
-            else None
-        )
-        remote = (
-            OpenRouterClassifier(settings.openrouter_api_key)
-            if settings.openrouter_api_key is not None and profile is WorkerProfile.IO
-            else None
-        )
-        rclone = (
-            RcloneAccess(str(settings.rclone_rc_url))
-            if settings.rclone_rc_url is not None and profile is WorkerProfile.IO
-            else None
-        )
-        return Services(
-            settings=settings,
-            datasource=datasource,
-            cipher=cipher,
-            provider_access=access,
-            remote_classifier=remote,
-            rclone=rclone,
-            remotes=(
-                ConnectedRemotes(rclone, datasource.engine, cipher)
-                if rclone is not None and cipher is not None
-                else None
-            ),
-            admission=TransferAdmission(
-                settings.transfer_scratch_budget_bytes,
-                large_threshold=settings.transfer_large_threshold_bytes,
-            ),
-            staging=staging if isinstance(staging, StagingAccess) else None,
-            scratch_budget=local_scratch_budget(settings),
-        )
-
-    services = asyncio.run(create())
+    services = asyncio.run(_create_services(settings, profile, staging))
     install(services)
     return services
+
+
+async def _create_services(
+    settings: Settings, profile: WorkerProfile, staging: object | None
+) -> Services:
+    """Create the datasource and release the connections creation opened."""
+    datasource = await create_ledger_datasource(settings)
+    await datasource.engine.dispose()
+    cipher = (
+        CredentialCipher.from_settings(settings)
+        if settings.credential_encryption_key is not None and profile is WorkerProfile.IO
+        else None
+    )
+    access = (
+        ConnectedAccounts(
+            datasource.engine,
+            cipher,
+            {
+                provider: Pacer(
+                    Quota(requests=settings.provider_requests_per_minute, period_seconds=60.0)
+                )
+                for provider in Provider
+            },
+        )
+        if cipher is not None
+        else None
+    )
+    remote = (
+        OpenRouterClassifier(settings.openrouter_api_key)
+        if settings.openrouter_api_key is not None and profile is WorkerProfile.IO
+        else None
+    )
+    rclone = (
+        RcloneAccess(str(settings.rclone_rc_url))
+        if settings.rclone_rc_url is not None and profile is WorkerProfile.IO
+        else None
+    )
+    return Services(
+        settings=settings,
+        datasource=datasource,
+        cipher=cipher,
+        provider_access=access,
+        remote_classifier=remote,
+        rclone=rclone,
+        remotes=(
+            ConnectedRemotes(rclone, datasource.engine, cipher)
+            if rclone is not None and cipher is not None
+            else None
+        ),
+        admission=TransferAdmission(
+            settings.transfer_scratch_budget_bytes,
+            large_threshold=settings.transfer_large_threshold_bytes,
+        ),
+        staging=staging if isinstance(staging, StagingAccess) else None,
+        scratch_budget=local_scratch_budget(settings),
+    )
 
 
 def _install_shutdown_handler(stop: threading.Event) -> None:
