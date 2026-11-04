@@ -188,6 +188,27 @@ async def test_an_unusable_modification_time_is_left_out(
     assert info.modified_at is None
 
 
+@pytest.mark.parametrize(
+    "hashes",
+    [{"sha1": "a" * 39, "md5": 7}, "not a mapping"],
+)
+async def test_an_unusable_hash_is_left_out(
+    client: RcloneClient, daemon: Daemon, hashes: object
+) -> None:
+    """A digest of the wrong length or type, or hashes that are not an object, report none."""
+    daemon.answer = lambda method, body: _ok(item={"Size": 1, "Hashes": hashes})
+    info = await client.stat("a:", "x")
+    assert info is not None
+    assert info.hashes == ()
+
+
+async def test_a_boolean_size_is_not_a_size(client: RcloneClient, daemon: Daemon) -> None:
+    """`True` is an int to Python, not to a stat."""
+    daemon.answer = lambda method, body: _ok(item={"Size": True})
+    with pytest.raises(RcloneError, match="no size"):
+        await client.stat("a:", "x")
+
+
 async def test_a_missing_object_stats_as_none_and_a_sizeless_one_is_an_error(
     client: RcloneClient, daemon: Daemon
 ) -> None:
