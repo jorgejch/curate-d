@@ -238,24 +238,15 @@ async def _fail(
     )
 
 
-# Workflows.
-
-
-@DBOS.workflow()
-async def ingest_source(
-    source_object_id: UUID, observed: str, attempt: int = 0, generation: str = ""
-) -> IngestOutcome:
-    """Fetch and stage one version of a source, then hand it to fingerprinting."""
-    source = await _source_step(source_object_id)
-    if source is None or not is_current(source, observed):
-        return IngestOutcome.SUPERSEDED
+async def _stage_through_capacity_waits(
+    source: SourceObject, source_object_id: UUID, observed: str
+) -> StageResult | IngestOutcome:
+    """Stage the source, waiting out full staging; return the outcome when the ingest ends here."""
     first_wait = current().settings.staging_capacity_retry_seconds
     wait = first_wait
-    result: StageResult | None = None
     for _ in range(CAPACITY_WAITS):
         try:
-            result = await _stage_step(source)
-            break
+            return await _stage_step(source)
         except StagingCapacityExhaustedError:
             await DBOS.sleep_async(wait)
             wait = min(wait * 2, first_wait * _MAX_WAIT_FACTOR)
@@ -277,14 +268,29 @@ async def ingest_source(
                 AuditEntryType.SOURCE_READ_FAILED,
             )
             return IngestOutcome.UNREADABLE
-    if result is None:
-        await _fail(
-            source_object_id,
-            observed,
-            "staging capacity stayed exhausted; the next full rescan retries",
-            AuditEntryType.SOURCE_READ_FAILED,
-        )
-        return IngestOutcome.DEFERRED
+    await _fail(
+        source_object_id,
+        observed,
+        "staging capacity stayed exhausted; the next full rescan retries",
+        AuditEntryType.SOURCE_READ_FAILED,
+    )
+    return IngestOutcome.DEFERRED
+
+
+# Workflows.
+
+
+@DBOS.workflow()
+async def ingest_source(
+    source_object_id: UUID, observed: str, attempt: int = 0, generation: str = ""
+) -> IngestOutcome:
+    """Fetch and stage one version of a source, then hand it to fingerprinting."""
+    source = await _source_step(source_object_id)
+    if source is None or not is_current(source, observed):
+        return IngestOutcome.SUPERSEDED
+    result = await _stage_through_capacity_waits(source, source_object_id, observed)
+    if isinstance(result, IngestOutcome):
+        return result
     if result.outcome is StageOutcome.SOURCE_CHANGED or result.staged is None:
         await _fail(
             source_object_id,
