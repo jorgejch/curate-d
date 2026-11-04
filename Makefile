@@ -5,7 +5,8 @@
 # staging backend.
 
 .PHONY: help install lint format typecheck test coverage test-stack test-integration \
-	test-integration-parallel test-durations check staging-init lifecycle-check stack-up stack-down stack-reset \
+	test-integration-parallel test-durations check staging-init lifecycle-check staging-sdk-evidence \
+	stack-up stack-down stack-reset \
 	migrate image
 
 help:
@@ -107,6 +108,16 @@ lifecycle-check: ## Observe RustFS lifecycle expiry and abort (rows 30/31) in se
 		-k "test_expiration_removes_an_aged_object or test_stale_multipart_is_reclaimed" \
 		$(LIFECYCLE_PYTEST_ARGS); \
 	status=$$?; $(LIFECYCLE_COMPOSE) down -v; exit $$status
+
+BACKENDS ?= rustfs
+
+# After an aioboto3/aiobotocore/botocore move: re-runs the shared contract suite on each
+# backend in BACKENDS and rewrites the matrix's SDK row and rows 32-35 from the JUnit
+# report; a backend left out reads PENDING. rustfs needs `make test-stack`; ovh needs the
+# CURATE_D_TEST_OVH_* settings the contract suite reads. DRY_RUN=1 prints, writes nothing.
+staging-sdk-evidence: ## Re-record the staging matrix's SDK rows (32-35); BACKENDS="rustfs ovh", DRY_RUN=1
+	uv run python -m curate_d.staging.sdk_evidence record \
+		$(foreach backend,$(BACKENDS),--backend $(backend))$(if $(DRY_RUN), --dry-run)
 
 migrate: ## Apply migrations to the configured database
 	uv run alembic upgrade head
