@@ -17,6 +17,7 @@ recorded and keyed by it: placements left under the same name at an account or r
 policy no longer gives it are neither looked for there nor copied again because of it.
 """
 
+from collections.abc import Sequence, Set
 from datetime import datetime
 from typing import Final
 
@@ -116,6 +117,15 @@ class ReconcileSummary(DomainModel):
     continued: bool = False
 
 
+class TargetPlan(DomainModel):
+    """What one batch's targets need: placements, stale attempts to fail, and the tally."""
+
+    place: tuple[PlacementRequest, ...] = ()
+    stale: tuple[PlacementId, ...] = ()
+    satisfied: int = 0
+    in_flight: int = 0
+
+
 async def enqueue_reconcile(request: ReconcileRequest) -> str:
     """Enqueue one part of a run; a repeated request collapses."""
     workflow_id = reconcile_workflow_id(request.run, request.part)
@@ -152,6 +162,45 @@ def _attempt_ids(target: Target) -> list[str]:
         placement_workflow_for(_request_for(running, existing.attempts)),
         verification_workflow_for(existing.id, existing.attempts),
     ]
+
+
+async def _running_attempts(targets: Sequence[Target]) -> set[str]:
+    """Return the workflow IDs, among the targets' latest attempts, that DBOS still runs."""
+    attempt_ids = [workflow_id for t in targets for workflow_id in _attempt_ids(t)]
+    statuses = (
+        await DBOS.list_workflows_async(
+            workflow_ids=attempt_ids, load_input=False, load_output=False
+        )
+        if attempt_ids
+        else []
+    )
+    return {s.workflow_id for s in statuses if s.status in _RUNNING}
+
+
+def _plan_targets(
+    targets: Sequence[Target], running: Set[str], policy_version: int | None
+) -> TargetPlan:
+    """Decide each target's action and collect the placements and stale attempts that follow."""
+    place: list[PlacementRequest] = []
+    stale: list[PlacementId] = []
+    satisfied = 0
+    in_flight = 0
+    for target in targets:
+        action = decide(target, running=any(i in running for i in _attempt_ids(target)))
+        attempts = 0 if target.existing is None else target.existing.attempts
+        if action is Action.STALE and target.existing is not None:
+            stale.append(target.existing.id)
+            place.append(_request_for(target, attempts + 1, policy_version))
+        elif action is Action.PLACE:
+            # A copy registered elsewhere is moving: a new attempt, so that moving back
+            # to a locator it once had is not mistaken for that earlier placement.
+            moving = target.existing is not None and target.existing.state is PlacementState.PRESENT
+            place.append(_request_for(target, attempts + 1 if moving else attempts, policy_version))
+        satisfied += action is Action.SATISFIED
+        in_flight += action is Action.IN_FLIGHT
+    return TargetPlan(
+        place=tuple(place), stale=tuple(stale), satisfied=satisfied, in_flight=in_flight
+    )
 
 
 # Steps.
@@ -317,54 +366,23 @@ async def reconcile(request: ReconcileRequest) -> ReconcileSummary:
         if batch.last is None:
             return summary
         targets = [t for e in batch.evaluations for t in e.targets]
-        attempt_ids = [workflow_id for t in targets for workflow_id in _attempt_ids(t)]
-        statuses = (
-            await DBOS.list_workflows_async(
-                workflow_ids=attempt_ids, load_input=False, load_output=False
-            )
-            if attempt_ids
-            else []
-        )
-        running = {s.workflow_id for s in statuses if s.status in _RUNNING}
-        place: list[PlacementRequest] = []
-        stale: list[PlacementId] = []
-        for target in targets:
-            action = decide(target, running=any(i in running for i in _attempt_ids(target)))
-            attempts = 0 if target.existing is None else target.existing.attempts
-            if action is Action.STALE and target.existing is not None:
-                stale.append(target.existing.id)
-                place.append(_request_for(target, attempts + 1, context.policy_version))
-            elif action is Action.PLACE:
-                # A copy registered elsewhere is moving: a new attempt, so that moving back
-                # to a locator it once had is not mistaken for that earlier placement.
-                moving = (
-                    target.existing is not None and target.existing.state is PlacementState.PRESENT
-                )
-                place.append(
-                    _request_for(
-                        target, attempts + 1 if moving else attempts, context.policy_version
-                    )
-                )
-            summary = summary.model_copy(
-                update={
-                    "satisfied": summary.satisfied + (action is Action.SATISFIED),
-                    "in_flight": summary.in_flight + (action is Action.IN_FLIGHT),
-                }
-            )
+        plan = _plan_targets(targets, await _running_attempts(targets), context.policy_version)
         await datasource.run_tx_step_async(
             {"name": "record_reconcile"},
             _record_tx,
             batch.evaluations,
-            tuple(stale),
+            plan.stale,
             await _reconcile_now_step(),
             context.policy_version,
         )
-        for placement in place:
+        for placement in plan.place:
             await enqueue_placement(placement)
         summary = summary.model_copy(
             update={
                 "evaluated": summary.evaluated + len(batch.evaluations),
-                "placed": summary.placed + len(place),
+                "placed": summary.placed + len(plan.place),
+                "satisfied": summary.satisfied + plan.satisfied,
+                "in_flight": summary.in_flight + plan.in_flight,
                 "render_failed": summary.render_failed
                 + sum(bool(e.render_failures) for e in batch.evaluations),
             }
