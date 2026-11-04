@@ -42,7 +42,7 @@ DEFAULT_MATRIX = Path("ops/staging-compatibility.md")
 
 _PENDING_PREFIX = "PENDING — "
 _PREVIOUS_EVIDENCE = "; previous evidence: "
-_SDK_VERSION = re.compile(r"`(aioboto3|aiobotocore|botocore)`\s+(\S+?)(?=\s|$)")
+_SDK_VERSION = re.compile(r"`(aioboto3|aiobotocore|botocore)`\s+(\S+)")
 
 
 class Backend(StrEnum):
@@ -225,6 +225,27 @@ def _first_code_span(value: str, what: str, source: Path) -> str:
     return match.group(1)
 
 
+def _table_rows(
+    lines: Sequence[str], start: int, width: int, source: Path
+) -> tuple[dict[str, MatrixRow], int]:
+    """Return a table's body rows by their first cell, and the index after the table.
+
+    Raises:
+        EvidenceError: A row's cell count differs from `width`, its header's.
+    """
+    rows: dict[str, MatrixRow] = {}
+    index = start
+    while index < len(lines) and lines[index].startswith("|"):
+        cells = split_row(lines[index])
+        if len(cells) != width:
+            raise EvidenceError(
+                f"{source}:{index + 1}: row has {len(cells)} cells, its table header has {width}"
+            )
+        rows[cells[0]] = MatrixRow(index, cells)
+        index += 1
+    return rows, index
+
+
 def _sdk_sensitive_rows(
     lines: Sequence[str], source: Path
 ) -> tuple[tuple[str, ...], dict[str, MatrixRow]]:
@@ -239,17 +260,8 @@ def _sdk_sensitive_rows(
             index += 1
             continue
         columns = split_row(lines[index])
-        rows: dict[str, MatrixRow] = {}
-        index += 2  # the header and its `| --- |` separator
-        while index < len(lines) and lines[index].startswith("|"):
-            cells = split_row(lines[index])
-            if len(cells) != len(columns):
-                raise EvidenceError(
-                    f"{source}:{index + 1}: row has {len(cells)} cells, "
-                    f"its table header has {len(columns)}"
-                )
-            rows[cells[0]] = MatrixRow(index, cells)
-            index += 1
+        # Skip the header and its `| --- |` separator.
+        rows, index = _table_rows(lines, index + 2, len(columns), source)
         if all(number in rows for number in SDK_SENSITIVE_ROWS):
             for name in (backend.column for backend in Backend):
                 if name not in columns:
