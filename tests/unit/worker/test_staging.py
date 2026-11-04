@@ -266,12 +266,16 @@ def test_a_system_exit_before_readiness_fails_start(
     """A SystemExit before readiness reaches `start` with its status, and is not logged."""
     log = Mock()
     monkeypatch.setattr(worker, "logger", log)
+    escaped: list[type[BaseException] | None] = []
+    monkeypatch.setattr(threading, "excepthook", lambda args: escaped.append(args.exc_type))
     effects.ready.side_effect = SystemExit(3)
     supervisor = worker.StagingSupervisor(settings_for(), WorkerProfile.IO)
     with pytest.raises(SystemExit) as caught:
         supervisor.start()
     assert caught.value.code == 3
     assert supervisor._thread is None
+    # The thread re-raises the exit signal after recording it; it ends there, not in a log.
+    assert escaped == [SystemExit]
     log.error.assert_not_called()
     effects.closed.assert_awaited_once()
 
