@@ -71,7 +71,8 @@ test-integration: ## Integration suite (needs `make test-stack`); GROUP=<n> reru
 # ports, never the default project, so a stack-up stack keeps running. One stack per shard,
 # not `pytest -n` on one: a shard's tests share one database's advisory locks and DBOS's
 # latest application version. Logs and JUnit reports go to .integration-runs/<UTC time>/;
-# every shard stack is removed afterwards, on failure and on Ctrl-C too.
+# every shard stack is removed afterwards, on failure and on Ctrl-C too. One run at a time:
+# a second, from any worktree of the clone, exits naming the lock in Git's common directory.
 test-integration-parallel: ## CI's SPLITS shards at once, each on its own stack; leaves stack-up alone
 	uv run $(TEST_STACK_UV_FLAGS) python -m tests.parallel_integration --splits '$(SPLITS)'
 

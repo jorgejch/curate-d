@@ -113,7 +113,9 @@ cleanup of unrelated code.
   never touches the default project, so a `make stack-up` stack keeps running beside it.
   Each shard's `stack.log`, `pytest.log` and `junit.xml` go to
   `.integration-runs/<UTC time>/shard-<n>/`, and the summary names a failed shard's files.
-  Every shard stack and its data is removed afterwards, also on Ctrl-C. Four stacks need
+  Every shard stack and its data is removed afterwards, also on Ctrl-C. One run goes at a
+  time: the shard projects are the same for every run, so a second run, from any worktree of
+  the clone, exits naming the lock file in Git's common directory. Four stacks need
   more memory than one: on a smaller host, pass `SPLITS=2`. If a killed run leaves one
   behind, the next run removes it, or remove it yourself with
   `docker compose -p curate-d-it-<n> down -v`.
