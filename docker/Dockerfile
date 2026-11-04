@@ -60,7 +60,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     apt-get update \
     && apt-get install --no-install-recommends --yes \
-        tesseract-ocr=${TESSERACT_VERSION} \
+        "tesseract-ocr=${TESSERACT_VERSION}" \
         libpq5 \
     && rm -rf /var/lib/apt/lists/*
 
