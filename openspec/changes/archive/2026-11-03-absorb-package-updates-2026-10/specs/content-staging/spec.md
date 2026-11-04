@@ -39,6 +39,10 @@ cell or prose.
 - **WHEN** the backend accepts connections and answers, and it rejects every test, as it would an SDK default it does not support
 - **THEN** that backend's cells record the failure as for any failing test; the run is not treated as one that could not run
 
+#### Scenario: The SDK stops retrying a lost connection
+- **WHEN** a test fails on the connection failure the suite itself injects to exercise the SDK's retries, while the backend's endpoint is reachable
+- **THEN** that backend's cells record the failure; a connection failure counts as the backend never being reached only when it names the endpoint the command probed
+
 #### Scenario: The installed SDK is not the locked one
 - **WHEN** the environment that would run the suite has an SDK package at a version other than the locked one
 - **THEN** the command exits non-zero before running the suite, naming the package with both versions, and leaves the matrix unchanged
