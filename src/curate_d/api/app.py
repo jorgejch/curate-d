@@ -133,12 +133,12 @@ def create_app(
     app.include_router(dry_runs.router(backends.dry_runs))
     app.include_router(throughput.router(backends.throughput))
 
-    @app.get("/health/live", response_model=Liveness)
+    @app.get("/health/live")
     async def live() -> Liveness:
         """Report process-level liveness without touching any dependency."""
         return Liveness(status="ok", version=APPLICATION_VERSION)
 
-    @app.get("/health/ready", response_model=Readiness)
+    @app.get("/health/ready")
     async def ready(response: Response) -> Readiness:
         """Report whether the ledger is reachable, setting 503 on failure."""
         engine: AsyncEngine = app.state.ledger_engine

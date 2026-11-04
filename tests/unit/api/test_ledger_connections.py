@@ -48,6 +48,20 @@ def test_without_a_pcloud_client_authorization_is_unavailable() -> None:
         backend.begin(Provider.PCLOUD)
 
 
+async def test_without_a_pcloud_client_completion_is_unavailable() -> None:
+    """Finishing an authorization answers the same way, before the ledger is touched."""
+    backend = _backend(
+        credential_encryption_key=SecretStr(generate_key()),
+        pcloud_client_id=None,
+        pcloud_client_secret=None,
+        pcloud_redirect_uri=None,
+    )
+    with pytest.raises(UnavailableError, match="CURATE_D_PCLOUD_CLIENT_ID"):
+        await backend.complete(
+            Provider.PCLOUD, code="77", state="s", hostname="eapi.pcloud.com", browser_nonce=None
+        )
+
+
 def test_a_configured_backend_hands_out_a_consent_url_and_a_nonce() -> None:
     """The consent URL names our client and carries a state; the nonce is separate."""
     started = _backend(credential_encryption_key=SecretStr(generate_key()), **_PCLOUD).begin(

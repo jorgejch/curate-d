@@ -219,7 +219,7 @@ def router(backend: Callable[[Request], JobsBackend]) -> APIRouter:
     routes = APIRouter(prefix="/jobs", tags=["jobs"])
     uses = Depends(backend)
 
-    @routes.get("", response_model=Jobs)
+    @routes.get("")
     async def get_jobs(jobs: Annotated[JobsBackend, uses]) -> Jobs:
         """Work by stage and by queue, and this month's spend against the cap."""
         return await jobs.jobs()
