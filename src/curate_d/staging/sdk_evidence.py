@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,7 @@ from datetime import date, datetime
 from enum import StrEnum
 from importlib import metadata
 from pathlib import Path
+from urllib.parse import urlsplit
 
 EXIT_OK = 0
 EXIT_CHECK_FAILED = 1
@@ -40,6 +42,30 @@ CHECKSUM_PROPERTY = "sdk_checksum_headers"
 CONTRACT_SUITE = "tests/integration/test_staging_contract.py"
 DEFAULT_LOCK = Path("uv.lock")
 DEFAULT_MATRIX = Path("ops/staging-compatibility.md")
+# The RustFS endpoint the contract suite uses when CURATE_D_TEST_RUSTFS_ENDPOINT is unset
+# (tests/integration/rustfs_staging.py's ENDPOINT default).
+DEFAULT_RUSTFS_ENDPOINT = "http://127.0.0.1:9100"
+# Failure text that says the backend was never reached, or its fixture refused the
+# settings, rather than that it answered: botocore's EndpointConnectionError, aiohttp's
+# connector errors, socket errors, and the OVH fixture's refusal.
+_UNREACHABLE = re.compile(
+    "|".join(
+        re.escape(text)
+        for text in (
+            "Could not connect to the endpoint URL",
+            "EndpointConnectionError",
+            "Cannot connect to host",
+            "ClientConnectorError",
+            "ConnectionRefusedError",
+            "Connection refused",
+            "ConnectTimeout",
+            "Connect timeout",
+            "Name or service not known",
+            "nodename nor servname provided",
+            "PENDING OVH verification",
+        )
+    )
+)
 
 _PENDING_PREFIX = "PENDING — "
 _PREVIOUS_EVIDENCE = "; previous evidence: "
@@ -94,6 +120,7 @@ class CaseOutcome:
     passed: bool
     failed: bool
     properties: Mapping[str, str]
+    detail: str = ""
 
 
 @dataclass(frozen=True)
@@ -332,7 +359,8 @@ def parse_junit(report: str, backend: Backend, *, source: Path) -> tuple[CaseOut
         raise EvidenceError(f"{source}: not a JUnit XML report: {error}") from error
     outcomes: list[CaseOutcome] = []
     for case in root.iter("testcase"):
-        failed = case.find("failure") is not None or case.find("error") is not None
+        problems = [*case.iter("failure"), *case.iter("error")]
+        failed = bool(problems)
         skipped = case.find("skipped") is not None
         properties = {prop.get("name", ""): prop.get("value", "") for prop in case.iter("property")}
         outcomes.append(
@@ -341,6 +369,9 @@ def parse_junit(report: str, backend: Backend, *, source: Path) -> tuple[CaseOut
                 passed=not (failed or skipped),
                 failed=failed,
                 properties=properties,
+                detail="\n".join(
+                    f"{problem.get('message', '')}\n{problem.text or ''}" for problem in problems
+                ),
             )
         )
     if not outcomes:
@@ -530,18 +561,62 @@ def run_contract_suite(backend: Backend, report: Path) -> int:
     return subprocess.run(command, check=False, env=environment).returncode
 
 
+def probe_endpoint(url: str) -> str | None:
+    """Open a TCP connection to an endpoint's host and port.
+
+    Returns:
+        None when the connection opens, otherwise the reason it did not.
+    """
+    parts = urlsplit(url)
+    try:
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+        with socket.create_connection((parts.hostname or "", port), timeout=5):
+            return None
+    except (OSError, ValueError) as error:
+        return str(error) or type(error).__name__
+
+
+def _endpoint(backend: Backend, environ: Mapping[str, str]) -> str:
+    """Return the endpoint the contract suite will use for a backend."""
+    if backend is Backend.RUSTFS:
+        return environ.get("CURATE_D_TEST_RUSTFS_ENDPOINT") or DEFAULT_RUSTFS_ENDPOINT
+    return environ.get("CURATE_D_TEST_OVH_ENDPOINT", "")
+
+
+def _not_evidence(backend: Backend, outcomes: Sequence[CaseOutcome]) -> str | None:
+    """Return why a run says nothing about the SDK, or None when its results are evidence.
+
+    A failure that never reached the backend (a refused or timed-out connection, an
+    unknown host, the OVH fixture refusing its settings) is about the stack, not the SDK,
+    and so is a run where nothing ran. A failure the backend answered, even one of every
+    test, is evidence: an SDK default the backend rejects fails every upload.
+    """
+    unreachable = [o.name for o in outcomes if o.failed and _UNREACHABLE.search(o.detail)]
+    if unreachable:
+        return (
+            f"{backend.value}: {len(unreachable)} test(s) never reached the backend "
+            f"({', '.join(sorted(set(unreachable))[:3])}); check the stack and the "
+            "backend's settings"
+        )
+    if not any(o.passed or o.failed for o in outcomes):
+        return f"{backend.value}: every contract test was skipped"
+    return None
+
+
 def collect_runs(
     backends: Sequence[Backend],
     matrix: Matrix,
     runner: SuiteRunner,
     environ: Mapping[str, str],
     workdir: Path,
+    probe: Callable[[str], str | None] = probe_endpoint,
 ) -> list[BackendRun]:
     """Run the suite on each backend and read back its report.
 
     Raises:
-        EvidenceError: A backend's settings are missing, or a run produced no usable report
-            or no passing test; nothing may be recorded from it.
+        EvidenceError: A backend's settings are missing, its endpoint refuses a connection,
+            or a run produced no usable report or failed without reaching the backend;
+            nothing may be recorded from it.
     """
     runs: list[BackendRun] = []
     for backend in backends:
@@ -550,6 +625,12 @@ def collect_runs(
             if backend is Backend.RUSTFS
             else _ovh_identity(environ)
         )
+        endpoint = _endpoint(backend, environ)
+        if (reason := probe(endpoint)) is not None:
+            raise EvidenceError(
+                f"{backend.value}: {endpoint} does not accept a connection ({reason}); "
+                "start the stack (`make test-stack`) or fix the backend's settings"
+            )
         report = workdir / f"{backend.value}.xml"
         status = runner(backend, report)
         # 0 all passed, 1 some failed; anything else (interrupted, usage or collection
@@ -560,13 +641,8 @@ def collect_runs(
                 f"report {'present' if report.is_file() else 'missing'})"
             )
         outcomes = parse_junit(report.read_text(encoding="utf-8"), backend, source=report)
-        # A stack that is down or credentials the fixture refuses error every test: that
-        # says nothing about the SDK, and must not replace the evidence with FAIL cells.
-        if not any(outcome.passed for outcome in outcomes):
-            raise EvidenceError(
-                f"{backend.value}: no contract test passed; check the stack and the "
-                "backend's settings before recording"
-            )
+        if (reason := _not_evidence(backend, outcomes)) is not None:
+            raise EvidenceError(reason)
         runs.append(BackendRun(backend, identity, region, outcomes))
     return runs
 
@@ -600,6 +676,7 @@ def record(
     runner: SuiteRunner = run_contract_suite,
     environ: Mapping[str, str] | None = None,
     installed_version: Callable[[str], str] = _installed_version,
+    probe: Callable[[str], str | None] = probe_endpoint,
 ) -> Recording:
     """Run the contract suite on the backends and rewrite the matrix from the results.
 
@@ -627,7 +704,12 @@ def record(
     matrix = parse_matrix(matrix_text, source=matrix_path)
     with tempfile.TemporaryDirectory(prefix="sdk-evidence-") as workdir:
         runs = collect_runs(
-            backends, matrix, runner, os.environ if environ is None else environ, Path(workdir)
+            backends,
+            matrix,
+            runner,
+            os.environ if environ is None else environ,
+            Path(workdir),
+            probe,
         )
     recording = rewrite_matrix(matrix, locked, runs, today)
     if not dry_run:
@@ -687,6 +769,7 @@ def main(
     lock_path: Path = DEFAULT_LOCK,
     matrix_path: Path = DEFAULT_MATRIX,
     installed_version: Callable[[str], str] = _installed_version,
+    probe: Callable[[str], str | None] = probe_endpoint,
 ) -> int:
     """Run a subcommand and return its process exit status.
 
@@ -723,6 +806,7 @@ def main(
             dry_run=invocation.dry_run,
             runner=runner,
             installed_version=installed_version,
+            probe=probe,
         )
     except EvidenceError as error:
         _write("err", f"sdk evidence not recorded, {matrix_path} unchanged: {error}")

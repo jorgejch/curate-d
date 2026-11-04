@@ -7,6 +7,7 @@ from curate_d.staging.sdk_evidence import (
     CHECKSUM_PROPERTY,
     CHECKSUM_TEST,
     CONTRACT_SUITE,
+    DEFAULT_RUSTFS_ENDPOINT,
     check,
     read_locked_versions,
 )
@@ -44,3 +45,10 @@ def test_record_reads_the_property_the_contract_test_writes() -> None:
 
     assert f"async def {CHECKSUM_TEST}(" in source
     assert f'record_property("{CHECKSUM_PROPERTY}",' in source
+
+
+def test_the_endpoint_probe_defaults_to_the_contract_suites_rustfs_endpoint() -> None:
+    """`record` probes the RustFS endpoint the contract suite falls back to."""
+    source = (REPOSITORY_ROOT / "tests/integration/rustfs_staging.py").read_text(encoding="utf-8")
+
+    assert f'"CURATE_D_TEST_RUSTFS_ENDPOINT", "{DEFAULT_RUSTFS_ENDPOINT}"' in source

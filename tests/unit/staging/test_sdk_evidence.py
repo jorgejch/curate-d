@@ -1,12 +1,13 @@
 """SDK evidence check and record against a fixture matrix, lock and JUnit reports."""
 
 import json
+import socket
 import subprocess
 from collections.abc import Callable, Sequence
 from datetime import date
 from importlib import metadata
 from pathlib import Path
-from xml.sax.saxutils import quoteattr
+from xml.sax.saxutils import escape, quoteattr
 
 import pytest
 
@@ -229,8 +230,15 @@ def test_matrix_parser_requires_both_backend_columns() -> None:
 # --- record ----------------------------------------------------------------------------
 
 
-def _case(name: str, *, outcome: str = "pass", headers: dict[str, str] | None = None) -> str:
-    """Render one JUnit test case."""
+def _case(
+    name: str,
+    *,
+    outcome: str = "pass",
+    headers: dict[str, str] | None = None,
+    message: str = "boom",
+    text: str = "",
+) -> str:
+    """Render one JUnit test case; a failure or error carries `message` and `text`."""
     full = f"{name}[rustfs]"
     properties = ""
     if headers is not None:
@@ -240,8 +248,8 @@ def _case(name: str, *, outcome: str = "pass", headers: dict[str, str] | None = 
         )
     body = {
         "pass": "",
-        "fail": '<failure message="boom"/>',
-        "error": '<error message="fixture failed"/>',
+        "fail": f"<failure message={quoteattr(message)}>{escape(text)}</failure>",
+        "error": f"<error message={quoteattr(message)}>{escape(text)}</error>",
         "skip": '<skipped message="s"/>',
     }
     return (
@@ -264,6 +272,10 @@ PASSING = _report(
 )
 
 Runner = Callable[[Backend, Path], int]
+
+
+def _reachable(url: str) -> None:
+    """Report every endpoint as accepting a connection."""
 
 
 def _installed(versions: dict[str, str]) -> Callable[[str], str]:
@@ -309,6 +321,7 @@ def _record(
         lock_path=lock_path,
         matrix_path=matrix_path,
         installed_version=_installed(lock),
+        probe=_reachable,
     )
     return status_code, matrix_path, text
 
@@ -506,24 +519,143 @@ def test_record_writes_nothing_when_one_of_two_backends_has_no_report(
         lock_path=lock_path,
         matrix_path=matrix_path,
         installed_version=_installed(NEW),
+        probe=_reachable,
     )
 
     assert status == EXIT_NOT_RUN
     assert matrix_path.read_text(encoding="utf-8") == _matrix(_sdk_row(OLD))
 
 
-@pytest.mark.parametrize("outcome", ["error", "skip"])
-def test_record_writes_nothing_when_no_contract_test_passed(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], outcome: str
-) -> None:
-    """A run where every test errored or skipped (stack down, settings refused) is not evidence."""
-    report = _report(_case(CHECKSUM_TEST, outcome=outcome), _case("test_other", outcome=outcome))
+UNREACHABLE = (
+    "curate_d.staging.errors.StagingObjectStoreError: uploading content/x failed: "
+    'Could not connect to the endpoint URL: "http://127.0.0.1:9199/curate-d-staging/x"'
+)
+REJECTED = (
+    "botocore.exceptions.ClientError: An error occurred (InvalidArgument) when calling the "
+    "PutObject operation: x-amz-checksum-crc64nvme is not supported"
+)
 
+
+@pytest.mark.parametrize(
+    "report",
+    [
+        _report(
+            _case(CHECKSUM_TEST, outcome="fail", message=UNREACHABLE),
+            _case("test_other", outcome="fail", message=UNREACHABLE),
+        ),
+        # A stack that dies mid-run: earlier tests passed, later ones never reached it.
+        _report(
+            _case(CHECKSUM_TEST, headers=HEADERS),
+            _case("test_other", outcome="fail", text=f"Traceback ...\n{UNREACHABLE}"),
+        ),
+        _report(
+            _case(CHECKSUM_TEST, outcome="error", message="PENDING OVH verification: ..."),
+            _case("test_other", outcome="error", message="PENDING OVH verification: ..."),
+        ),
+        _report(_case(CHECKSUM_TEST, outcome="skip"), _case("test_other", outcome="skip")),
+    ],
+    ids=["stack-down", "stack-died-mid-run", "ovh-settings-refused", "all-skipped"],
+)
+def test_record_writes_nothing_when_the_run_never_reached_the_backend(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], report: str
+) -> None:
+    """Failures that never reached the backend are about the stack: exit 2, evidence kept."""
     status, matrix_path, before = _record(tmp_path, {Backend.RUSTFS: report}, status=1)
 
     assert status == EXIT_NOT_RUN
     assert matrix_path.read_text(encoding="utf-8") == before
-    assert "no contract test passed" in capsys.readouterr().err
+    error = capsys.readouterr().err
+    assert "never reached the backend" in error or "every contract test was skipped" in error
+
+
+def test_record_writes_fail_when_every_test_fails_against_a_reachable_backend(
+    tmp_path: Path,
+) -> None:
+    """An SDK default the backend rejects on every upload is recorded as FAIL, not as not run."""
+    report = _report(
+        _case(CHECKSUM_TEST, outcome="fail", message=REJECTED),
+        _case("test_listing_paginates", outcome="fail", message=REJECTED),
+        _case("test_other", outcome="fail", message=REJECTED),
+    )
+
+    status, matrix_path, _ = _record(tmp_path, {Backend.RUSTFS: report}, lock=NEW, status=1)
+
+    assert status == EXIT_CHECK_FAILED
+    after = matrix_path.read_text(encoding="utf-8")
+    for row in ("32", "33", "34", "35"):
+        assert _cells(after, row)[0].startswith("FAIL — 2026-11-01, ")
+
+
+def test_record_refuses_an_endpoint_that_does_not_accept_a_connection(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stack that is not up exits 2 before the suite runs, naming the endpoint."""
+    monkeypatch.delenv("CURATE_D_TEST_RUSTFS_ENDPOINT", raising=False)
+    started: list[Backend] = []
+    probed: list[str] = []
+    matrix_path, lock_path = _write(tmp_path, _matrix(_sdk_row(OLD)), _lock(OLD))
+
+    def runner(backend: Backend, report: Path) -> int:
+        """Record that the suite started."""
+        started.append(backend)
+        return 0
+
+    def refused(url: str) -> str:
+        """Refuse every connection."""
+        probed.append(url)
+        return "[Errno 61] Connection refused"
+
+    status = sdk_evidence.main(
+        ["record", "--backend", "rustfs"],
+        runner=runner,
+        lock_path=lock_path,
+        matrix_path=matrix_path,
+        installed_version=_installed(OLD),
+        probe=refused,
+    )
+
+    assert status == EXIT_NOT_RUN
+    assert started == []
+    assert probed == [sdk_evidence.DEFAULT_RUSTFS_ENDPOINT]
+    assert matrix_path.read_text(encoding="utf-8") == _matrix(_sdk_row(OLD))
+    assert "make test-stack" in capsys.readouterr().err
+
+
+def test_probe_endpoint_connects_to_the_url_host_and_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The probe opens the URL's host and port (default 80/443) and reports a refusal."""
+    opened: list[tuple[str, int]] = []
+
+    class Connection:
+        """Stand in for an open socket."""
+
+        def __enter__(self) -> "Connection":
+            """Enter the connection context."""
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            """Close nothing."""
+
+    def accept(address: tuple[str, int], timeout: float) -> Connection:
+        """Record the address and accept the connection."""
+        assert timeout > 0
+        opened.append(address)
+        return Connection()
+
+    monkeypatch.setattr(socket, "create_connection", accept)
+    assert sdk_evidence.probe_endpoint("http://127.0.0.1:9100") is None
+    assert sdk_evidence.probe_endpoint("https://s3.example.test") is None
+    assert sdk_evidence.probe_endpoint("http://s3.example.test") is None
+    assert opened == [("127.0.0.1", 9100), ("s3.example.test", 443), ("s3.example.test", 80)]
+
+    def refuse(address: tuple[str, int], timeout: float) -> Connection:
+        """Refuse the connection as a stopped stack does."""
+        raise ConnectionRefusedError(61, "Connection refused")
+
+    monkeypatch.setattr(socket, "create_connection", refuse)
+    assert sdk_evidence.probe_endpoint("http://127.0.0.1:9100") == "[Errno 61] Connection refused"
+    assert sdk_evidence.probe_endpoint("http://127.0.0.1:notaport") is not None
 
 
 @pytest.mark.parametrize("missing", ["CURATE_D_TEST_OVH_BUCKET", "CURATE_D_TEST_OVH_ENDPOINT"])
@@ -551,6 +683,7 @@ def test_record_refuses_ovh_without_its_settings_before_running(
         lock_path=lock_path,
         matrix_path=matrix_path,
         installed_version=_installed(OLD),
+        probe=_reachable,
     )
 
     assert status == EXIT_NOT_RUN
@@ -577,6 +710,7 @@ def test_record_refuses_an_environment_whose_sdk_is_not_the_locked_one(
         lock_path=lock_path,
         matrix_path=matrix_path,
         installed_version=_installed({**NEW, "botocore": OLD["botocore"]}),
+        probe=_reachable,
     )
 
     assert status == EXIT_NOT_RUN
