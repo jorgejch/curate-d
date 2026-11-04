@@ -587,6 +587,31 @@ def test_terminate_stops_a_running_command_and_refuses_new_ones(tmp_path: Path) 
     assert process_runner.run(_python("pass"), env={}, log=log, always=True) == 0
 
 
+def test_terminate_lets_a_running_teardown_finish(tmp_path: Path) -> None:
+    """A signal that lands while one shard tears down leaves that teardown to finish."""
+    process_runner = ProcessRunner(grace_seconds=_WAIT)
+    log = tmp_path / "stack.log"
+    release = tmp_path / "release"
+    codes: list[int] = []
+    command = _python(
+        "import pathlib, sys, time\n"
+        "print('ready', flush=True)\n"
+        f"while not pathlib.Path({str(release)!r}).exists(): time.sleep(0.02)\n"
+        "sys.exit(0)"
+    )
+    thread = threading.Thread(
+        target=lambda: codes.append(process_runner.run(command, env={}, log=log, always=True))
+    )
+    thread.start()
+    deadline = time.monotonic() + _WAIT
+    while "ready" not in (log.read_text() if log.exists() else "") and time.monotonic() < deadline:
+        time.sleep(0.02)
+    process_runner.terminate()
+    release.touch()
+    thread.join(_WAIT)
+    assert codes == [0]
+
+
 # --- Entry point --------------------------------------------------------------------------
 
 

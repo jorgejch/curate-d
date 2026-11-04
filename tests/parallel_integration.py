@@ -244,12 +244,13 @@ class Runner(Protocol):
         """Run `argv` to completion with its output appended to `log`; return its exit code.
 
         After `terminate`, a command that is not `always` is not started and returns
-        NOT_STARTED. Teardown and logs pass `always`.
+        NOT_STARTED. Teardown and logs pass `always`, and `terminate` lets an `always`
+        command that is already running finish.
         """
         ...
 
     def terminate(self) -> None:
-        """Stop every running command and refuse any later one that is not `always`."""
+        """Stop every running command that is not `always`, and refuse any later one."""
         ...
 
 
@@ -273,6 +274,7 @@ class ProcessRunner:
     def __init__(self, grace_seconds: float = TERMINATE_GRACE_SECONDS) -> None:
         self._grace_seconds = grace_seconds
         self._lock = threading.Lock()
+        # The children `terminate` stops: a teardown or logs command is never among them.
         self._children: set[subprocess.Popen[bytes]] = set()
         self._stopping = False
 
@@ -300,7 +302,8 @@ class ProcessRunner:
                     stderr=subprocess.STDOUT,
                     start_new_session=True,
                 )
-                self._children.add(child)
+                if not always:
+                    self._children.add(child)
             try:
                 return child.wait()
             finally:
@@ -308,7 +311,7 @@ class ProcessRunner:
                     self._children.discard(child)
 
     def terminate(self) -> None:
-        """Terminate every running child's process group; kill those still alive after the grace."""
+        """Terminate each running child that is not `always`; kill those alive after the grace."""
         with self._lock:
             self._stopping = True
             children = list(self._children)

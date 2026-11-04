@@ -119,7 +119,9 @@ exits 0 only when every shard passes. Otherwise it exits 1 and names each failed
 ### D6. Interrupt
 
 On SIGINT or SIGTERM, the runner terminates the running child processes. Then it runs `down -v`
-for every shard project it started, and exits 130 (SIGINT) or 143 (SIGTERM). A second SIGINT
+for every shard project it started, and exits 130 (SIGINT) or 143 (SIGTERM). A teardown or
+logs command that is already running when the signal lands is not terminated: it finishes. A
+second SIGINT
 during teardown is ignored. Step 1 of the next run removes anything that a hard kill (SIGKILL)
 leaves.
 
