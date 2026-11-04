@@ -23,6 +23,17 @@ depend on which and which can start at once, and keep shared edits (a migration,
 settings field, this file) in one stream or one up-front task the others wait on. Say so
 in the design when a change can't be split.
 
+## Integration tests
+
+Run the integration suite against a fresh `make test-stack`, never against a stack an
+earlier run or `make stack-up` left behind. `make test-stack` is the stack CI runs on: it
+destroys the previous containers, data, schedules and DBOS system-schema state, so a green
+run is evidence about the change, not about what was left over.
+`make test-integration-parallel` also qualifies: each shard removes its own Compose project
+and starts a new stack before it runs. Depart from this only for a stated reason (re-running
+one test while iterating on it, a stack another process still needs) and say so when
+reporting the result.
+
 ## Docstrings
 
 Google-style. One-line imperative summary first, period-terminated ("Return the...",
