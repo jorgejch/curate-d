@@ -610,7 +610,8 @@ class StagingOccupancy:
         reclamation = await self._delete_unpublished(unpublished)
         if reclamation.failure is not None:
             raise reclamation.failure
-        return replace(reclamation.report, orphans_deleted=orphans_deleted)
+        report: ReclaimReport = replace(reclamation.report, orphans_deleted=orphans_deleted)
+        return report
 
     async def release(self, key: StagingKey) -> ReleaseReport:
         """Drop `key`'s registration and delete its bytes when no download holds them.
