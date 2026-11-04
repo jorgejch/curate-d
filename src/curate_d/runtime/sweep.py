@@ -104,6 +104,9 @@ REDISPATCH_VERSION_ATTRIBUTE: Final = "curate_d.recovery_redispatch_version"
 _DEQUEUED_QUEUES: Final = frozenset(queue.value for queue in QueueName)
 """The queues some curate.d worker dequeues; a fork or redispatch onto any other is refused."""
 
+_SKIPPED_EVENT: Final = "recovery_sweep.skipped"
+"""The event logged, with a reason, for rows the sweep leaves to a later tick."""
+
 
 class RecoveryAction(StrEnum):
     """What a stranded workflow needs before any live worker will run it."""
@@ -1002,7 +1005,7 @@ class _Sweep:
                 if latest != self.target:
                     self.tally.skipped.extend(ids)
                     logger.warning(
-                        "recovery_sweep.skipped",
+                        _SKIPPED_EVENT,
                         reason="the latest version changed mid-sweep",
                         target=self.target,
                         latest=latest,
@@ -1054,7 +1057,7 @@ class _Sweep:
         if latest != self.target:
             self.tally.skipped.extend(ids)
             logger.warning(
-                "recovery_sweep.skipped",
+                _SKIPPED_EVENT,
                 reason="the latest version changed mid-sweep",
                 target=self.target,
                 latest=latest,
@@ -1183,7 +1186,7 @@ async def run_recovery_sweep(
         sweep.tally.skipped.extend(entry.workflow.workflow_id for entry in versioned)
         if versioned:
             logger.info(
-                "recovery_sweep.skipped",
+                _SKIPPED_EVENT,
                 reason="this sweeper is not on the target version",
                 own_version=own_version,
                 target=target,
@@ -1203,7 +1206,7 @@ async def run_recovery_sweep(
             else:
                 sweep.tally.skipped.extend(ids)
                 logger.warning(
-                    "recovery_sweep.skipped",
+                    _SKIPPED_EVENT,
                     reason="a promotion is in progress",
                     target=target,
                     rows=len(ids),
