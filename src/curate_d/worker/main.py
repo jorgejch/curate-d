@@ -621,6 +621,42 @@ def _drain_dbos(settings: Settings, executor_id: str, timeout_seconds: int) -> b
     return not pending
 
 
+def _stop_reconciler(reconciler: ScheduleReconciler | None, lease_lost: threading.Event) -> None:
+    """Join the schedule reconciler, without waiting once the lease is lost."""
+    # Not waited for once the lease is lost: stopping at once matters more.
+    if reconciler is not None:
+        reconciler.join(0 if lease_lost.is_set() else RECONCILER_STOP_SECONDS)
+
+
+def _stop_dbos(
+    settings: Settings, executor_id: str, *, serving: bool, lease_lost: threading.Event
+) -> bool:
+    """Shut a serving DBOS down, returning whether it was drained of this executor's work."""
+    # Let workflows already in flight finish rather than orphaning them as PENDING
+    # on a version this deployment is about to retire.
+    if serving and lease_lost.is_set():
+        # Another process may already hold the identity: shut down at once, and
+        # ask the database nothing, since losing it is the likeliest cause.
+        DBOS.destroy(workflow_completion_timeout_sec=0)
+        return False
+    if serving:
+        return _drain_dbos(settings, executor_id, DRAIN_SECONDS)
+    return False
+
+
+def _settle_lease(lease: ExecutorLease | None, executor_id: str, *, done: bool) -> None:
+    """Release the lease if nothing runs under its identity, else retain it until exit."""
+    # Last, and only once nothing runs under this identity: releasing earlier
+    # would let a successor recover workflows still executing here. A retained
+    # lease is released when the process exits and its connection closes.
+    if lease is None:
+        return
+    if done:
+        lease.release()
+    else:
+        logger.warning("worker.lease_retained_until_exit", executor_id=executor_id)
+
+
 def run(
     settings: Settings,
     profile: WorkerProfile,
@@ -716,19 +752,12 @@ def run(
             )
     finally:
         # Before the drain: the reconciler writes through DBOS, which the drain destroys.
-        # Not waited for once the lease is lost: stopping at once matters more.
         shutdown.set()
-        if reconciler is not None:
-            reconciler.join(0 if lease_lost.is_set() else RECONCILER_STOP_SECONDS)
+        _stop_reconciler(reconciler, lease_lost)
         try:
-            # Let workflows already in flight finish rather than orphaning them as PENDING
-            # on a version this deployment is about to retire.
-            if launched and block and lease_lost.is_set():
-                # Another process may already hold the identity: shut down at once, and
-                # ask the database nothing, since losing it is the likeliest cause.
-                DBOS.destroy(workflow_completion_timeout_sec=0)
-            elif launched and block:
-                drained = _drain_dbos(settings, executor_id, DRAIN_SECONDS)
+            drained = _stop_dbos(
+                settings, executor_id, serving=launched and block, lease_lost=lease_lost
+            )
         finally:
             try:
                 # After the drain: a workflow finishing its last step may still be reading
@@ -737,14 +766,7 @@ def run(
                 if staging is not None:
                     staging.stop()
             finally:
-                # Last, and only once nothing runs under this identity: releasing earlier
-                # would let a successor recover workflows still executing here. A retained
-                # lease is released when the process exits and its connection closes.
-                if lease is not None:
-                    if drained or not (launched and block):
-                        lease.release()
-                    else:
-                        logger.warning("worker.lease_retained_until_exit", executor_id=executor_id)
+                _settle_lease(lease, executor_id, done=drained or not (launched and block))
     logger.info("worker.stopped", profile=profile.value)
 
 
