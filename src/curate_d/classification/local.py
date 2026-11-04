@@ -278,9 +278,7 @@ def categorize(
     return best, round(confidence, 3), evidence
 
 
-def classify_local(
-    item: ClassificationInput, deterministic: TierResult, extracted: ExtractedText
-) -> TierResult:
+def classify_local(deterministic: TierResult, extracted: ExtractedText) -> TierResult:
     """Refine the deterministic facts with what the content's text says."""
     base = deterministic.facts
     is_scan = (

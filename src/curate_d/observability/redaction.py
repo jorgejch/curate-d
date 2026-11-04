@@ -35,7 +35,7 @@ _SENSITIVE_KEY_FRAGMENTS = (
 # masking must not cost us the ability to tell which call failed.
 _SENSITIVE_TEXT_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     # Authorization headers, however the scheme is spelled.
-    (re.compile(r"(?i)\b(bearer|basic|token)\s+[A-Za-z0-9\-._~+/=]{8,}"), rf"\1 {MASK}"),
+    (re.compile(r"(?i)\b(bearer|basic|token)\s+[a-z0-9\-._~+/=]{8,}"), rf"\1 {MASK}"),
     # `token=...`, `access_token: ...` inside free text.
     (
         re.compile(

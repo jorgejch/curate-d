@@ -122,6 +122,30 @@ def normalize(component: str, profile: CapabilityProfile) -> tuple[str, list[str
     return result, rules
 
 
+def _substitute(segment: str, facts: Facts, builtins: dict[str, str]) -> str:
+    """Replace each placeholder in one template segment with its fact's text."""
+    text = segment
+    for placeholder in placeholders(segment):
+        token = (
+            f"{{{placeholder.name}}}"
+            if placeholder.format is None
+            else f"{{{placeholder.name}:{placeholder.format}}}"
+        )
+        text = text.replace(token, _value(facts, placeholder.name, placeholder.format, builtins))
+    return text
+
+
+def _flatten(
+    components: list[str], profile: CapabilityProfile
+) -> tuple[str, Transformation | None]:
+    """Join a hierarchy into one name for a flat destination, recording what the rule changed."""
+    joined = _FLAT_JOINER.join(components)
+    flat, rules = normalize(joined, profile)
+    if not rules:
+        return flat, None
+    return flat, Transformation(original=joined, rendered=flat, rule="+".join(rules))
+
+
 def render_with(
     template: Template,
     template_version: str,
@@ -153,17 +177,7 @@ def render_with(
     components: list[str] = []
     transformations: list[Transformation] = []
     for segment in template.path.split("/"):
-        text = segment
-        for placeholder in placeholders(segment):
-            token = (
-                f"{{{placeholder.name}}}"
-                if placeholder.format is None
-                else f"{{{placeholder.name}:{placeholder.format}}}"
-            )
-            text = text.replace(
-                token, _value(facts, placeholder.name, placeholder.format, builtins)
-            )
-        text = text.strip()
+        text = _substitute(segment, facts, builtins).strip()
         if not text:
             continue
         normalized, rules = normalize(text, profile)
@@ -175,13 +189,9 @@ def render_with(
     if not components:
         raise RenderError(f"template {template.name!r} rendered an empty path")
     if not profile.hierarchical and len(components) > 1:
-        flat, rules = normalize(_FLAT_JOINER.join(components), profile)
-        if rules:
-            transformations.append(
-                Transformation(
-                    original=_FLAT_JOINER.join(components), rendered=flat, rule="+".join(rules)
-                )
-            )
+        flat, transformation = _flatten(components, profile)
+        if transformation is not None:
+            transformations.append(transformation)
         components = [flat]
     return Rendered(
         locator=f"{root.rstrip('/')}/{'/'.join(components)}",
