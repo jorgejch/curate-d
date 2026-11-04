@@ -55,7 +55,7 @@ class TransferAdmission:
         Raises:
             ValueError: a non-positive budget, or a share outside (0, 1).
         """
-        if budget_bytes <= 0 or not 0 < small_share < 1:
+        if not (budget_bytes > 0 and 0 < small_share < 1):
             raise ValueError("the budget must be positive and the small share within (0, 1)")
         small = int(budget_bytes * small_share)
         self._shares = {SizeClass.SMALL: small, SizeClass.LARGE: budget_bytes - small}

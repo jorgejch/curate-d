@@ -123,6 +123,80 @@ def source_changed(
     return None
 
 
+def _reported_rung(source: SideEvidence, destination: SideEvidence) -> Assessment | None:
+    """Compare the strongest digest both sides report, or return None when they share none."""
+    for algorithm in _PREFERENCE:
+        ours, theirs = source.reported_as(algorithm), destination.reported_as(algorithm)
+        if ours is None or theirs is None:
+            continue
+        if ours.matches(theirs):
+            return Assessment(
+                verdict=Verdict.VERIFIED,
+                level=VerificationLevel.STRONG_COMMON_HASH,
+                compared=algorithm.value,
+                source_value=ours.digest,
+                destination_value=theirs.digest,
+            )
+        return Assessment(
+            verdict=Verdict.MISMATCH,
+            compared=algorithm.value,
+            source_value=ours.digest,
+            destination_value=theirs.digest,
+            reason=f"{algorithm.value} digests differ",
+        )
+    return None
+
+
+def _read_back_rung(source: SideEvidence, destination: SideEvidence) -> Assessment | None:
+    """Compare a digest computed over the copy with the source's, or return None without one."""
+    for computed in destination.computed:
+        ours = source.reported_as(computed.algorithm)
+        if ours is None:
+            continue
+        if ours.matches(computed):
+            return Assessment(
+                verdict=Verdict.VERIFIED,
+                level=VerificationLevel.STRONG_IN_TRANSIT,
+                compared=f"{computed.algorithm.value} read back",
+                source_value=ours.digest,
+                destination_value=computed.digest,
+            )
+        return Assessment(
+            verdict=Verdict.MISMATCH,
+            compared=f"{computed.algorithm.value} read back",
+            source_value=ours.digest,
+            destination_value=computed.digest,
+            reason=f"{computed.algorithm.value} of the copy read back differs from the source's",
+        )
+    return None
+
+
+def _size_rung(source: SideEvidence, destination: SideEvidence, why: str) -> Assessment:
+    """Compare sizes when both are known, else return the unverifiable rung."""
+    if source.size_bytes is not None and destination.size_bytes is not None:
+        if source.size_bytes != destination.size_bytes:
+            return Assessment(
+                verdict=Verdict.MISMATCH,
+                compared="size",
+                source_value=str(source.size_bytes),
+                destination_value=str(destination.size_bytes),
+                reason="sizes differ",
+            )
+        return Assessment(
+            verdict=Verdict.VERIFIED,
+            level=VerificationLevel.WEAK,
+            compared="size",
+            source_value=str(source.size_bytes),
+            destination_value=str(destination.size_bytes),
+            reason=f"only size could be compared: {why}",
+        )
+    return Assessment(
+        verdict=Verdict.VERIFIED,
+        level=VerificationLevel.UNVERIFIABLE,
+        reason=f"nothing could be compared: {why}",
+    )
+
+
 def assess(evidence: TransferEvidence) -> Assessment:
     """The strongest rung the recorded evidence supports, or the mismatch it shows."""
     if evidence.corrupt is not None:
@@ -148,69 +222,16 @@ def assess(evidence: TransferEvidence) -> Assessment:
             source_value=None if source.size_bytes is None else str(source.size_bytes),
             reason="; ".join(destination.unavailable) or "the copy is not at the destination",
         )
-    for algorithm in _PREFERENCE:
-        ours, theirs = source.reported_as(algorithm), destination.reported_as(algorithm)
-        if ours is None or theirs is None:
-            continue
-        if ours.matches(theirs):
-            return Assessment(
-                verdict=Verdict.VERIFIED,
-                level=VerificationLevel.STRONG_COMMON_HASH,
-                compared=algorithm.value,
-                source_value=ours.digest,
-                destination_value=theirs.digest,
-            )
-        return Assessment(
-            verdict=Verdict.MISMATCH,
-            compared=algorithm.value,
-            source_value=ours.digest,
-            destination_value=theirs.digest,
-            reason=f"{algorithm.value} digests differ",
-        )
-    for computed in destination.computed:
-        ours = source.reported_as(computed.algorithm)
-        if ours is None:
-            continue
-        if ours.matches(computed):
-            return Assessment(
-                verdict=Verdict.VERIFIED,
-                level=VerificationLevel.STRONG_IN_TRANSIT,
-                compared=f"{computed.algorithm.value} read back",
-                source_value=ours.digest,
-                destination_value=computed.digest,
-            )
-        return Assessment(
-            verdict=Verdict.MISMATCH,
-            compared=f"{computed.algorithm.value} read back",
-            source_value=ours.digest,
-            destination_value=computed.digest,
-            reason=f"{computed.algorithm.value} of the copy read back differs from the source's",
-        )
+    reported = _reported_rung(source, destination)
+    if reported is not None:
+        return reported
+    read_back = _read_back_rung(source, destination)
+    if read_back is not None:
+        return read_back
     why = "; ".join((*source.unavailable, *destination.unavailable)) or (
         "no common digest, and none computed over the copy"
     )
-    if source.size_bytes is not None and destination.size_bytes is not None:
-        if source.size_bytes != destination.size_bytes:
-            return Assessment(
-                verdict=Verdict.MISMATCH,
-                compared="size",
-                source_value=str(source.size_bytes),
-                destination_value=str(destination.size_bytes),
-                reason="sizes differ",
-            )
-        return Assessment(
-            verdict=Verdict.VERIFIED,
-            level=VerificationLevel.WEAK,
-            compared="size",
-            source_value=str(source.size_bytes),
-            destination_value=str(destination.size_bytes),
-            reason=f"only size could be compared: {why}",
-        )
-    return Assessment(
-        verdict=Verdict.VERIFIED,
-        level=VerificationLevel.UNVERIFIABLE,
-        reason=f"nothing could be compared: {why}",
-    )
+    return _size_rung(source, destination, why)
 
 
 def expected_level(

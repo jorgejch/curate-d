@@ -71,6 +71,30 @@ class ScriptedRclone(RcloneClient):
         return self.computed[algorithm]
 
 
+class PollingRclone(ScriptedRclone):
+    """Finish the job on the second status poll, reporting progress in between."""
+
+    def __init__(self, stats: Mapping[str, object]) -> None:
+        """Answer `core/stats` with `stats` while the job runs."""
+        super().__init__(
+            objects={
+                "src:a.jpg": ObjectInfo(size_bytes=10, hashes=(_SHA1,)),
+                "dst:b/a.jpg": ObjectInfo(size_bytes=10, hashes=(_SHA1,)),
+            }
+        )
+        self.polled = stats
+        self.polls = 0
+
+    async def job_status(self, job: int) -> JobStatus:
+        """Still running on the first poll, finished on the second."""
+        self.polls += 1
+        return JobStatus(finished=self.polls > 1, success=True)
+
+    async def stats(self, group: str) -> Mapping[str, object]:
+        """Return the scripted statistics."""
+        return self.polled
+
+
 def _spec(*, large: bool = False) -> TransferSpec:
     """src:/a.jpg to dst:/b/a.jpg."""
     return TransferSpec(
@@ -112,6 +136,29 @@ async def test_any_other_job_failure_is_a_transfer_failure() -> None:
     with pytest.raises(TransferFailedError, match="timeout") as raised:
         await copy_and_collect(rclone, _spec())
     assert not isinstance(raised.value, ScratchExhaustedError)
+
+
+@pytest.mark.parametrize(
+    ("stats", "reported"),
+    [
+        ({"bytes": 4, "totalBytes": 10}, (4, 10)),
+        ({"bytes": 4, "totalBytes": 0}, (4, 10)),
+        ({"bytes": "4"}, (0, 10)),
+    ],
+)
+async def test_the_progress_callback_receives_the_polled_progress(
+    stats: Mapping[str, object], reported: tuple[int, int]
+) -> None:
+    """Each poll while the job runs reports bytes done and the total, else the spec's size."""
+    rclone = PollingRclone(stats)
+    progress: list[tuple[int, int]] = []
+
+    def record(done: int, total: int) -> None:
+        """Keep each progress report."""
+        progress.append((done, total))
+
+    await copy_and_collect(rclone, _spec(), on_progress=record, poll_seconds=0)
+    assert progress == [reported]
 
 
 async def test_a_common_algorithm_needs_no_read_back() -> None:
