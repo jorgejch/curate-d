@@ -25,6 +25,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from enum import StrEnum
+from importlib import metadata
 from pathlib import Path
 
 EXIT_OK = 0
@@ -483,9 +484,18 @@ def _rustfs_identity(matrix: Matrix, environ: Mapping[str, str]) -> tuple[str, s
 
 
 def _ovh_identity(environ: Mapping[str, str]) -> tuple[str, str]:
-    """Return the OVH bucket and endpoint the contract fixtures read, and the region."""
-    bucket = environ.get("CURATE_D_TEST_OVH_BUCKET", "unset bucket")
-    endpoint = environ.get("CURATE_D_TEST_OVH_ENDPOINT", "unset endpoint")
+    """Return the OVH bucket and endpoint the contract fixtures read, and the region.
+
+    Raises:
+        EvidenceError: The bucket or endpoint is not set, so the suite cannot reach OVH.
+    """
+    bucket = environ.get("CURATE_D_TEST_OVH_BUCKET")
+    endpoint = environ.get("CURATE_D_TEST_OVH_ENDPOINT")
+    if not bucket or not endpoint:
+        raise EvidenceError(
+            "ovh: CURATE_D_TEST_OVH_BUCKET and CURATE_D_TEST_OVH_ENDPOINT must be set; "
+            "the contract suite reads its OVH fixture from them"
+        )
     return (
         f"{_code(bucket)} at {_code(endpoint)}",
         environ.get("CURATE_D_TEST_OVH_REGION", "us-east-va"),
@@ -501,6 +511,9 @@ def run_contract_suite(backend: Backend, report: Path) -> int:
     Returns:
         pytest's exit status.
     """
+    # The caller's PYTEST_ADDOPTS could deselect tests (`-k`); a deselected test leaves no
+    # trace in the report, so the run would pass as the whole suite.
+    environment = {name: value for name, value in os.environ.items() if name != "PYTEST_ADDOPTS"}
     command = [
         sys.executable,
         "-m",
@@ -514,7 +527,7 @@ def run_contract_suite(backend: Backend, report: Path) -> int:
         "-p",
         "no:cacheprovider",
     ]
-    return subprocess.run(command, check=False).returncode
+    return subprocess.run(command, check=False, env=environment).returncode
 
 
 def collect_runs(
@@ -527,10 +540,16 @@ def collect_runs(
     """Run the suite on each backend and read back its report.
 
     Raises:
-        EvidenceError: A run produced no usable report; nothing may be recorded from it.
+        EvidenceError: A backend's settings are missing, or a run produced no usable report
+            or no passing test; nothing may be recorded from it.
     """
     runs: list[BackendRun] = []
     for backend in backends:
+        identity, region = (
+            _rustfs_identity(matrix, environ)
+            if backend is Backend.RUSTFS
+            else _ovh_identity(environ)
+        )
         report = workdir / f"{backend.value}.xml"
         status = runner(backend, report)
         # 0 all passed, 1 some failed; anything else (interrupted, usage or collection
@@ -541,13 +560,34 @@ def collect_runs(
                 f"report {'present' if report.is_file() else 'missing'})"
             )
         outcomes = parse_junit(report.read_text(encoding="utf-8"), backend, source=report)
-        identity, region = (
-            _rustfs_identity(matrix, environ)
-            if backend is Backend.RUSTFS
-            else _ovh_identity(environ)
-        )
+        # A stack that is down or credentials the fixture refuses error every test: that
+        # says nothing about the SDK, and must not replace the evidence with FAIL cells.
+        if not any(outcome.passed for outcome in outcomes):
+            raise EvidenceError(
+                f"{backend.value}: no contract test passed; check the stack and the "
+                "backend's settings before recording"
+            )
         runs.append(BackendRun(backend, identity, region, outcomes))
     return runs
+
+
+def _installed_version(package: str) -> str:
+    """Return the version of a package installed in this environment, or "not installed"."""
+    try:
+        return metadata.version(package)
+    except metadata.PackageNotFoundError:
+        return "not installed"
+
+
+def environment_drift(
+    locked: Mapping[str, str], installed_version: Callable[[str], str]
+) -> list[str]:
+    """Return one line per SDK package whose installed version differs from the lock."""
+    return [
+        f"{package}: installed {installed}, lock {locked[package]}"
+        for package in SDK_PACKAGES
+        if (installed := installed_version(package)) != locked[package]
+    ]
 
 
 def record(
@@ -559,6 +599,7 @@ def record(
     dry_run: bool,
     runner: SuiteRunner = run_contract_suite,
     environ: Mapping[str, str] | None = None,
+    installed_version: Callable[[str], str] = _installed_version,
 ) -> Recording:
     """Run the contract suite on the backends and rewrite the matrix from the results.
 
@@ -566,8 +607,8 @@ def record(
         The rewritten matrix; written to `matrix_path` unless `dry_run`.
 
     Raises:
-        EvidenceError: An input cannot be read or a run produced no usable report; the
-            matrix is left unchanged.
+        EvidenceError: An input cannot be read, the installed SDK is not the locked one, or
+            a run produced no usable report; the matrix is left unchanged.
     """
     try:
         lock_text = lock_path.read_text(encoding="utf-8")
@@ -575,6 +616,14 @@ def record(
     except OSError as error:
         raise EvidenceError(f"reading {error.filename}: {error.strerror}") from error
     locked = read_locked_versions(lock_text, source=lock_path)
+    # The suite runs on this interpreter's SDK, and the cells name the lock's: the two
+    # must be the same, or a PASS would be credited to an SDK that never ran.
+    if mismatch := environment_drift(locked, installed_version):
+        raise EvidenceError(
+            "the installed SDK is not the locked one ("
+            + "; ".join(mismatch)
+            + "); run `make staging-sdk-evidence`, whose `uv run` syncs the environment"
+        )
     matrix = parse_matrix(matrix_text, source=matrix_path)
     with tempfile.TemporaryDirectory(prefix="sdk-evidence-") as workdir:
         runs = collect_runs(
@@ -637,6 +686,7 @@ def main(
     runner: SuiteRunner = run_contract_suite,
     lock_path: Path = DEFAULT_LOCK,
     matrix_path: Path = DEFAULT_MATRIX,
+    installed_version: Callable[[str], str] = _installed_version,
 ) -> int:
     """Run a subcommand and return its process exit status.
 
@@ -672,6 +722,7 @@ def main(
             today=today,
             dry_run=invocation.dry_run,
             runner=runner,
+            installed_version=installed_version,
         )
     except EvidenceError as error:
         _write("err", f"sdk evidence not recorded, {matrix_path} unchanged: {error}")

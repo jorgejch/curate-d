@@ -4,6 +4,7 @@ import json
 import subprocess
 from collections.abc import Callable, Sequence
 from datetime import date
+from importlib import metadata
 from pathlib import Path
 from xml.sax.saxutils import quoteattr
 
@@ -237,7 +238,12 @@ def _case(name: str, *, outcome: str = "pass", headers: dict[str, str] | None = 
         properties = (
             f'<properties><property name="{CHECKSUM_PROPERTY}" value={value}/></properties>'
         )
-    body = {"pass": "", "fail": '<failure message="boom"/>', "skip": '<skipped message="s"/>'}
+    body = {
+        "pass": "",
+        "fail": '<failure message="boom"/>',
+        "error": '<error message="fixture failed"/>',
+        "skip": '<skipped message="s"/>',
+    }
     return (
         f'<testcase classname="tests.integration.test_staging_contract" name="{full}">'
         f"{properties}{body[outcome]}</testcase>"
@@ -258,6 +264,11 @@ PASSING = _report(
 )
 
 Runner = Callable[[Backend, Path], int]
+
+
+def _installed(versions: dict[str, str]) -> Callable[[str], str]:
+    """Return an installed-version lookup that reports `versions`."""
+    return versions.__getitem__
 
 
 def _runner(reports: dict[Backend, str], status: int = 0) -> Runner:
@@ -293,7 +304,11 @@ def _record(
         *extra,
     ]
     status_code = sdk_evidence.main(
-        argv, runner=_runner(reports, status), lock_path=lock_path, matrix_path=matrix_path
+        argv,
+        runner=_runner(reports, status),
+        lock_path=lock_path,
+        matrix_path=matrix_path,
+        installed_version=_installed(lock),
     )
     return status_code, matrix_path, text
 
@@ -442,7 +457,7 @@ def test_record_fails_the_checksum_rows_when_the_checksum_test_fails(tmp_path: P
     "report",
     [
         _report(_case(CHECKSUM_TEST), _case("test_other")),
-        _report(_case(CHECKSUM_TEST, outcome="skip", headers=HEADERS)),
+        _report(_case(CHECKSUM_TEST, outcome="skip", headers=HEADERS), _case("test_other")),
         _report(_case("test_other")),
         _report(),
         "not xml",
@@ -476,8 +491,12 @@ def test_record_writes_nothing_when_pytest_was_interrupted(tmp_path: Path) -> No
     assert matrix_path.read_text(encoding="utf-8") == before
 
 
-def test_record_writes_nothing_when_one_of_two_backends_has_no_report(tmp_path: Path) -> None:
+def test_record_writes_nothing_when_one_of_two_backends_has_no_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """One backend without a report stops the whole recording, including the other one."""
+    monkeypatch.setenv("CURATE_D_TEST_OVH_BUCKET", "curate-d-test-contract")
+    monkeypatch.setenv("CURATE_D_TEST_OVH_ENDPOINT", "https://s3.example.test")
     matrix_path, lock_path = _write(tmp_path, _matrix(_sdk_row(OLD)), _lock(NEW))
     argv = ["record", "--backend", "rustfs", "--backend", "ovh", "--date", TODAY.isoformat()]
 
@@ -486,10 +505,92 @@ def test_record_writes_nothing_when_one_of_two_backends_has_no_report(tmp_path: 
         runner=_runner({Backend.RUSTFS: PASSING}),
         lock_path=lock_path,
         matrix_path=matrix_path,
+        installed_version=_installed(NEW),
     )
 
     assert status == EXIT_NOT_RUN
     assert matrix_path.read_text(encoding="utf-8") == _matrix(_sdk_row(OLD))
+
+
+@pytest.mark.parametrize("outcome", ["error", "skip"])
+def test_record_writes_nothing_when_no_contract_test_passed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], outcome: str
+) -> None:
+    """A run where every test errored or skipped (stack down, settings refused) is not evidence."""
+    report = _report(_case(CHECKSUM_TEST, outcome=outcome), _case("test_other", outcome=outcome))
+
+    status, matrix_path, before = _record(tmp_path, {Backend.RUSTFS: report}, status=1)
+
+    assert status == EXIT_NOT_RUN
+    assert matrix_path.read_text(encoding="utf-8") == before
+    assert "no contract test passed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("missing", ["CURATE_D_TEST_OVH_BUCKET", "CURATE_D_TEST_OVH_ENDPOINT"])
+def test_record_refuses_ovh_without_its_settings_before_running(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    missing: str,
+) -> None:
+    """OVH without its bucket or endpoint exits 2 before the suite runs, keeping its evidence."""
+    monkeypatch.setenv("CURATE_D_TEST_OVH_BUCKET", "curate-d-test-contract")
+    monkeypatch.setenv("CURATE_D_TEST_OVH_ENDPOINT", "https://s3.example.test")
+    monkeypatch.delenv(missing)
+    started: list[Backend] = []
+    matrix_path, lock_path = _write(tmp_path, _matrix(_sdk_row(OLD)), _lock(OLD))
+
+    def runner(backend: Backend, report: Path) -> int:
+        """Record that the suite started."""
+        started.append(backend)
+        return 0
+
+    status = sdk_evidence.main(
+        ["record", "--backend", "ovh"],
+        runner=runner,
+        lock_path=lock_path,
+        matrix_path=matrix_path,
+        installed_version=_installed(OLD),
+    )
+
+    assert status == EXIT_NOT_RUN
+    assert started == []
+    assert matrix_path.read_text(encoding="utf-8") == _matrix(_sdk_row(OLD))
+    assert missing in capsys.readouterr().err
+
+
+def test_record_refuses_an_environment_whose_sdk_is_not_the_locked_one(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An installed botocore other than the lock's exits 2 before the suite runs."""
+    started: list[Backend] = []
+    matrix_path, lock_path = _write(tmp_path, _matrix(_sdk_row(OLD)), _lock(NEW))
+
+    def runner(backend: Backend, report: Path) -> int:
+        """Record that the suite started."""
+        started.append(backend)
+        return 0
+
+    status = sdk_evidence.main(
+        ["record", "--backend", "rustfs"],
+        runner=runner,
+        lock_path=lock_path,
+        matrix_path=matrix_path,
+        installed_version=_installed({**NEW, "botocore": OLD["botocore"]}),
+    )
+
+    assert status == EXIT_NOT_RUN
+    assert started == []
+    assert matrix_path.read_text(encoding="utf-8") == _matrix(_sdk_row(OLD))
+    error = capsys.readouterr().err
+    assert "botocore: installed 1.40.61, lock 1.40.70" in error
+    assert "make staging-sdk-evidence" in error
+
+
+def test_installed_version_reads_this_environment() -> None:
+    """The default lookup reads installed metadata and names a missing package."""
+    assert sdk_evidence._installed_version("botocore") == metadata.version("botocore")
+    assert sdk_evidence._installed_version("no-such-package-xyz") == "not installed"
 
 
 def test_record_dry_run_prints_the_rows_and_leaves_the_file(
@@ -572,13 +673,18 @@ def test_run_contract_suite_invokes_pytest_on_the_contract_suite(
 
         returncode = 1
 
-    def fake_run(command: list[str], *, check: bool) -> Completed:
-        """Record the command instead of running pytest."""
+    environments: list[dict[str, str]] = []
+
+    def fake_run(command: list[str], *, check: bool, env: dict[str, str]) -> Completed:
+        """Record the command and environment instead of running pytest."""
         assert check is False
         calls.append(command)
+        environments.append(env)
         return Completed()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-k test_default_sdk_checksum_headers_are_accepted")
+    monkeypatch.setenv("CURATE_D_TEST_OVH_BUCKET", "kept")
 
     assert sdk_evidence.run_contract_suite(Backend.OVH, tmp_path / "ovh.xml") == 1
     command = calls[0]
@@ -586,3 +692,6 @@ def test_run_contract_suite_invokes_pytest_on_the_contract_suite(
     assert "--staging-backend=ovh" in command
     assert f"--junitxml={tmp_path / 'ovh.xml'}" in command
     assert "--no-cov" in command
+    # An inherited selection would run part of the suite; the rest of the environment stays.
+    assert "PYTEST_ADDOPTS" not in environments[0]
+    assert environments[0]["CURATE_D_TEST_OVH_BUCKET"] == "kept"
