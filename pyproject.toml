@@ -34,15 +34,15 @@ dependencies = [
     # The `otel` extra supplies opentelemetry-instrumentation-logging: DBOS attaches its
     # log handler from it at construction when `enable_otlp` is on and Logfire has
     # installed a logger provider, and fails to construct without it.
-    "dbos[otel]>=3.3,<3.4",
+    "dbos[otel]==3.4.0",
     "sqlalchemy~=2.1.1",
     "psycopg[binary]~=3.3.6",
     "alembic~=1.20",
     # Control plane API
     "fastapi==0.162.0",
     "uvicorn[standard]~=0.54.0",
-    "pydantic~=2.13",
-    "pydantic-settings~=2.15",
+    "pydantic==2.14.2",
+    "pydantic-settings==2.16.2",
     # Provider APIs and the rclone remote-control API
     "httpx~=0.28",
     # Authenticated symmetric encryption for stored provider credentials
@@ -50,26 +50,26 @@ dependencies = [
     # Structured logging with credential redaction
     "structlog~=26.1",
     # Request tracing for the control plane API, exported to Logfire when a token is present
-    "logfire[fastapi]~=5.1",
+    "logfire[fastapi]==5.4.0",
     # Media inspection and perceptual fingerprinting
     "pillow>=12.3,<14.0",
     "pillow-heif~=1.8.0",   # HEIC/HEIF, the default format for Apple photo libraries
     "imagehash~=4.3",
     "numpy~=2.5",
     # Document text extraction for the local classification tier
-    "pypdf>=6.19,<6.22",
+    "pypdf==6.21.4",
     "pytesseract~=0.3.13", # requires the tesseract binary on PATH
     # Remote classification tier. OpenRouter exposes an OpenAI-compatible API,
     # so the model is selected by configuration rather than by client choice.
-    "openai==3.40.0",
+    "openai==3.42.0",
     # openai 3.x runs on httpx2 rather than httpx; imported directly to inject a transport.
-    "httpx2~=2.13",
+    "httpx2==2.16.0",
     # S3 content staging: RustFS locally, OVH Standard S3 in the cluster. Patch releases
     # may float; the minor is pinned because a new minor can move checksum and streaming
     # defaults underneath the wire-behavior evidence, so it needs re-verifying against both
     # backends first. uv.lock fixes the exact release.
     "aioboto3~=15.5.0",
-    "pyrefly~=1.3.2",
+    "pyrefly==1.4.0",
 ]
 
 # Deferred:

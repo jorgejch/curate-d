@@ -10,7 +10,7 @@ ops/
   postgres/initdb/     extensions for the local Compose stack
   rustfs/              staging bucket, scoped identities, and their provisioning
   reset/               wipe a local or Kubernetes environment back to an empty ledger and bucket prefix (docs/reset.md)
-  staging-compatibility.md   RustFS/OVH staging evidence matrix
+  staging-compatibility.md   RustFS/OVH staging evidence matrix (SDK rows: make staging-sdk-evidence)
 ```
 
 | Concern | Where |
@@ -111,7 +111,18 @@ MinIO, whose upstream is archived; the reasons and engine notes are in
 make stack-up          # brings up RustFS and runs provisioning
 make staging-init      # re-run provisioning alone, printing each step
 make lifecycle-check   # observe expiration and abort reclamation (rows 30/31) in seconds
+make staging-sdk-evidence   # after an S3 SDK move: re-record matrix rows 32-35 (needs make test-stack)
 ```
+
+The [evidence matrix](staging-compatibility.md) names the S3 SDK versions its rows were
+earned under, and a unit test fails when `uv.lock` resolves different ones.
+`make staging-sdk-evidence` runs the shared contract suite on each backend in `BACKENDS`
+(default `rustfs`; add `ovh` with the `CURATE_D_TEST_OVH_*` settings) and rewrites the
+`SDK` row and rows 32–35 from the run. A backend left out reads `PENDING`. `DRY_RUN=1` prints
+the rewritten rows without writing. Exit 1 means a test failed and its `FAIL` cells were
+written, also when every test failed against a backend that answered. Exit 2 means nothing
+was recorded: the endpoint did not accept a connection, a failure never reached the backend,
+the backend's settings were missing, or the installed SDK is not the locked one.
 
 `ops/rustfs/initialize.sh`, run by `rustfs-init` with RustFS's own CLI `rc`,
 creates the bucket (`CURATE_D_STAGING_S3_BUCKET`, default `curate-d-staging`), sets SSE-S3
