@@ -594,19 +594,6 @@ def _parse_date(value: str) -> date:
         raise argparse.ArgumentTypeError(f"not a YYYY-MM-DD date: {value!r}") from error
 
 
-def _working_tree_path(value: str) -> Path:
-    """Resolve a `--lock` or `--matrix` value, refusing one outside the working directory.
-
-    The command reads and rewrites these files, so a path that resolves elsewhere, through
-    `..` or a symlink, is refused before anything is opened.
-    """
-    base = Path.cwd().resolve()
-    path = (base / value).resolve()
-    if not path.is_relative_to(base):
-        raise argparse.ArgumentTypeError(f"{value!r} is outside the working directory {base}")
-    return path
-
-
 def _parser() -> argparse.ArgumentParser:
     """Build the command-line parser for both subcommands."""
     parser = argparse.ArgumentParser(
@@ -619,8 +606,6 @@ def _parser() -> argparse.ArgumentParser:
         ("record", "Run the contract suite and rewrite the SDK row and rows 32-35."),
     ):
         command = commands.add_parser(name, help=summary, description=summary)
-        command.add_argument("--lock", type=_working_tree_path, default=str(DEFAULT_LOCK))
-        command.add_argument("--matrix", type=_working_tree_path, default=str(DEFAULT_MATRIX))
         if name == "record":
             command.add_argument(
                 "--backend",
@@ -646,8 +631,17 @@ def _write(stream: str, text: str) -> None:
     (sys.stdout if stream == "out" else sys.stderr).write(text + "\n")
 
 
-def main(argv: Sequence[str] | None = None, *, runner: SuiteRunner = run_contract_suite) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    runner: SuiteRunner = run_contract_suite,
+    lock_path: Path = DEFAULT_LOCK,
+    matrix_path: Path = DEFAULT_MATRIX,
+) -> int:
     """Run a subcommand and return its process exit status.
+
+    The lock and the matrix are the repository's, relative to the working directory; the
+    command line takes no path, so it cannot point the matrix write at another file.
 
     Returns:
         `check`: 0 when the lock and matrix agree, 1 on drift or an unreadable input.
@@ -655,8 +649,6 @@ def main(argv: Sequence[str] | None = None, *, runner: SuiteRunner = run_contrac
         failed (the FAIL cells are written), 2 when nothing could be recorded.
     """
     invocation = _parser().parse_args(argv)
-    lock_path: Path = invocation.lock
-    matrix_path: Path = invocation.matrix
     if invocation.command == "check":
         try:
             drift = check(lock_path, matrix_path)

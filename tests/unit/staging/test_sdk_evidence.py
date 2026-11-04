@@ -98,12 +98,6 @@ def _lock(versions: dict[str, str], *, drop: str | None = None) -> str:
     return "version = 1\n\n" + "\n".join(entries)
 
 
-@pytest.fixture(autouse=True)
-def _in_tmp_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Run each test from its tmp_path, the working directory `--lock`/`--matrix` stay in."""
-    monkeypatch.chdir(tmp_path)
-
-
 def _write(tmp_path: Path, matrix: str, lock: str) -> tuple[Path, Path]:
     """Write the fixture matrix and lock, returning their paths."""
     matrix_path, lock_path = tmp_path / "matrix.md", tmp_path / "uv.lock"
@@ -132,7 +126,7 @@ def test_check_agrees_when_lock_and_matrix_name_the_same_sdk(tmp_path: Path) -> 
     before = matrix_path.read_bytes()
 
     assert check(lock_path, matrix_path) == []
-    assert sdk_evidence.main(["check", "--lock", str(lock_path), "--matrix", str(matrix_path)]) == 0
+    assert sdk_evidence.main(["check"], lock_path=lock_path, matrix_path=matrix_path) == 0
     assert matrix_path.read_bytes() == before
 
 
@@ -144,7 +138,7 @@ def test_check_names_a_drifted_package_with_both_versions(
     matrix_path, lock_path = _write(tmp_path, _matrix(_sdk_row(OLD)), lock)
 
     assert check(lock_path, matrix_path) == ["botocore: matrix 1.40.61, lock 1.40.62"]
-    status = sdk_evidence.main(["check", "--lock", str(lock_path), "--matrix", str(matrix_path)])
+    status = sdk_evidence.main(["check"], lock_path=lock_path, matrix_path=matrix_path)
     assert status == EXIT_CHECK_FAILED
     error = capsys.readouterr().err
     assert "botocore: matrix 1.40.61, lock 1.40.62" in error
@@ -159,7 +153,7 @@ def test_check_fails_naming_the_matrix_when_the_sdk_row_is_missing(
 
     with pytest.raises(EvidenceError, match=r"matrix\.md: no `\| SDK \|` row"):
         check(lock_path, matrix_path)
-    status = sdk_evidence.main(["check", "--lock", str(lock_path), "--matrix", str(matrix_path)])
+    status = sdk_evidence.main(["check"], lock_path=lock_path, matrix_path=matrix_path)
     assert status == EXIT_CHECK_FAILED
     assert "matrix.md" in capsys.readouterr().err
 
@@ -296,13 +290,12 @@ def _record(
         *(backends or ["--backend", "rustfs"]),
         "--date",
         TODAY.isoformat(),
-        "--lock",
-        str(lock_path),
-        "--matrix",
-        str(matrix_path),
         *extra,
     ]
-    return sdk_evidence.main(argv, runner=_runner(reports, status)), matrix_path, text
+    status_code = sdk_evidence.main(
+        argv, runner=_runner(reports, status), lock_path=lock_path, matrix_path=matrix_path
+    )
+    return status_code, matrix_path, text
 
 
 def _cells(text: str, number: str) -> tuple[str, str]:
@@ -486,10 +479,14 @@ def test_record_writes_nothing_when_pytest_was_interrupted(tmp_path: Path) -> No
 def test_record_writes_nothing_when_one_of_two_backends_has_no_report(tmp_path: Path) -> None:
     """One backend without a report stops the whole recording, including the other one."""
     matrix_path, lock_path = _write(tmp_path, _matrix(_sdk_row(OLD)), _lock(NEW))
-    argv = ["record", "--backend", "rustfs", "--backend", "ovh", "--lock", str(lock_path)]
-    argv += ["--matrix", str(matrix_path), "--date", TODAY.isoformat()]
+    argv = ["record", "--backend", "rustfs", "--backend", "ovh", "--date", TODAY.isoformat()]
 
-    status = sdk_evidence.main(argv, runner=_runner({Backend.RUSTFS: PASSING}))
+    status = sdk_evidence.main(
+        argv,
+        runner=_runner({Backend.RUSTFS: PASSING}),
+        lock_path=lock_path,
+        matrix_path=matrix_path,
+    )
 
     assert status == EXIT_NOT_RUN
     assert matrix_path.read_text(encoding="utf-8") == _matrix(_sdk_row(OLD))
@@ -511,46 +508,24 @@ def test_record_dry_run_prints_the_rows_and_leaves_the_file(
     assert "Review by hand" in output
 
 
-def test_relative_paths_resolve_against_the_working_directory(tmp_path: Path) -> None:
-    """The default `uv.lock` and a relative `--matrix` name files in the working directory."""
-    _write(tmp_path, _matrix(_sdk_row(OLD)), _lock(OLD))
-
-    assert sdk_evidence.main(["check", "--matrix", "matrix.md"]) == EXIT_OK
-
-
-@pytest.mark.parametrize("command", ["check", "record"])
-@pytest.mark.parametrize("option", ["--lock", "--matrix"])
-@pytest.mark.parametrize("escape", ["dotdot", "absolute", "symlink"])
-def test_a_path_outside_the_working_directory_is_refused(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    monkeypatch: pytest.MonkeyPatch,
-    command: str,
-    option: str,
-    escape: str,
+def test_check_reads_the_repository_files_from_the_working_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A path resolving outside the working directory exits 2 before any file is opened."""
-    work = tmp_path / "work"
-    work.mkdir()
-    monkeypatch.chdir(work)
-    outside = tmp_path / "outside.md"
-    outside.write_text("untouched", encoding="utf-8")
-    (work / "link.md").symlink_to(outside)
-    value = {"dotdot": "../outside.md", "absolute": str(outside), "symlink": "link.md"}[escape]
-    argv = [command, option, value]
-    if command == "record":
-        argv += ["--backend", "rustfs"]
+    """Without paths, `check` reads uv.lock and ops/staging-compatibility.md from the cwd."""
+    matrix_path, _ = _write(tmp_path, _matrix(_sdk_row(OLD)), _lock(OLD))
+    (tmp_path / "ops").mkdir()
+    matrix_path.rename(tmp_path / "ops" / "staging-compatibility.md")
+    monkeypatch.chdir(tmp_path)
 
-    def runner(*_: object) -> int:
-        """Fail the test if the contract suite is started."""
-        raise AssertionError("the suite ran")
+    assert sdk_evidence.main(["check"]) == EXIT_OK
 
+
+@pytest.mark.parametrize("option", ["--lock", "--matrix"])
+def test_the_command_line_takes_no_path(option: str) -> None:
+    """A path on the command line is a usage error: the files are always the repository's."""
     with pytest.raises(SystemExit) as raised:
-        sdk_evidence.main(argv, runner=runner)
-
+        sdk_evidence.main(["check", option, "elsewhere"])
     assert raised.value.code == 2
-    assert "outside the working directory" in capsys.readouterr().err
-    assert outside.read_text(encoding="utf-8") == "untouched"
 
 
 def test_record_rejects_a_malformed_date(tmp_path: Path) -> None:
@@ -576,10 +551,14 @@ def test_record_reports_an_unreadable_matrix(tmp_path: Path) -> None:
     """A missing matrix is a run that recorded nothing."""
     lock_path = tmp_path / "uv.lock"
     lock_path.write_text(_lock(OLD), encoding="utf-8")
-    argv = ["record", "--backend", "rustfs", "--lock", str(lock_path)]
-    argv += ["--matrix", str(tmp_path / "absent.md")]
+    status = sdk_evidence.main(
+        ["record", "--backend", "rustfs"],
+        runner=_runner({Backend.RUSTFS: PASSING}),
+        lock_path=lock_path,
+        matrix_path=tmp_path / "absent.md",
+    )
 
-    assert sdk_evidence.main(argv, runner=_runner({Backend.RUSTFS: PASSING})) == EXIT_NOT_RUN
+    assert status == EXIT_NOT_RUN
 
 
 def test_run_contract_suite_invokes_pytest_on_the_contract_suite(
