@@ -178,3 +178,19 @@ Local run, 2026-11-03 PT, after `dev` moved to `8746082` (PR #135):
   tests passed on RustFS, the checksum headers read from the JUnit report, nothing written;
   `check` reports the SDK row matches `uv.lock` (botocore 1.40.61). pytest warns that
   `record_property` is incompatible with `junit_family` xunit2, but still writes the property.
+
+CI on PR #137 (first push, `c9650eb`): `Checks`, `Integration tests` (five shards and the
+application boot), CodeQL, Gitar and Greptile green. Task 1.3: no failure attributed, so no
+package is rolled back and no code change was needed for the updates.
+
+SonarCloud's quality gate failed on the new code's security rating: five S8707 findings
+(`--lock`/`--matrix` reach a file read and the matrix write unchecked), plus S3776
+(`_sdk_sensitive_rows`' cognitive complexity) and S6019 (a lazy quantifier). Fixed in
+`refactor(staging)` and `fix(staging)` (decision 4 now confines both paths to the working
+directory); `make check` after them: 2193 unit tests passed, coverage 85.48%.
+
+Final diff against `dev` (task 4.1): 23 files, 2000 insertions, 174 deletions, all in the
+streams' files: the vendored skill and `skills-lock.json`, `pyproject.toml` and `uv.lock`,
+`sdk_evidence.py` and its two unit test modules, `Makefile`, `ops/README.md`,
+`ops/staging-compatibility.md`, `README.md`, `openspec/config.yaml`, `CLAUDE.md` and this
+change directory. `openspec validate absorb-package-updates-2026-10 --strict` passes.

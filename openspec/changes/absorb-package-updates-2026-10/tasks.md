@@ -11,9 +11,9 @@ for all three.
 
 ## 1. Verify the bump; fix or roll back
 
-- [ ] 1.1 Commit the working-tree `pyproject.toml` and `uv.lock` to the change branch and open the pull request against `dev`; verify `uv lock --check` passes and CI's `integration.yml` runs (the paths filter matches the lock) rather than reporting both jobs skipped.
+- [x] 1.1 Commit the working-tree `pyproject.toml` and `uv.lock` to the change branch and open the pull request against `dev`; verify `uv lock --check` passes and CI's `integration.yml` runs (the paths filter matches the lock) rather than reporting both jobs skipped.
 - [x] 1.2 Reproduce on a fresh stack, as `CLAUDE.md` "Integration tests" requires: `make test-stack` then `make test-integration GROUP=1..4` (or the whole suite) and `make check`; verify every job is green or record each failing test id in this task's line. Ask the reviewer for the failing tests they observed if the run is green and they have a run to point at.
-- [ ] 1.3 For each failure from 1.2 or CI: pin the suspected package alone back to its previous version (design.md, decision 1), re-run the failing test to attribute it, then either fix the code and tests (fix ≤ 400 changed lines, `git diff --stat`) or keep the rollback pin with a `pyproject.toml` comment naming the incompatibility and upstream issue; verify the attributed test passes and `make check` is green. A `dbos` rollback also reverts tasks 2.1–2.4 in the same commit. Record each decision under "Outcome" in design.md. Skip this task, writing "no failure attributed" there, when 1.2 and CI are green.
+- [x] 1.3 For each failure from 1.2 or CI: pin the suspected package alone back to its previous version (design.md, decision 1), re-run the failing test to attribute it, then either fix the code and tests (fix ≤ 400 changed lines, `git diff --stat`) or keep the rollback pin with a `pyproject.toml` comment naming the incompatibility and upstream issue; verify the attributed test passes and `make check` is green. A `dbos` rollback also reverts tasks 2.1–2.4 in the same commit. Record each decision under "Outcome" in design.md. Skip this task, writing "no failure attributed" there, when 1.2 and CI are green.
 
 ## 2. Refresh the DBOS skill and the stated DBOS version
 
@@ -33,7 +33,7 @@ for all three.
 
 ## 4. Integration check
 
-- [ ] 4.1 With all streams merged on the branch: `make check` green, `make test-integration` green on a `make test-stack` stack, `openspec validate absorb-package-updates-2026-10` passes, and `git diff --stat dev` lists only the files the three streams own; verify and record the final counts in design.md's "Outcome".
+- [x] 4.1 With all streams merged on the branch: `make check` green, `make test-integration` green on a `make test-stack` stack, `openspec validate absorb-package-updates-2026-10` passes, and `git diff --stat dev` lists only the files the three streams own; verify and record the final counts in design.md's "Outcome".
 
 ## Workflow follow-up
 
