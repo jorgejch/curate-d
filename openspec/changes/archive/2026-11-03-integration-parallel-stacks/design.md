@@ -121,15 +121,24 @@ exits 0 only when every shard passes. Otherwise it exits 1 and names each failed
 On SIGINT or SIGTERM, the runner terminates the running child processes. Then it runs `down -v`
 for every shard project it started, and exits 130 (SIGINT) or 143 (SIGTERM). A teardown or
 logs command that is already running when the signal lands is not terminated: it finishes. A
-second SIGINT
-during teardown is ignored. Step 1 of the next run removes anything that a hard kill (SIGKILL)
-leaves.
+second SIGINT during teardown is ignored. Step 1 of the next run removes anything that a hard
+kill (SIGKILL) leaves.
 
 ### D7. Shard count
 
 `SPLITS` keeps its one Makefile default (4), which `test_integration_workflow.py` pins to CI's
 default. The runner accepts an integer from 1 to 32, the range CI's plan accepts. It refuses any
 other value before it starts a stack.
+
+### D8. One run at a time
+
+Every run uses the same shard projects, and step 1 of each shard is `down -v`. A second run
+would therefore remove the stacks of a run still in progress. Before it starts anything, the
+runner takes an exclusive `flock` on `curate-d-integration-parallel.lock` in Git's common
+directory, which every worktree of the clone shares. If another run holds it, the runner exits
+1 and names the file. The kernel releases the lock when the run ends or is killed, so step 1 of
+the next run still removes what a SIGKILL leaves. A checkout outside Git keeps the file in its
+`.integration-runs/`. Runs from two separate clones are not excluded.
 
 ## Risks / Trade-offs
 

@@ -386,6 +386,20 @@ refuse an invalid `SPLITS` before any stack starts.
 - **WHEN** the developer interrupts the target while shards run
 - **THEN** the running test processes stop, every shard stack it started is removed, and the target exits non-zero
 
+### Requirement: One local parallel run goes at a time per clone
+`make test-integration-parallel` MUST refuse to start, before any stack starts, while another
+run from any worktree of the same clone is in progress, and MUST name the lock that run holds.
+A run that ended, or was killed, MUST NOT keep the next one from starting.
+
+#### Scenario: A run is already in progress
+- **WHEN** a run is in progress and a developer starts another from any worktree of the same clone
+- **THEN** the second run fails naming the lock file, before any stack starts
+- **AND** the first run's shard stacks are unchanged
+
+#### Scenario: The previous run was killed
+- **WHEN** a run was stopped with SIGKILL and a developer starts a new one
+- **THEN** the new run starts, and its reset steps remove what the killed run left
+
 ### Requirement: The declared paths cover everything the suite depends on
 The declared paths MUST cover every file the suite imports, builds, mounts, boots or
 reads, including files a tool loads implicitly once they are added. A unit test MUST pin
