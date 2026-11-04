@@ -348,7 +348,9 @@ class ShardResult:
         if self.interrupted:
             return (self.plan.directory,)
         if self.failed_step in (None, "pytest"):
-            return (self.plan.pytest_log, self.plan.junit)
+            tests = (self.plan.pytest_log, self.plan.junit)
+            # A failed teardown wrote its output to stack.log.
+            return tests if self.torn_down else (*tests, self.plan.stack_log)
         return (self.plan.stack_log,)
 
 

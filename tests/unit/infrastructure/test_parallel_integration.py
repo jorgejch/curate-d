@@ -393,6 +393,16 @@ def test_a_failed_teardown_fails_the_run_and_says_how_to_clean_up() -> None:
     assert "Failed shards: 2." in output
 
 
+@pytest.mark.parametrize("pytest_code", [0, 1])
+def test_a_failed_teardown_names_the_stack_log(pytest_code: int) -> None:
+    """The teardown's output is in stack.log, so the summary names it beside pytest's files."""
+    code, _, output = _execute(2, {(2, "pytest"): pytest_code, (2, "teardown"): 1})
+    shard = _plans(2)[1]
+    assert code == 1
+    assert str(shard.stack_log) in output
+    assert str(shard.pytest_log) in output
+
+
 def test_a_command_that_cannot_start_fails_its_shard_with_the_reason() -> None:
     """Docker missing fails the shard at its first step and says why; others are unaffected."""
     missing = FileNotFoundError(2, "No such file or directory", "docker")
