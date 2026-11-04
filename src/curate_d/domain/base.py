@@ -61,9 +61,8 @@ class DomainModel(BaseModel):
         """
         super().__setstate__(state)
         cls = type(self)
-        for key in list(self.__dict__):
-            if key not in cls.model_fields:
-                del self.__dict__[key]
+        for key in self.__dict__.keys() - cls.model_fields.keys():
+            del self.__dict__[key]
         missing: list[str] = []
         for name, field in cls.model_fields.items():
             if name in self.__dict__:
