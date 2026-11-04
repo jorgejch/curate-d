@@ -85,6 +85,10 @@ See proposal.md, "Why". Observed state on `dev` `62068e5` with the bumped lock i
    `reset.py` only lives there because it runs inside the image.
 
 4. **Two subcommands, one parser.**
+   - `--lock` and `--matrix` resolve against the working directory (the repository root,
+     where the Make target runs) and are refused, exit 2 before any file is opened, when
+     they resolve outside it through `..`, an absolute path or a symlink: `record` rewrites
+     the matrix path it is given.
    - `check [--lock uv.lock] [--matrix ops/staging-compatibility.md]`: reads the lock with
      `tomllib` (`package` entries named `aioboto3`, `aiobotocore`, `botocore`), parses the
      matrix's `| SDK |` row with a regex over the three backtick-quoted names, prints each

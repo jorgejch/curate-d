@@ -98,6 +98,12 @@ def _lock(versions: dict[str, str], *, drop: str | None = None) -> str:
     return "version = 1\n\n" + "\n".join(entries)
 
 
+@pytest.fixture(autouse=True)
+def _in_tmp_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run each test from its tmp_path, the working directory `--lock`/`--matrix` stay in."""
+    monkeypatch.chdir(tmp_path)
+
+
 def _write(tmp_path: Path, matrix: str, lock: str) -> tuple[Path, Path]:
     """Write the fixture matrix and lock, returning their paths."""
     matrix_path, lock_path = tmp_path / "matrix.md", tmp_path / "uv.lock"
@@ -503,6 +509,48 @@ def test_record_dry_run_prints_the_rows_and_leaves_the_file(
     assert "would rewrite 5 line(s)" in output
     assert f"7: {_sdk_row(NEW)}" in output
     assert "Review by hand" in output
+
+
+def test_relative_paths_resolve_against_the_working_directory(tmp_path: Path) -> None:
+    """The default `uv.lock` and a relative `--matrix` name files in the working directory."""
+    _write(tmp_path, _matrix(_sdk_row(OLD)), _lock(OLD))
+
+    assert sdk_evidence.main(["check", "--matrix", "matrix.md"]) == EXIT_OK
+
+
+@pytest.mark.parametrize("command", ["check", "record"])
+@pytest.mark.parametrize("option", ["--lock", "--matrix"])
+@pytest.mark.parametrize("escape", ["dotdot", "absolute", "symlink"])
+def test_a_path_outside_the_working_directory_is_refused(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    option: str,
+    escape: str,
+) -> None:
+    """A path resolving outside the working directory exits 2 before any file is opened."""
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    outside = tmp_path / "outside.md"
+    outside.write_text("untouched", encoding="utf-8")
+    (work / "link.md").symlink_to(outside)
+    value = {"dotdot": "../outside.md", "absolute": str(outside), "symlink": "link.md"}[escape]
+    argv = [command, option, value]
+    if command == "record":
+        argv += ["--backend", "rustfs"]
+
+    def runner(*_: object) -> int:
+        """Fail the test if the contract suite is started."""
+        raise AssertionError("the suite ran")
+
+    with pytest.raises(SystemExit) as raised:
+        sdk_evidence.main(argv, runner=runner)
+
+    assert raised.value.code == 2
+    assert "outside the working directory" in capsys.readouterr().err
+    assert outside.read_text(encoding="utf-8") == "untouched"
 
 
 def test_record_rejects_a_malformed_date(tmp_path: Path) -> None:
