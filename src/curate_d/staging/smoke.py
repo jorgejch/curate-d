@@ -181,6 +181,47 @@ async def _attempt(
     return SmokeCheckOutcome(check, not expect_denial, "request succeeded")
 
 
+async def _read_back(
+    stores: SmokeStores, staged: StagedObject, target: StagedObject
+) -> tuple[SmokeCheckOutcome, SmokeCheckOutcome]:
+    """Read the writer probe back as reader and judge its integrity from that read."""
+    body = io.BytesIO()
+    retrieved = await _attempt(SmokeCheck.READER_GET, lambda: stores.reader.download(staged, body))
+    integrity = (
+        retrieved.passed
+        and body.getvalue() == _PAYLOAD
+        and staged.size_bytes == len(_PAYLOAD)
+        and staged.sha256 == target.sha256
+    )
+    return retrieved, SmokeCheckOutcome(
+        SmokeCheck.INTEGRITY,
+        integrity,
+        "size and SHA-256 match" if integrity else "integrity unproven or mismatched",
+    )
+
+
+async def _reader_write_denied(
+    stores: SmokeStores,
+    denied_target: StagedObject,
+    reader_upload: Callable[[], Awaitable[None]],
+) -> SmokeCheckOutcome:
+    """Attempt the reader PUT and confirm as writer that no object came of it."""
+    write_denied = await _attempt(SmokeCheck.READER_WRITE_DENIED, reader_upload, expect_denial=True)
+    if not write_denied.passed:
+        return write_denied
+    # upload() includes HEAD verification. A denied HEAD after an accepted PUT
+    # must not be mistaken for a denied write, so inspect that key as writer.
+    try:
+        await stores.writer.download(denied_target, io.BytesIO())
+    except StagedEntryMissingError:
+        return write_denied
+    except Exception:
+        return SmokeCheckOutcome(
+            SmokeCheck.READER_WRITE_DENIED, False, "reader PUT absence could not be verified"
+        )
+    return SmokeCheckOutcome(SmokeCheck.READER_WRITE_DENIED, False, "reader PUT created an object")
+
+
 async def run_smoke_checks(stores: SmokeStores) -> SmokeReport:
     """Exercise every grant and denial and clean up even after failed requests.
 
@@ -219,51 +260,14 @@ async def run_smoke_checks(stores: SmokeStores) -> SmokeReport:
         uploaded = await _attempt(SmokeCheck.WRITER_UPLOAD, upload)
         outcomes.append(uploaded)
         if uploaded.passed:
-            body = io.BytesIO()
-            retrieved = await _attempt(
-                SmokeCheck.READER_GET, lambda: stores.reader.download(staged, body)
-            )
-            outcomes.append(retrieved)
-            integrity = (
-                retrieved.passed
-                and body.getvalue() == _PAYLOAD
-                and staged.size_bytes == len(_PAYLOAD)
-                and staged.sha256 == target.sha256
-            )
-            outcomes.append(
-                SmokeCheckOutcome(
-                    SmokeCheck.INTEGRITY,
-                    integrity,
-                    "size and SHA-256 match" if integrity else "integrity unproven or mismatched",
-                )
-            )
+            outcomes.extend(await _read_back(stores, staged, target))
         else:
             outcomes.extend(
                 SmokeCheckOutcome(check, False, "not run: writer upload failed")
                 for check in (SmokeCheck.READER_GET, SmokeCheck.INTEGRITY)
             )
 
-        write_denied = await _attempt(
-            SmokeCheck.READER_WRITE_DENIED, reader_upload, expect_denial=True
-        )
-        if write_denied.passed:
-            # upload() includes HEAD verification. A denied HEAD after an accepted PUT
-            # must not be mistaken for a denied write, so inspect that key as writer.
-            try:
-                await stores.writer.download(denied_target, io.BytesIO())
-            except StagedEntryMissingError:
-                pass
-            except Exception:
-                write_denied = SmokeCheckOutcome(
-                    SmokeCheck.READER_WRITE_DENIED,
-                    False,
-                    "reader PUT absence could not be verified",
-                )
-            else:
-                write_denied = SmokeCheckOutcome(
-                    SmokeCheck.READER_WRITE_DENIED, False, "reader PUT created an object"
-                )
-        outcomes.append(write_denied)
+        outcomes.append(await _reader_write_denied(stores, denied_target, reader_upload))
         # Probe the existing writer object before deleting it, so a backend's absent-key
         # handling cannot hide an overly broad reader delete grant.
         outcomes.append(
