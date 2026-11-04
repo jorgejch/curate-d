@@ -935,6 +935,23 @@ async def test_an_abort_failing_outside_the_sdk_still_reports_the_residue(
     assert isinstance(failure.value.__cause__, StagingTransientError)
 
 
+class _Shutdown(BaseException):
+    """Stand in for an interpreter-level signal that is not an abort failure."""
+
+
+async def test_a_non_error_base_exception_during_the_abort_propagates_unwrapped(
+    store: S3StagingObjectStore, client: FakeS3Client
+) -> None:
+    """A shutdown signal is not an abort failure; wrapping it would swallow the exit."""
+    client.errors["complete_multipart_upload"] = _client_error(
+        "InternalError", "CompleteMultipartUpload"
+    )
+    client.errors["abort_multipart_upload"] = _Shutdown()
+
+    with pytest.raises(_Shutdown):
+        await store.upload(_target(10), io.BytesIO(b"0123456789"), declared_max_bytes=16)
+
+
 async def test_a_second_cancellation_does_not_abandon_the_multipart_abort(
     client: FakeS3Client,
 ) -> None:

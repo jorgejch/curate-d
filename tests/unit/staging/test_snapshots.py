@@ -428,6 +428,33 @@ async def test_another_local_failure_is_unreadable_content(
             pass
 
 
+async def test_a_scratch_open_that_fails_is_a_local_failure(
+    reader: LocalSnapshotReader,
+    index: FakeIndex,
+    store: FakeObjectStore,
+    scratch: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A volume that refuses the create is named as scratch exhaustion, not a download."""
+    key = stage(index, store, b"no room to create")
+    real_open = Path.open
+
+    def refuse_create(path: Path, mode: str = "r") -> BinaryIO:
+        """Fail only the exclusive create the download writes into."""
+        if mode == "xb":
+            raise OSError(errno.EDQUOT, "Disk quota exceeded")
+        return cast("BinaryIO", real_open(path, mode))
+
+    monkeypatch.setattr(Path, "open", refuse_create)
+
+    with pytest.raises(StagingCapacityExhaustedError, match="ran out of room"):
+        async with reader.open(key):
+            pass
+
+    assert store.downloads == []
+    assert scratch_files(scratch) == []
+
+
 async def test_a_failed_cleanup_unlink_does_not_leak_the_read_handle(
     reader: LocalSnapshotReader,
     index: FakeIndex,

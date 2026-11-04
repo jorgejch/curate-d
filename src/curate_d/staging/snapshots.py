@@ -19,6 +19,7 @@ its handle closes — not until its download finishes — and that bound covers 
 concurrent reader in the process.
 """
 
+import asyncio
 import errno
 import hashlib
 import threading
@@ -260,7 +261,8 @@ class LocalSnapshotReader:
             # open, so unlinking only removes the name: the bytes stay reachable through
             # that descriptor and through nothing else.
             cleanup.callback(path.unlink, missing_ok=True)
-            with path.open("xb") as sink:
+            sink = await asyncio.to_thread(path.open, "xb")
+            with sink:
                 await self._store.download(obj, sink)
             return path
 
