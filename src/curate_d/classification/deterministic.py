@@ -115,6 +115,40 @@ def date_from_name(name: str, local_timezone: str | None) -> datetime | None:
         return None
 
 
+def _captured_at_source(metadata: EmbeddedMetadata, captured: datetime | None) -> str | None:
+    """Name where the capture time came from: the metadata, the file name, or nowhere."""
+    if metadata.captured_at:
+        return "metadata"
+    if captured:
+        return "name"
+    return None
+
+
+def _photo_rule(names: list[str], metadata: EmbeddedMetadata) -> tuple[str | None, float, str]:
+    """Apply the photo rules in order: screenshot name, then EXIF camera, then camera name."""
+    if any(_SCREENSHOT.search(name) for name in names):
+        return "Screenshots", 0.9, "screenshot name"
+    if metadata.camera:
+        return "Camera", 0.95, "camera exif"
+    if any(_CAMERA_NAME.search(name) for name in names):
+        return "Camera", 0.85, "camera name"
+    return None, 0.6, "image without provenance"
+
+
+def _video_rule(names: list[str]) -> tuple[str | None, float, str]:
+    """Apply the video rule: a camera name is the only provenance a video carries here."""
+    if any(_CAMERA_NAME.search(name) for name in names):
+        return "Camera", 0.85, "camera name"
+    return None, 0.7, "video without provenance"
+
+
+def _audio_rule(names: list[str]) -> tuple[str | None, float, str]:
+    """Apply the audio rule: a recording is named like one, anything else is music."""
+    if any(_RECORDING.search(name) for name in names):
+        return "Recordings", 0.85, "recording name"
+    return "Music", 0.75, "audio file"
+
+
 def classify_deterministic(item: ClassificationInput, *, local_timezone: str | None) -> TierResult:
     """Facts established from type, extension, metadata and names alone."""
     names = [PurePosixPath(p).name for p in item.paths]
@@ -126,9 +160,7 @@ def classify_deterministic(item: ClassificationInput, *, local_timezone: str | N
         "media_type": item.media_type,
         "name": first_name,
         "camera": metadata.camera,
-        "captured_at_source": (
-            "metadata" if metadata.captured_at else "name" if captured else None
-        ),
+        "captured_at_source": _captured_at_source(metadata, captured),
     }
 
     category: str | None = None
@@ -137,26 +169,13 @@ def classify_deterministic(item: ClassificationInput, *, local_timezone: str | N
     rule = "unrecognised"
     if kind is MediaKind.PHOTO:
         category = "Photos"
-        if any(_SCREENSHOT.search(name) for name in names):
-            subcategory, confidence, rule = "Screenshots", 0.9, "screenshot name"
-        elif metadata.camera:
-            subcategory, confidence, rule = "Camera", 0.95, "camera exif"
-        elif any(_CAMERA_NAME.search(name) for name in names):
-            subcategory, confidence, rule = "Camera", 0.85, "camera name"
-        else:
-            confidence, rule = 0.6, "image without provenance"
+        subcategory, confidence, rule = _photo_rule(names, metadata)
     elif kind is MediaKind.VIDEO:
         category = "Videos"
-        if any(_CAMERA_NAME.search(name) for name in names):
-            subcategory, confidence, rule = "Camera", 0.85, "camera name"
-        else:
-            confidence, rule = 0.7, "video without provenance"
+        subcategory, confidence, rule = _video_rule(names)
     elif kind is MediaKind.AUDIO:
         category = "Audio"
-        if any(_RECORDING.search(name) for name in names):
-            subcategory, confidence, rule = "Recordings", 0.85, "recording name"
-        else:
-            subcategory, confidence, rule = "Music", 0.75, "audio file"
+        subcategory, confidence, rule = _audio_rule(names)
     elif kind is MediaKind.ARCHIVE:
         category, confidence, rule = "Archives", 0.9, "archive type"
     elif kind is MediaKind.DOCUMENT:
