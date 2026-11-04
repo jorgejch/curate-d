@@ -66,7 +66,7 @@ def test_an_invoice_is_confidently_filed_under_finance() -> None:
     """Many finance words and no competing subcategory: confident."""
     content = media.pdf(_INVOICE)
     item, deterministic = _prepare(content, "/invoice.pdf")
-    result = classify_local(item, deterministic, extract_text(io.BytesIO(content), item))
+    result = classify_local(deterministic, extract_text(io.BytesIO(content), item))
     assert (result.facts.category, result.facts.subcategory) == ("Documents", "Finance")
     assert result.confidence >= 0.8
     assert result.evidence["best_rule"] == "Finance"
@@ -83,7 +83,7 @@ def test_a_scanned_image_of_a_document_is_reclassified_as_a_document() -> None:
         return "\n".join(_INVOICE * 2)
 
     extracted = extract_text(io.BytesIO(content), item, ocr=ocr)
-    result = classify_local(item, deterministic, extracted)
+    result = classify_local(deterministic, extracted)
 
     assert extracted.source is TextSource.OCR
     assert result.facts.media_kind is MediaKind.DOCUMENT
@@ -96,7 +96,7 @@ def test_a_photo_with_a_little_text_stays_a_photo() -> None:
     content = media.photo(camera=None)
     item, deterministic = _prepare(content, "/holiday.jpg")
     extracted = extract_text(io.BytesIO(content), item, ocr=lambda image: "EXIT")
-    result = classify_local(item, deterministic, extracted)
+    result = classify_local(deterministic, extracted)
     assert result.facts.media_kind is MediaKind.PHOTO
     assert result.confidence == deterministic.confidence
 
