@@ -7,9 +7,14 @@ See proposal.md, "Why". Observed state at planning (2026-11-03 PT, `dev` = `1b9e
 - SonarQube Cloud project `jorgejch_curate-d`, organization `jorge-haddad-oss`. Its main
   branch is `dev`, analysed at `1b9ea4e`. The open list holds 63 OPEN issues and 2 CONFIRMED
   issues. No security hotspot is TO_REVIEW.
-- The local `sonar` CLI (sonarqube-cli 1.11.0) is logged in to that organization.
-  `sonar analyze --file <path> -p jorgejch_curate-d --format json` analyses one file, and
-  `--base dev` analyses every file that changed against `dev`.
+- The local `sonar` CLI (sonarqube-cli 1.11.0) is logged in, but its code analysis returns
+  `403 Forbidden` on this connection ("Vortex analysis is not available"). Only its secret
+  scan runs. This was found at apply start.
+- SonarQube for IDE in PyCharm 2026.2 runs in connected mode on this project, with the
+  server's analyzers and quality profile. It stores its findings in an H2 database
+  (`~/Library/Caches/JetBrains/PyCharm2026.2/sonarlint/storage/h2/sq-ide.mv.db`, table
+  `KNOWN_FINDINGS`, one scope per open project). At apply start it held 64 of the 65 issues
+  for this worktree. The missing one is `pythonbugs:S2583`, which only the server runs.
 - A short-lived branch analysis in SonarQube Cloud reports only issues that the branch adds.
   It cannot show that an old `dev` issue is gone. Only the next `dev` analysis after the merge
   shows that.
@@ -158,8 +163,9 @@ user at planning.
 - **`placement/admission.py:58` S2583.** This is a false positive: the tests reach both
   outcomes. A split into `small_share <= 0 or small_share >= 1` would accept NaN, which the
   code rejects today. First pin NaN rejection with a test. Then try
-  `if not (budget_bytes > 0 and 0 < small_share < 1):`. If `sonar analyze` still flags it,
-  restore the original line and record the issue for False positive.
+  `if not (budget_bytes > 0 and 0 < small_share < 1):`. The IDE does not run this rule.
+  If the `dev` analysis after the merge still flags the line, keep the rewrite (it keeps
+  behavior, NaN included) and mark the issue False positive.
 - **`workflows/placement.py:176` S7503.** Make the progress callback synchronous: type it
   `Callable[[int, int], None]` in `placement/transfer.py`, call it without `await`, make
   `report` a plain `def`, and change `tests/integration/test_rclone.py:107` to match. The
@@ -173,7 +179,7 @@ user at planning.
   the loop starts, and the delete order has no effect. This code unpickles DBOS checkpoints,
   so the existing `tests/unit/domain/test_base.py` cases must pass unchanged.
 - **`staging/occupancy.py:613` S5886.** mypy already accepts `replace`. Bind an annotated
-  local first. If `sonar analyze` still flags it, construct `ReclaimReport(...)` explicitly.
+  local first. If the IDE check still flags it, construct `ReclaimReport(...)` explicitly.
 - **`staging/snapshots.py:263` S7493.** Open with `await asyncio.to_thread(path.open, "xb")`,
   then use the handle in `with`. `_local_failures` still receives the `OSError`, because
   `to_thread` re-raises it in the caller.
@@ -243,15 +249,20 @@ would run against another agent's half-finished edit.
 ### 6. Evidence per issue, per stream and for the whole change
 
 - **Per issue:** add a pinning test first where the branch has none, and run it green on
-  the unchanged code. Then make the fix, and run the module's unit tests. Then run
-  `sonar analyze --file <path> -p jorgejch_curate-d --format json`. It must report no issue
-  of the target rule at the site and no new issue in the file.
+  the unchanged code. Then make the fix, and run the module's unit tests. Then confirm, against
+  the rule's description, that the flagged construct is gone. For S3776, the stream counts the
+  cognitive complexity by SonarQube's rules and reports the count. No local tool runs the
+  SonarQube rules inside a stream's worktree, so this is the stream's own check.
 - **Per stream:** `make check`, which runs lint with the workflow audit, strict mypy and the
   unit suite with its 80% floor. Stream 1 also writes `/openapi.json` from
   `tests.unit.api.fakes.client()` and compares it with the baseline from task 0.2. The two
   documents must be byte-identical.
 - **Whole change:**
-  1. `sonar analyze --base dev -p jorgejch_curate-d`
+  1. The IDE check (task 8.2): after the streams merge into this worktree, the user runs
+     "Analyze VCS Changed Files" from the SonarQube for IDE Report tab. The orchestrator then
+     reads a copy of `KNOWN_FINDINGS` with the plugin's own H2 driver
+     (`sloop/lib/h2-2.4.240.jar`) and checks the changed files: no finding of a planned rule
+     and no new finding. This uses the server's rules, except `pythonbugs:S2583`.
   2. `make test-stack`, then the whole integration suite (`make test-integration`, fresh
      stack, per `CLAUDE.md`)
   3. `make image`
@@ -260,7 +271,8 @@ would run against another agent's half-finished edit.
 
 ## Risks / Trade-offs
 
-- [The local `sonar analyze` and the cloud analysis can disagree] → The cloud `dev` analysis
+- [The IDE analysis and the cloud analysis can disagree, and the IDE does not run
+  `pythonbugs:S2583`] → The cloud `dev` analysis
   after the merge is the final check (task 8.5). An issue that survives goes through Decision 2,
   and the orchestrator does not ship a second code change blind.
 - [A refactor silently changes a workflow's call order, and in-flight workflows forked onto
