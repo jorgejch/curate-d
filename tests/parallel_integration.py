@@ -11,11 +11,15 @@ one database's advisory locks and DBOS's latest application version, and two pro
 one database would interfere. A failed shard reproduces with
 `make test-stack && make test-integration GROUP=<i> SPLITS=<n>`, so no stack is kept.
 
+The shard projects are the same for every run, and each shard starts by removing its project,
+so one run at a time holds a lock that every worktree of the clone shares.
+
 Standard library only, and nothing from `curate_d`: the runner must work, and tear its
 stacks down, when the application does not import.
 """
 
 import argparse
+import fcntl
 import os
 import re
 import shlex
@@ -30,10 +34,11 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from types import FrameType
-from typing import Final, Protocol, TextIO
+from typing import IO, Final, Protocol, TextIO
 
 REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[1]
 RUNS_DIRECTORY: Final = Path(".integration-runs")
+LOCK_NAME: Final = "curate-d-integration-parallel.lock"
 
 # integration.yml's range for INTEGRATION_SHARDS, so every count CI can run reproduces here.
 MIN_SPLITS: Final = 1
@@ -577,11 +582,46 @@ def signal_handler(executor: ShardExecutor) -> Callable[[int, FrameType | None],
     return handle
 
 
+def lock_path() -> Path:
+    """Return the run lock's file, in Git's common directory, which every worktree shares.
+
+    A checkout outside Git, or without `git`, keeps it in its own run directory.
+    """
+    try:
+        common = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=REPOSITORY_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return REPOSITORY_ROOT / RUNS_DIRECTORY / LOCK_NAME
+    return Path(common) / LOCK_NAME
+
+
+def acquire_run_lock(path: Path) -> IO[str] | None:
+    """Return `path` open and exclusively locked, or None when another run holds it.
+
+    The lock lasts until the file is closed, which the kernel also does for a killed run.
+    The runner's children do not inherit the file, so a stray child cannot keep it held.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+    return handle
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the shards `--splits` names; return the process exit code.
 
     Raises:
-        SystemExit: The arguments or `--splits` are invalid (exit code 2).
+        SystemExit: The arguments or `--splits` are invalid (exit code 2), or another run
+            holds the run lock (exit code 1).
     """
     parser = argparse.ArgumentParser(
         prog="python -m tests.parallel_integration",
@@ -594,14 +634,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ValueError as exc:
         # Exits 2 with the usage and the message, before any stack starts.
         parser.error(str(exc))
-    os.chdir(REPOSITORY_ROOT)
-    run_dir = RUNS_DIRECTORY / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    plans = [shard_plan(index, splits, run_dir) for index in range(1, splits + 1)]
-    executor = ShardExecutor(plans, ProcessRunner(), base_env=os.environ, out=sys.stdout)
-    handler = signal_handler(executor)
-    signal.signal(signal.SIGINT, handler)
-    signal.signal(signal.SIGTERM, handler)
-    return executor.run()
+    path = lock_path()
+    lock = acquire_run_lock(path)
+    if lock is None:
+        # Its reset steps would remove the stacks of the run that holds the lock.
+        parser.exit(1, f"{parser.prog}: another run holds {path}; wait for it to end\n")
+    with lock:
+        os.chdir(REPOSITORY_ROOT)
+        run_dir = RUNS_DIRECTORY / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        plans = [shard_plan(index, splits, run_dir) for index in range(1, splits + 1)]
+        executor = ShardExecutor(plans, ProcessRunner(), base_env=os.environ, out=sys.stdout)
+        handler = signal_handler(executor)
+        signal.signal(signal.SIGINT, handler)
+        signal.signal(signal.SIGTERM, handler)
+        return executor.run()
 
 
 if __name__ == "__main__":

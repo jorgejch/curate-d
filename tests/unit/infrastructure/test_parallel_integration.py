@@ -4,6 +4,7 @@ import io
 import re
 import shlex
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -624,6 +625,48 @@ def test_terminate_lets_a_running_teardown_finish(tmp_path: Path) -> None:
     assert codes == [0]
 
 
+# --- Run lock -----------------------------------------------------------------------------
+
+
+def test_a_held_run_lock_refuses_a_second_holder_until_released(tmp_path: Path) -> None:
+    """One run holds the lock at a time; closing its file releases it."""
+    path = tmp_path / "locks" / runner.LOCK_NAME
+    first = runner.acquire_run_lock(path)
+    assert first is not None
+    assert runner.acquire_run_lock(path) is None
+    first.close()
+    second = runner.acquire_run_lock(path)
+    assert second is not None
+    second.close()
+
+
+def test_the_run_lock_is_in_gits_common_directory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every worktree of the clone resolves the same lock file."""
+    common = "/clone/.git"
+
+    def git(argv: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        """Answer `git rev-parse --git-common-dir` for a worktree of /clone."""
+        assert "--git-common-dir" in argv
+        return subprocess.CompletedProcess(list(argv), 0, stdout=f"{common}\n")
+
+    monkeypatch.setattr("tests.parallel_integration.subprocess.run", git)
+    assert runner.lock_path() == Path(common) / runner.LOCK_NAME
+
+
+@pytest.mark.parametrize("error", [OSError("git"), subprocess.CalledProcessError(128, "git")])
+def test_without_git_the_run_lock_is_in_the_checkout(
+    error: Exception, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without Git the checkout's run directory holds the lock."""
+
+    def fail(*args: object, **kwargs: object) -> None:
+        """Fail as a missing git or a checkout outside Git does."""
+        raise error
+
+    monkeypatch.setattr("tests.parallel_integration.subprocess.run", fail)
+    assert runner.lock_path() == runner.REPOSITORY_ROOT / runner.RUNS_DIRECTORY / runner.LOCK_NAME
+
+
 # --- Entry point --------------------------------------------------------------------------
 
 
@@ -643,3 +686,24 @@ def test_an_invalid_splits_exits_2_before_anything_starts(
         runner.main(["--splits", value])
     assert exit_info.value.code == 2
     assert "SPLITS" in capsys.readouterr().err
+
+
+def test_a_run_in_progress_exits_1_before_anything_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A second run names the lock and leaves the first run's stacks alone."""
+    path = tmp_path / runner.LOCK_NAME
+    held = runner.acquire_run_lock(path)
+    assert held is not None
+
+    def refuse(*args: object, **kwargs: object) -> None:
+        """Fail the test: nothing may start while another run holds the lock."""
+        raise AssertionError("a stack would start")
+
+    monkeypatch.setattr(runner, "lock_path", lambda: path)
+    monkeypatch.setattr(runner, "ProcessRunner", refuse)
+    monkeypatch.setattr("tests.parallel_integration.os.chdir", refuse)
+    with held, pytest.raises(SystemExit) as exit_info:
+        runner.main(["--splits", "2"])
+    assert exit_info.value.code == 1
+    assert str(path) in capsys.readouterr().err
