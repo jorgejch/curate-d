@@ -13,7 +13,7 @@ import io
 import os
 import sys
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from functools import partial
@@ -236,7 +236,13 @@ async def run_smoke_checks(stores: SmokeStores) -> SmokeReport:
         sha256=hashlib.sha256(_PAYLOAD).hexdigest(),
         created_at=datetime.now(UTC),
     )
-    denied_target = replace(target, attempt_id=uuid4())
+    denied_target = StagedObject(
+        key=target.key,
+        attempt_id=uuid4(),
+        size_bytes=target.size_bytes,
+        sha256=target.sha256,
+        created_at=target.created_at,
+    )
     staged = target
     outcomes: list[SmokeCheckOutcome] = []
     cleanup_keys: set[str] = set()

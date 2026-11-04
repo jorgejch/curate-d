@@ -96,7 +96,7 @@ not forced. Each stream ends on a green `make check`.
 
 - [x] 8.1 Merge the seven stream branches into `chore/resolve-sonar-issues` one at a time, and run `make check` after each merge. Verify that every merge is conflict-free, that `git diff --stat dev` lists only stream-owned files and `openspec/`, and that `make check` is green.
 - [ ] 8.2 Review each workflow-body and sweep diff against design.md decision 4, with the 3.4 and 4.7 call-order lists. Ask the user to run "Analyze All Project Files" from the SonarQube for IDE Report tab on this worktree and to give the report's findings (design.md decision 6; "Analyze VCS Changed Files" reads only uncommitted files). Verify that no finding of a planned rule remains in the changed files and that no new finding appears there. Send a survivor back to its stream, or record it in "Accepted issues".
-- [ ] 8.3 Run `make test-stack`, then `make test-integration` on that fresh stack. Verify that the whole suite passes, and record the counts in design.md.
+- [x] 8.3 Run `make test-stack`, then `make test-integration` on that fresh stack. Verify that the whole suite passes, and record the counts in design.md.
 - [ ] 8.4 Run `openspec validate resolve-sonar-issues`. Push the branch, and open the pull request against `dev`. Verify that validation passes and that CI's checks and integration jobs are green.
 - [ ] 8.5 After the merge and the next `dev` analysis, re-list the OPEN and CONFIRMED issues. Set each "Accepted issues" row to Accepted or False positive with its reason as the comment (`change_sonar_issue_status`). Route any other survivor through design.md decision 1. Verify that a final re-list returns `paging.total` 0, or only issues that landed in code this change did not touch, listed by key.
 
