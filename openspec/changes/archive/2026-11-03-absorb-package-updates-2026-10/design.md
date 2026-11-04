@@ -202,8 +202,18 @@ directory did not clear S8707: Sonar does not take `Path.is_relative_to` as a sa
 options had no use outside the unit tests, so a second `fix(staging)` commit removes them
 (decision 4): the command line takes no path at all.
 
-Final diff against `dev` (task 4.1): 23 files, 1973 insertions, 174 deletions, all in the
+Final diff against `dev` (task 4.1): 24 files, 2221 insertions, 174 deletions, all in the
 streams' files: the vendored skill and `skills-lock.json`, `pyproject.toml` and `uv.lock`,
 `sdk_evidence.py` and its two unit test modules, `Makefile`, `ops/README.md`,
-`ops/staging-compatibility.md`, `README.md`, `openspec/config.yaml`, `CLAUDE.md` and this
-change directory. `openspec validate absorb-package-updates-2026-10 --strict` passes.
+`ops/staging-compatibility.md`, `README.md`, `openspec/config.yaml`, `CLAUDE.md`, the
+synced `openspec/specs/content-staging/spec.md` and this change directory. `openspec validate
+absorb-package-updates-2026-10 --strict` passed before the archive; `openspec validate
+--specs` passes after it.
+
+Review round on PR #137 (Gitar, Greptile, Codex), fixed in `fix(staging): record SDK evidence
+only from a whole run on the locked SDK`: a report in which no test passed, OVH without its
+settings, and an installed SDK other than the locked one now exit 2 without writing, and the
+suite runs without the caller's `PYTEST_ADDOPTS`. A dry run on a fresh `make test-stack` with
+`PYTEST_ADDOPTS=-k test_default_sdk_checksum_headers_are_accepted` still ran all 20 contract
+tests. The delta is synced into `openspec/specs/content-staging/spec.md` and the change
+archived in this PR.
