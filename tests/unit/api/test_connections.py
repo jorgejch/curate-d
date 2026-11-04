@@ -57,6 +57,7 @@ def test_starting_an_authorization_binds_the_browser() -> None:
     assert cookie.startswith(f"{NONCE_COOKIE}=n-1")
     assert "HttpOnly" in cookie
     assert "Secure" in cookie
+    assert "Path=/connections" in cookie
     assert "n-1" not in response.text
 
 
@@ -73,6 +74,7 @@ def test_the_callback_stores_the_connection_from_the_starting_browser() -> None:
     assert response.json()["account"] == "77"
     assert response.json()["state"] == "healthy"
     assert f'{NONCE_COOKIE}=""' in response.headers["set-cookie"]
+    assert "Path=/connections" in response.headers["set-cookie"]
     assert [c.account for c in fake.connections] == ["77"]
 
 

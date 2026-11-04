@@ -36,6 +36,8 @@ from curate_d.providers.errors import ProviderError
 from curate_d.providers.health import assess_health
 
 NONCE_COOKIE: Final = "curate_d_authorization"
+_PREFIX: Final = "/connections"
+"""The router prefix, and the path the nonce cookie is scoped to."""
 
 
 class ConnectionStatus(BaseModel):
@@ -104,7 +106,7 @@ def status_of(health: ConnectionHealth) -> ConnectionStatus:
 
 def router(backend: Callable[[Request], ConnectionsBackend]) -> APIRouter:
     """The connection endpoints over `backend`."""
-    routes = APIRouter(prefix="/connections", tags=["connections"])
+    routes = APIRouter(prefix=_PREFIX, tags=["connections"])
     uses = Depends(backend)
 
     @routes.get("")
@@ -127,7 +129,7 @@ def router(backend: Callable[[Request], ConnectionsBackend]) -> APIRouter:
         response.set_cookie(
             NONCE_COOKIE,
             started.browser_nonce.get_secret_value(),
-            path="/connections",
+            path=_PREFIX,
             httponly=True,
             secure=True,
             samesite="lax",
@@ -152,7 +154,7 @@ def router(backend: Callable[[Request], ConnectionsBackend]) -> APIRouter:
             hostname=hostname,
             browser_nonce=nonce,
         )
-        response.delete_cookie(NONCE_COOKIE, path="/connections")
+        response.delete_cookie(NONCE_COOKIE, path=_PREFIX)
         return status_of(health)
 
     return routes
