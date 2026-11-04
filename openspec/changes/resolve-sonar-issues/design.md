@@ -303,3 +303,10 @@ because they describe code that the revert restores.
 
 None at planning. The orchestrator adds one row per issue that a stream cannot fix
 (issue key, file and line, rule, guarantee kept, status Accepted or False positive).
+
+| Issue key | File and line | Rule | Guarantee kept | Status |
+| --- | --- | --- | --- | --- |
+| `AaE9eG9zABoVk1bbnW1t` | `src/curate_d/placement/admission.py:58` | `pythonbugs:S2583` | `TransferAdmission` rejects a non-positive budget, a share outside (0, 1) and a NaN share. The guard is false for a valid budget and true for each rejected case; `test_an_unusable_budget_is_rejected` (5 cases) covers both outcomes. The analyzer probably sees only the callers under `src/`, which never pass `small_share`. | False positive, set 2026-11-03 after the `dev` analysis of the merge `29e40dc` |
+
+The `dev` analysis of `29e40dc` (2026-11-03 23:10 PT) closed the other 64 issues. After
+the status change, `dev` lists 0 OPEN or CONFIRMED issues and 0 security hotspots to review.
