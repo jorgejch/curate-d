@@ -45,9 +45,13 @@ DEFAULT_MATRIX = Path("ops/staging-compatibility.md")
 # The RustFS endpoint the contract suite uses when CURATE_D_TEST_RUSTFS_ENDPOINT is unset
 # (tests/integration/rustfs_staging.py's ENDPOINT default).
 DEFAULT_RUSTFS_ENDPOINT = "http://127.0.0.1:9100"
-# Failure text that says the backend was never reached, or its fixture refused the
-# settings, rather than that it answered: botocore's EndpointConnectionError, aiohttp's
-# connector errors, socket errors, and the OVH fixture's refusal.
+# pytest's message for a fixture that called pytest.fail: the suite refusing its own
+# preconditions (OVH settings missing, an endpoint that is not HTTPS), not the SDK at work.
+_FIXTURE_REFUSAL = re.compile(r'^failed on setup with "Failed: ', re.MULTILINE)
+# Connection-failure text: botocore's EndpointConnectionError, aiohttp's connector errors
+# and socket errors. It means "never reached" only beside the probed endpoint's host and
+# port: the contract suite injects EndpointConnectionError against `injected-...` URLs to
+# test the SDK's retries, and a failure there is evidence.
 _UNREACHABLE = re.compile(
     "|".join(
         re.escape(text)
@@ -62,7 +66,6 @@ _UNREACHABLE = re.compile(
             "Connect timeout",
             "Name or service not known",
             "nodename nor servname provided",
-            "PENDING OVH verification",
         )
     )
 )
@@ -583,20 +586,32 @@ def _endpoint(backend: Backend, environ: Mapping[str, str]) -> str:
     return environ.get("CURATE_D_TEST_OVH_ENDPOINT", "")
 
 
-def _not_evidence(backend: Backend, outcomes: Sequence[CaseOutcome]) -> str | None:
+def _not_run(outcome: CaseOutcome, endpoint: str) -> bool:
+    """Return whether a failed test never reached the backend or refused its settings."""
+    if not outcome.failed:
+        return False
+    if _FIXTURE_REFUSAL.search(outcome.detail):
+        return True
+    location = urlsplit(endpoint).netloc
+    return (
+        bool(location) and location in outcome.detail and bool(_UNREACHABLE.search(outcome.detail))
+    )
+
+
+def _not_evidence(backend: Backend, outcomes: Sequence[CaseOutcome], endpoint: str) -> str | None:
     """Return why a run says nothing about the SDK, or None when its results are evidence.
 
-    A failure that never reached the backend (a refused or timed-out connection, an
-    unknown host, the OVH fixture refusing its settings) is about the stack, not the SDK,
+    A failure that never reached `endpoint` (a refused or timed-out connection, an unknown
+    host) or that a fixture raised refusing its settings is about the stack, not the SDK,
     and so is a run where nothing ran. A failure the backend answered, even one of every
     test, is evidence: an SDK default the backend rejects fails every upload.
     """
-    unreachable = [o.name for o in outcomes if o.failed and _UNREACHABLE.search(o.detail)]
-    if unreachable:
+    not_run = [o.name for o in outcomes if _not_run(o, endpoint)]
+    if not_run:
         return (
-            f"{backend.value}: {len(unreachable)} test(s) never reached the backend "
-            f"({', '.join(sorted(set(unreachable))[:3])}); check the stack and the "
-            "backend's settings"
+            f"{backend.value}: {len(not_run)} test(s) never reached the backend or refused "
+            f"its settings ({', '.join(sorted(set(not_run))[:3])}); check the stack and "
+            "the backend's settings"
         )
     if not any(o.passed or o.failed for o in outcomes):
         return f"{backend.value}: every contract test was skipped"
@@ -641,7 +656,7 @@ def collect_runs(
                 f"report {'present' if report.is_file() else 'missing'})"
             )
         outcomes = parse_junit(report.read_text(encoding="utf-8"), backend, source=report)
-        if (reason := _not_evidence(backend, outcomes)) is not None:
+        if (reason := _not_evidence(backend, outcomes, endpoint)) is not None:
             raise EvidenceError(reason)
         runs.append(BackendRun(backend, identity, region, outcomes))
     return runs

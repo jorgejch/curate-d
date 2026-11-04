@@ -100,6 +100,12 @@ def _lock(versions: dict[str, str], *, drop: str | None = None) -> str:
     return "version = 1\n\n" + "\n".join(entries)
 
 
+@pytest.fixture(autouse=True)
+def _default_rustfs_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run each test against the default RustFS endpoint, whatever the shell sets."""
+    monkeypatch.delenv("CURATE_D_TEST_RUSTFS_ENDPOINT", raising=False)
+
+
 def _write(tmp_path: Path, matrix: str, lock: str) -> tuple[Path, Path]:
     """Write the fixture matrix and lock, returning their paths."""
     matrix_path, lock_path = tmp_path / "matrix.md", tmp_path / "uv.lock"
@@ -528,8 +534,17 @@ def test_record_writes_nothing_when_one_of_two_backends_has_no_report(
 
 UNREACHABLE = (
     "curate_d.staging.errors.StagingObjectStoreError: uploading content/x failed: "
-    'Could not connect to the endpoint URL: "http://127.0.0.1:9199/curate-d-staging/x"'
+    'Could not connect to the endpoint URL: "http://127.0.0.1:9100/curate-d-staging/x"'
 )
+INJECTED = (
+    "botocore.exceptions.EndpointConnectionError: Could not connect to the endpoint URL: "
+    '"injected-put-connection-failure"'
+)
+OVH_MISSING = (
+    'failed on setup with "Failed: PENDING OVH verification: configure a disposable '
+    'staging bucket with both scoped S3 identities"'
+)
+OVH_HTTP = 'failed on setup with "Failed: OVH contract fixtures require certificate-verified HTTPS"'
 REJECTED = (
     "botocore.exceptions.ClientError: An error occurred (InvalidArgument) when calling the "
     "PutObject operation: x-amz-checksum-crc64nvme is not supported"
@@ -549,12 +564,22 @@ REJECTED = (
             _case("test_other", outcome="fail", text=f"Traceback ...\n{UNREACHABLE}"),
         ),
         _report(
-            _case(CHECKSUM_TEST, outcome="error", message="PENDING OVH verification: ..."),
-            _case("test_other", outcome="error", message="PENDING OVH verification: ..."),
+            _case(CHECKSUM_TEST, outcome="error", message=OVH_MISSING),
+            _case("test_other", outcome="error", message=OVH_MISSING),
+        ),
+        _report(
+            _case(CHECKSUM_TEST, outcome="error", message=OVH_HTTP),
+            _case("test_other", outcome="error", message=OVH_HTTP),
         ),
         _report(_case(CHECKSUM_TEST, outcome="skip"), _case("test_other", outcome="skip")),
     ],
-    ids=["stack-down", "stack-died-mid-run", "ovh-settings-refused", "all-skipped"],
+    ids=[
+        "stack-down",
+        "stack-died-mid-run",
+        "ovh-settings-missing",
+        "ovh-not-https",
+        "all-skipped",
+    ],
 )
 def test_record_writes_nothing_when_the_run_never_reached_the_backend(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], report: str
@@ -565,7 +590,10 @@ def test_record_writes_nothing_when_the_run_never_reached_the_backend(
     assert status == EXIT_NOT_RUN
     assert matrix_path.read_text(encoding="utf-8") == before
     error = capsys.readouterr().err
-    assert "never reached the backend" in error or "every contract test was skipped" in error
+    assert (
+        "never reached the backend or refused" in error
+        or "every contract test was skipped" in error
+    )
 
 
 def test_record_writes_fail_when_every_test_fails_against_a_reachable_backend(
@@ -586,11 +614,41 @@ def test_record_writes_fail_when_every_test_fails_against_a_reachable_backend(
         assert _cells(after, row)[0].startswith("FAIL — 2026-11-01, ")
 
 
+def test_record_writes_fail_when_an_injected_connection_failure_is_not_retried(
+    tmp_path: Path,
+) -> None:
+    """The suite's injected EndpointConnectionError failing a test is an SDK retry break: FAIL."""
+    report = _report(
+        _case(CHECKSUM_TEST, headers=HEADERS),
+        _case("test_sdk_retries_transient_put_failure", outcome="fail", message=INJECTED),
+        _case("test_other"),
+    )
+
+    status, matrix_path, _ = _record(tmp_path, {Backend.RUSTFS: report}, status=1)
+
+    assert status == EXIT_CHECK_FAILED
+    after = matrix_path.read_text(encoding="utf-8")
+    assert _cells(after, "34")[0].startswith("FAIL — 2026-11-01, ")
+    assert "test_sdk_retries_transient_put_failure" in _cells(after, "34")[0]
+
+
+def test_a_connection_failure_naming_another_host_is_evidence(tmp_path: Path) -> None:
+    """Connection text without the probed endpoint's host and port is not "never reached"."""
+    elsewhere = UNREACHABLE.replace("127.0.0.1:9100", "s3.elsewhere.test")
+    report = _report(
+        _case(CHECKSUM_TEST, headers=HEADERS),
+        _case("test_other", outcome="fail", message=elsewhere),
+    )
+
+    status, _, _ = _record(tmp_path, {Backend.RUSTFS: report}, status=1)
+
+    assert status == EXIT_CHECK_FAILED
+
+
 def test_record_refuses_an_endpoint_that_does_not_accept_a_connection(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A stack that is not up exits 2 before the suite runs, naming the endpoint."""
-    monkeypatch.delenv("CURATE_D_TEST_RUSTFS_ENDPOINT", raising=False)
     started: list[Backend] = []
     probed: list[str] = []
     matrix_path, lock_path = _write(tmp_path, _matrix(_sdk_row(OLD)), _lock(OLD))
