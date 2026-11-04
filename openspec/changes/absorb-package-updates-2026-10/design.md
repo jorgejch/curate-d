@@ -85,18 +85,18 @@ See proposal.md, "Why". Observed state on `dev` `62068e5` with the bumped lock i
    `reset.py` only lives there because it runs inside the image.
 
 4. **Two subcommands, one parser.**
-   - `--lock` and `--matrix` resolve against the working directory (the repository root,
-     where the Make target runs) and are refused, exit 2 before any file is opened, when
-     they resolve outside it through `..`, an absolute path or a symlink: `record` rewrites
-     the matrix path it is given.
-   - `check [--lock uv.lock] [--matrix ops/staging-compatibility.md]`: reads the lock with
+   - Both read `uv.lock` and `ops/staging-compatibility.md` relative to the working
+     directory (the repository root, where the Make target runs). The command line takes no
+     path, so nothing passed to it can point the matrix write at another file; the unit
+     tests hand `main` their fixture paths as keyword arguments, as they hand it the runner.
+   - `check`: reads the lock with
      `tomllib` (`package` entries named `aioboto3`, `aiobotocore`, `botocore`), parses the
      matrix's `| SDK |` row with a regex over the three backtick-quoted names, prints each
      drift as `<package>: matrix <a>, lock <b>`, exits 1 on drift or on an unparsable row, 0
      otherwise. `tests/unit/infrastructure/test_staging_sdk_evidence.py` calls it on the
      committed files, so drift fails `make test`.
-   - `record --backend {rustfs,ovh} [--backend ...] [--date YYYY-MM-DD] [--dry-run]
-     [--matrix ...] [--lock ...]`: for each selected backend runs
+   - `record --backend {rustfs,ovh} [--backend ...] [--date YYYY-MM-DD] [--dry-run]`: for
+     each selected backend runs
      `uv run pytest tests/integration/test_staging_contract.py -m integration --no-cov
      --staging-backend=<b> --junitxml=<tmp>/<b>.xml -p no:cacheprovider`, then parses the
      JUnit XML (`xml.etree`): per-test outcome, and the `sdk_checksum_headers` property of
@@ -185,11 +185,13 @@ package is rolled back and no code change was needed for the updates.
 
 SonarCloud's quality gate failed on the new code's security rating: five S8707 findings
 (`--lock`/`--matrix` reach a file read and the matrix write unchecked), plus S3776
-(`_sdk_sensitive_rows`' cognitive complexity) and S6019 (a lazy quantifier). Fixed in
-`refactor(staging)` and `fix(staging)` (decision 4 now confines both paths to the working
-directory); `make check` after them: 2193 unit tests passed, coverage 85.48%.
+(`_sdk_sensitive_rows`' cognitive complexity) and S6019 (a lazy quantifier). The
+`refactor(staging)` commit cleared S3776 and S6019. Confining the two paths to the working
+directory did not clear S8707: Sonar does not take `Path.is_relative_to` as a sanitizer. The
+options had no use outside the unit tests, so a second `fix(staging)` commit removes them
+(decision 4): the command line takes no path at all.
 
-Final diff against `dev` (task 4.1): 23 files, 2000 insertions, 174 deletions, all in the
+Final diff against `dev` (task 4.1): 23 files, 1973 insertions, 174 deletions, all in the
 streams' files: the vendored skill and `skills-lock.json`, `pyproject.toml` and `uv.lock`,
 `sdk_evidence.py` and its two unit test modules, `Makefile`, `ops/README.md`,
 `ops/staging-compatibility.md`, `README.md`, `openspec/config.yaml`, `CLAUDE.md` and this
