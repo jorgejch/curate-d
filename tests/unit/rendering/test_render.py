@@ -21,7 +21,7 @@ from curate_d.domain import (
     derive_destination_id,
 )
 from curate_d.rendering.collision import disambiguate, resolve
-from curate_d.rendering.render import RenderError, normalize, render
+from curate_d.rendering.render import RenderError, Transformation, normalize, render
 from curate_d.rendering.templates import (
     PCLOUD_PROFILE,
     PORTABLE_PROFILE,
@@ -187,6 +187,28 @@ def test_a_flat_destination_joins_the_hierarchy_into_one_name() -> None:
     facts = Facts(media_kind=MediaKind.DOCUMENT, category="Documents", subcategory="Home")
     assert (
         _render(facts, name="lease.pdf", profile=flat) == "/Organized/Documents - Home - lease.pdf"
+    )
+
+
+def test_a_flat_join_the_rule_changes_is_recorded_as_one_component() -> None:
+    """The joined name is normalized whole, and the record's original is the whole join."""
+    flat = CapabilityProfile(hierarchical=False, disallowed_characters="-")
+    facts = Facts(media_kind=MediaKind.DOCUMENT, category="Documents", subcategory="Home")
+    rendered = render(
+        SEED_TEMPLATES,
+        facts,
+        original_name="lease.pdf",
+        content_object_id=_CONTENT,
+        profile=flat,
+        root="/Organized",
+    )
+    assert rendered.locator == "/Organized/Documents %2D Home %2D lease.pdf"
+    assert rendered.transformations == (
+        Transformation(
+            original="Documents - Home - lease.pdf",
+            rendered="Documents %2D Home %2D lease.pdf",
+            rule="escaped",
+        ),
     )
 
 
