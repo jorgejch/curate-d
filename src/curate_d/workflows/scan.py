@@ -262,6 +262,33 @@ async def _complete_tx(scan_id: UUID, now: datetime) -> None:
     await ScanRepository(connection).complete(scan_id, now=now)
 
 
+async def _enumerate_folder(
+    scan: Scan, provider: Provider, account: str, folder: PendingFolder
+) -> tuple[FolderListing, dict[str, tuple[StrongFingerprint, ...]]] | None:
+    """List a folder and read the digests its new files need; None once a gone one is retired."""
+    listing = await _list_step(provider, account, folder)
+    if listing is None:
+        await current().datasource.run_tx_step_async(
+            {"name": "retire_folder"}, _retire_tx, scan.id, folder
+        )
+        logger.warning("scan.folder_gone", scan_id=str(scan.id), path=folder.path)
+        return None
+    recorded = await _recorded_step(provider, account, [f.native_id for f in listing.files])
+    wanted = needs_digests([decide(f, recorded.get(f.native_id)) for f in listing.files])
+    digests = await _digests_step(provider, account, wanted) if wanted else {}
+    return listing, digests
+
+
+def _tally_actions(
+    totals: Mapping[FileAction, int], counted: Mapping[FileAction, int]
+) -> dict[FileAction, int]:
+    """Return `totals` with `counted` added per action."""
+    tallied = dict(totals)
+    for action, count in counted.items():
+        tallied[action] = tallied.get(action, 0) + count
+    return tallied
+
+
 @DBOS.workflow()
 async def scan_root(
     provider_value: str, account: str, root: str, cycle: str, part: int = 0
@@ -307,24 +334,14 @@ async def scan_root(
                 await enqueue_scan(provider, account, root, cycle, part + 1)
                 return report(ScanOutcome.CONTINUED)
             try:
-                listing = await _list_step(provider, account, folder)
-                if listing is None:
-                    await datasource.run_tx_step_async(
-                        {"name": "retire_folder"}, _retire_tx, scan.id, folder
-                    )
-                    logger.warning("scan.folder_gone", scan_id=str(scan.id), path=folder.path)
-                    continue
-                recorded = await _recorded_step(
-                    provider, account, [f.native_id for f in listing.files]
-                )
-                wanted = needs_digests(
-                    [decide(f, recorded.get(f.native_id)) for f in listing.files]
-                )
-                digests = await _digests_step(provider, account, wanted) if wanted else {}
+                enumerated = await _enumerate_folder(scan, provider, account, folder)
             except (ProviderError, ConnectionRequiresReauthenticationError) as error:
                 await datasource.run_tx_step_async({"name": "stop_scan"}, _stop_tx, scan.id, error)
                 logger.warning("scan.incomplete", scan_id=str(scan.id), reason=str(error))
                 return report(ScanOutcome.INCOMPLETE, str(error))
+            if enumerated is None:
+                continue
+            listing, digests = enumerated
             result = await datasource.run_tx_step_async(
                 {"name": "record_folder"},
                 _record_tx,
@@ -334,8 +351,7 @@ async def scan_root(
                 digests,
                 await _scan_now_step(),
             )
-            for action, count in result.actions.items():
-                actions[action] = actions.get(action, 0) + count
+            actions = _tally_actions(actions, result.actions)
             await enqueue_ingest(result.ingest)
             listed += 1
 
