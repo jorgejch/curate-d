@@ -1125,6 +1125,48 @@ class _Sweep:
                 )
                 break
 
+    async def recover_under_fence(
+        self,
+        fence: PromotionFence,
+        versioned: list[StrandedWorkflow],
+        unlocked: list[StrandedWorkflow],
+        by_version: Mapping[str, list[StrandedWorkflow]],
+        registry: Mapping[str, datetime],
+    ) -> None:
+        """Take the promotion fence once and recover `versioned` under it, or skip it all."""
+        ids = [entry.workflow.workflow_id for entry in versioned]
+        try:
+            async with fence() as fenced:
+                if fenced.held:
+                    self.fence = fenced
+                    await self.recover_fenced(unlocked, by_version, registry)
+                else:
+                    self.tally.skipped.extend(ids)
+                    logger.warning(
+                        _SKIPPED_EVENT,
+                        reason="a promotion is in progress",
+                        target=self.target,
+                        rows=len(ids),
+                    )
+        except Exception as error:  # A fence that cannot be taken forks nothing.
+            self.fail_unfinished(ids, f"holding the promotion fence failed: {error}")
+            logger.error("recovery_sweep.fence_failed", error=str(error))
+
+
+def _partition_by_version(
+    versioned: list[StrandedWorkflow], target: str
+) -> tuple[list[StrandedWorkflow], dict[str, list[StrandedWorkflow]]]:
+    """Split fork and retire rows into the unlocked ones and the rest by source version."""
+    by_version: dict[str, list[StrandedWorkflow]] = {}
+    unlocked: list[StrandedWorkflow] = []
+    for entry in versioned:
+        version = entry.workflow.application_version
+        if version is None or version == target:
+            unlocked.append(entry)
+        else:
+            by_version.setdefault(version, []).append(entry)
+    return unlocked, by_version
+
 
 async def run_recovery_sweep(
     settings: Settings,
@@ -1183,14 +1225,7 @@ async def run_recovery_sweep(
     reenqueues = [entry for entry in plan if entry.action is RecoveryAction.REENQUEUE]
     versioned = [entry for entry in plan if entry.action is not RecoveryAction.REENQUEUE]
     on_target = own_version == target
-    by_version: dict[str, list[StrandedWorkflow]] = {}
-    unlocked: list[StrandedWorkflow] = []
-    for entry in versioned:
-        version = entry.workflow.application_version
-        if version is None or version == target:
-            unlocked.append(entry)
-        else:
-            by_version.setdefault(version, []).append(entry)
+    unlocked, by_version = _partition_by_version(versioned, target)
 
     # Read before any write, so an unreadable registry leaves everything as it was.
     registry: Mapping[str, datetime] = (
@@ -1214,21 +1249,5 @@ async def run_recovery_sweep(
     if not versioned:
         return sweep.tally.outcome()
 
-    ids = [entry.workflow.workflow_id for entry in versioned]
-    try:
-        async with fence() as fenced:
-            if fenced.held:
-                sweep.fence = fenced
-                await sweep.recover_fenced(unlocked, by_version, registry)
-            else:
-                sweep.tally.skipped.extend(ids)
-                logger.warning(
-                    _SKIPPED_EVENT,
-                    reason="a promotion is in progress",
-                    target=target,
-                    rows=len(ids),
-                )
-    except Exception as error:  # A fence that cannot be taken forks nothing.
-        sweep.fail_unfinished(ids, f"holding the promotion fence failed: {error}")
-        logger.error("recovery_sweep.fence_failed", error=str(error))
+    await sweep.recover_under_fence(fence, versioned, unlocked, by_version, registry)
     return sweep.tally.outcome()

@@ -14,7 +14,9 @@ import pytest
 from curate_d.runtime.sweep import (
     PendingWorkflow,
     RecoveryAction,
+    StrandedWorkflow,
     SweepOutcome,
+    _partition_by_version,
     plan_recovery,
     recovery_successor_id,
 )
@@ -149,3 +151,24 @@ def test_each_lineage_hop_has_a_distinct_stable_recovery_id() -> None:
     assert successor == recovery_successor_id("source")
     assert successor != recovery_successor_id("other")
     assert successor != recovery_successor_id(successor)
+
+
+def test_fork_and_retire_rows_split_into_unlocked_and_per_source_version() -> None:
+    """Version-less and on-target rows take no lock; the rest group by version, in plan order."""
+
+    def stranded(
+        workflow_id: str, version: str | None, action: RecoveryAction = RecoveryAction.FORK
+    ) -> StrandedWorkflow:
+        return StrandedWorkflow(_pending(workflow_id, None, version), action, "test")
+
+    rows = [
+        stranded("ancestor", CURRENT, RecoveryAction.RETIRE),
+        stranded("old-a", RETIRED),
+        stranded("unversioned", None, RecoveryAction.RETIRE),
+        stranded("older", "0.0.9"),
+        stranded("old-b", RETIRED),
+    ]
+    unlocked, by_version = _partition_by_version(rows, CURRENT)
+    assert unlocked == [rows[0], rows[2]]
+    assert by_version == {RETIRED: [rows[1], rows[4]], "0.0.9": [rows[3]]}
+    assert list(by_version) == [RETIRED, "0.0.9"]
