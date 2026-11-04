@@ -330,20 +330,29 @@ class StagingSupervisor:
         """Run the staging event loop until shutdown, recording why it ended."""
         try:
             asyncio.run(self._serve())
+        except (Exception, asyncio.CancelledError) as failure:
+            self._record_failure(failure)
         except BaseException as failure:
-            already_started = self._settled.is_set()
-            self._failure = failure
-            if already_started:
-                # Nobody is waiting on `_failure` any more, so this is the only place it
-                # can be seen: without it the worker serves on with cleanup silently dead.
-                logger.error(
-                    "staging.supervisor_failed",
-                    profile=self._profile.value,
-                    error_type=type(failure).__name__,
-                )
+            # An exit signal is recorded for `start` like any failure, then left to the
+            # thread's excepthook, which ignores SystemExit.
+            self._record_failure(failure)
+            raise
         finally:
             # Unblocks `start` whether readiness passed, failed, or never got that far.
             self._settled.set()
+
+    def _record_failure(self, failure: BaseException) -> None:
+        """Keep why the loop ended for `start`, and log it if `start` has already returned."""
+        already_started = self._settled.is_set()
+        self._failure = failure
+        if already_started:
+            # Nobody is waiting on `_failure` any more, so this is the only place it
+            # can be seen: without it the worker serves on with cleanup silently dead.
+            logger.error(
+                "staging.supervisor_failed",
+                profile=self._profile.value,
+                error_type=type(failure).__name__,
+            )
 
     async def _serve(self) -> None:
         """Build the backend, prove it ready, then serve the loop until asked to stop."""
@@ -506,63 +515,65 @@ def prepare_services(
         profile: Which half of the pipeline this process serves.
         staging: The started staging supervisor, or None where staging is not configured.
     """
-
-    async def create() -> Services:
-        """Create the datasource and release the connections creation opened."""
-        datasource = await create_ledger_datasource(settings)
-        await datasource.engine.dispose()
-        cipher = (
-            CredentialCipher.from_settings(settings)
-            if settings.credential_encryption_key is not None and profile is WorkerProfile.IO
-            else None
-        )
-        access = (
-            ConnectedAccounts(
-                datasource.engine,
-                cipher,
-                {
-                    provider: Pacer(
-                        Quota(requests=settings.provider_requests_per_minute, period_seconds=60.0)
-                    )
-                    for provider in Provider
-                },
-            )
-            if cipher is not None
-            else None
-        )
-        remote = (
-            OpenRouterClassifier(settings.openrouter_api_key)
-            if settings.openrouter_api_key is not None and profile is WorkerProfile.IO
-            else None
-        )
-        rclone = (
-            RcloneAccess(str(settings.rclone_rc_url))
-            if settings.rclone_rc_url is not None and profile is WorkerProfile.IO
-            else None
-        )
-        return Services(
-            settings=settings,
-            datasource=datasource,
-            cipher=cipher,
-            provider_access=access,
-            remote_classifier=remote,
-            rclone=rclone,
-            remotes=(
-                ConnectedRemotes(rclone, datasource.engine, cipher)
-                if rclone is not None and cipher is not None
-                else None
-            ),
-            admission=TransferAdmission(
-                settings.transfer_scratch_budget_bytes,
-                large_threshold=settings.transfer_large_threshold_bytes,
-            ),
-            staging=staging if isinstance(staging, StagingAccess) else None,
-            scratch_budget=local_scratch_budget(settings),
-        )
-
-    services = asyncio.run(create())
+    services = asyncio.run(_create_services(settings, profile, staging))
     install(services)
     return services
+
+
+async def _create_services(
+    settings: Settings, profile: WorkerProfile, staging: object | None
+) -> Services:
+    """Create the datasource and release the connections creation opened."""
+    datasource = await create_ledger_datasource(settings)
+    await datasource.engine.dispose()
+    cipher = (
+        CredentialCipher.from_settings(settings)
+        if settings.credential_encryption_key is not None and profile is WorkerProfile.IO
+        else None
+    )
+    access = (
+        ConnectedAccounts(
+            datasource.engine,
+            cipher,
+            {
+                provider: Pacer(
+                    Quota(requests=settings.provider_requests_per_minute, period_seconds=60.0)
+                )
+                for provider in Provider
+            },
+        )
+        if cipher is not None
+        else None
+    )
+    remote = (
+        OpenRouterClassifier(settings.openrouter_api_key)
+        if settings.openrouter_api_key is not None and profile is WorkerProfile.IO
+        else None
+    )
+    rclone = (
+        RcloneAccess(str(settings.rclone_rc_url))
+        if settings.rclone_rc_url is not None and profile is WorkerProfile.IO
+        else None
+    )
+    return Services(
+        settings=settings,
+        datasource=datasource,
+        cipher=cipher,
+        provider_access=access,
+        remote_classifier=remote,
+        rclone=rclone,
+        remotes=(
+            ConnectedRemotes(rclone, datasource.engine, cipher)
+            if rclone is not None and cipher is not None
+            else None
+        ),
+        admission=TransferAdmission(
+            settings.transfer_scratch_budget_bytes,
+            large_threshold=settings.transfer_large_threshold_bytes,
+        ),
+        staging=staging if isinstance(staging, StagingAccess) else None,
+        scratch_budget=local_scratch_budget(settings),
+    )
 
 
 def _install_shutdown_handler(stop: threading.Event) -> None:
@@ -608,6 +619,42 @@ def _drain_dbos(settings: Settings, executor_id: str, timeout_seconds: int) -> b
     finally:
         workflows.destroy()
     return not pending
+
+
+def _stop_reconciler(reconciler: ScheduleReconciler | None, lease_lost: threading.Event) -> None:
+    """Join the schedule reconciler, without waiting once the lease is lost."""
+    # Not waited for once the lease is lost: stopping at once matters more.
+    if reconciler is not None:
+        reconciler.join(0 if lease_lost.is_set() else RECONCILER_STOP_SECONDS)
+
+
+def _stop_dbos(
+    settings: Settings, executor_id: str, *, serving: bool, lease_lost: threading.Event
+) -> bool:
+    """Shut a serving DBOS down, returning whether it was drained of this executor's work."""
+    # Let workflows already in flight finish rather than orphaning them as PENDING
+    # on a version this deployment is about to retire.
+    if serving and lease_lost.is_set():
+        # Another process may already hold the identity: shut down at once, and
+        # ask the database nothing, since losing it is the likeliest cause.
+        DBOS.destroy(workflow_completion_timeout_sec=0)
+        return False
+    if serving:
+        return _drain_dbos(settings, executor_id, DRAIN_SECONDS)
+    return False
+
+
+def _settle_lease(lease: ExecutorLease | None, executor_id: str, *, done: bool) -> None:
+    """Release the lease if nothing runs under its identity, else retain it until exit."""
+    # Last, and only once nothing runs under this identity: releasing earlier
+    # would let a successor recover workflows still executing here. A retained
+    # lease is released when the process exits and its connection closes.
+    if lease is None:
+        return
+    if done:
+        lease.release()
+    else:
+        logger.warning("worker.lease_retained_until_exit", executor_id=executor_id)
 
 
 def run(
@@ -705,19 +752,12 @@ def run(
             )
     finally:
         # Before the drain: the reconciler writes through DBOS, which the drain destroys.
-        # Not waited for once the lease is lost: stopping at once matters more.
         shutdown.set()
-        if reconciler is not None:
-            reconciler.join(0 if lease_lost.is_set() else RECONCILER_STOP_SECONDS)
+        _stop_reconciler(reconciler, lease_lost)
         try:
-            # Let workflows already in flight finish rather than orphaning them as PENDING
-            # on a version this deployment is about to retire.
-            if launched and block and lease_lost.is_set():
-                # Another process may already hold the identity: shut down at once, and
-                # ask the database nothing, since losing it is the likeliest cause.
-                DBOS.destroy(workflow_completion_timeout_sec=0)
-            elif launched and block:
-                drained = _drain_dbos(settings, executor_id, DRAIN_SECONDS)
+            drained = _stop_dbos(
+                settings, executor_id, serving=launched and block, lease_lost=lease_lost
+            )
         finally:
             try:
                 # After the drain: a workflow finishing its last step may still be reading
@@ -726,14 +766,7 @@ def run(
                 if staging is not None:
                     staging.stop()
             finally:
-                # Last, and only once nothing runs under this identity: releasing earlier
-                # would let a successor recover workflows still executing here. A retained
-                # lease is released when the process exits and its connection closes.
-                if lease is not None:
-                    if drained or not (launched and block):
-                        lease.release()
-                    else:
-                        logger.warning("worker.lease_retained_until_exit", executor_id=executor_id)
+                _settle_lease(lease, executor_id, done=drained or not (launched and block))
     logger.info("worker.stopped", profile=profile.value)
 
 

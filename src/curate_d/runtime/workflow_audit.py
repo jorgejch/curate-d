@@ -94,14 +94,7 @@ def _raw_calls(body: ast.AST) -> Iterator[tuple[int, str]]:
         func = node.func
         if not isinstance(func, ast.Attribute) or func.attr not in FORBIDDEN_CALLS:
             continue
-        receiver = func.value
-        name = (
-            receiver.attr
-            if isinstance(receiver, ast.Attribute)
-            else receiver.id
-            if isinstance(receiver, ast.Name)
-            else None
-        )
+        name = _name(func.value)
         if name in RAW_RECEIVERS:
             yield node.lineno, f"{name}.{func.attr}()"
 
