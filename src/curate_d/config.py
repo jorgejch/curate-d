@@ -159,8 +159,9 @@ class Settings(BaseSettings):
     alerting_test_routes_force_on_in_prod: bool = Field(
         default=False,
         description="Serve the alerting test routes (GET /__alerting_test_internal_error__, "
-        "always 500) in prod, or where no environment is named. Local and dev always serve "
-        "them, so this has no effect there.",
+        "always 500, and POST /__alerting_test_worker_error__/{io,cpu}, a workflow that "
+        "always fails in that worker) in prod, or where no environment is named. Local and "
+        "dev always serve them, so this has no effect there.",
     )
     ledger_database_url: PostgresDsn = Field(
         default=PostgresDsn(_LOCAL_LEDGER_DSN),

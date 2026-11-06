@@ -13,6 +13,7 @@ from typing import cast
 from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from curate_d.api.alerting_test import DbosWorkerAlertingTest, WorkerAlertingTestBackend
 from curate_d.api.audit import AuditBackend, LedgerAudit
 from curate_d.api.configuration import ConfigurationBackend, LedgerConfiguration
 from curate_d.api.connections import ConnectionsBackend, ledger_connections
@@ -36,6 +37,7 @@ class Backends:
     audit: AuditBackend
     dry_runs: DryRunsBackend
     throughput: ThroughputBackend
+    worker_alerting_test: WorkerAlertingTestBackend
 
 
 type BackendsFactory = Callable[[Settings, AsyncEngine], AbstractAsyncContextManager[Backends]]
@@ -81,6 +83,11 @@ def throughput(request: Request) -> ThroughputBackend:
     return of(request).throughput
 
 
+def worker_alerting_test(request: Request) -> WorkerAlertingTestBackend:
+    """Return the worker alerting test backend."""
+    return of(request).worker_alerting_test
+
+
 @asynccontextmanager
 async def ledger_backends(
     settings: Settings, engine: AsyncEngine
@@ -97,4 +104,5 @@ async def ledger_backends(
             audit=LedgerAudit(engine),
             dry_runs=LedgerDryRuns(engine, workflows),
             throughput=DbosThroughput(workflows),
+            worker_alerting_test=DbosWorkerAlertingTest(workflows),
         )

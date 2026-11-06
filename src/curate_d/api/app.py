@@ -16,8 +16,9 @@ is answered through `errors.py`.
 
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
+from typing import Annotated
 
-from fastapi import FastAPI, Request, Response, status
+from fastapi import Depends, FastAPI, Request, Response, status
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 from sqlalchemy import text
@@ -34,10 +35,12 @@ from curate_d.api import (
     review,
     throughput,
 )
+from curate_d.api.alerting_test import WorkerAlertingTest, WorkerAlertingTestBackend
 from curate_d.api.backends import BackendsFactory, ledger_backends
 from curate_d.config import Settings, get_settings
 from curate_d.observability import get_logger, trace_requests
 from curate_d.runtime.dbos_app import APPLICATION_VERSION
+from curate_d.runtime.profiles import WorkerProfile
 
 logger = get_logger(__name__)
 
@@ -62,6 +65,7 @@ class AlertingTestError(RuntimeError):
 
 
 ALERTING_TEST_PATH = "/__alerting_test_internal_error__"
+WORKER_ALERTING_TEST_PATH = "/__alerting_test_worker_error__/{profile}"
 
 
 def _answer_server_error(_request: Request, error: Exception) -> Response:
@@ -173,6 +177,24 @@ def create_app(
                 f"deliberate internal error for testing server-error alerting "
                 f"({ALERTING_TEST_PATH})"
             )
+
+        uses = Depends(backends.worker_alerting_test)
+
+        @app.post(
+            WORKER_ALERTING_TEST_PATH,
+            include_in_schema=False,
+            status_code=status.HTTP_202_ACCEPTED,
+        )
+        async def alerting_test_worker_error(
+            profile: WorkerProfile,
+            worker_alerting_test: Annotated[WorkerAlertingTestBackend, uses],
+        ) -> WorkerAlertingTest:
+            """Enqueue a workflow that fails in `profile`'s worker, as a bug there would.
+
+            The API itself succeeds: the failure, and what the alert under test watches,
+            are the worker's. Requests within one minute collapse into one failure.
+            """
+            return await worker_alerting_test.fail(profile)
 
     return app
 

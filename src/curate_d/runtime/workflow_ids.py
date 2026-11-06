@@ -29,6 +29,7 @@ FULL_RESCAN_PREFIX = "rescan"
 DRY_RUN_PREFIX = "dry-run"
 RECONCILE_PREFIX = "reconcile"
 DESTINATION_CHECK_PREFIX = "check"
+ALERTING_TEST_PREFIX = "alerting-test"
 
 _SEPARATOR = ":"
 _LOCATOR_TAG_DIGITS = 12
@@ -124,3 +125,12 @@ def reconcile_workflow_id(run: str, part: int) -> str:
 def destination_check_workflow_id(destination_id: DestinationId, cycle: str) -> str:
     """Return the identity of one destination's check in one checking cycle."""
     return _join(DESTINATION_CHECK_PREFIX, str(destination_id), cycle)
+
+
+def alerting_test_workflow_id(profile: str, minute: str) -> str:
+    """Return the identity of one deliberate worker failure: one per profile per minute.
+
+    `minute` is the UTC minute the test was asked for, so repeated requests within a minute
+    collapse into one failure and one alert, and a later minute fails again.
+    """
+    return _join(ALERTING_TEST_PREFIX, f"worker-{profile}", minute)

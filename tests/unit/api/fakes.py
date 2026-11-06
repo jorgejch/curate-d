@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from pydantic import BaseModel, SecretStr
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from curate_d.api.alerting_test import WorkerAlertingTest
 from curate_d.api.app import create_app
 from curate_d.api.audit import History
 from curate_d.api.backends import Backends
@@ -36,6 +37,7 @@ from curate_d.domain import (
     ReviewStatus,
 )
 from curate_d.rendering.templates import SEED_TEMPLATES
+from curate_d.runtime.profiles import WorkerProfile
 from curate_d.runtime.queues import QUEUE_SPECS, SPECS_BY_NAME, QueueName
 from tests.unit.api.dry_run_fakes import FakeDryRuns as FakeDryRuns
 
@@ -257,6 +259,22 @@ class FakeThroughput:
         return self.stages[stage]
 
 
+@dataclass
+class FakeWorkerAlertingTest:
+    """Records each profile asked to fail, in order."""
+
+    failed: list[WorkerProfile] = field(default_factory=list)
+
+    async def fail(self, profile: WorkerProfile) -> WorkerAlertingTest:
+        """Record the profile and answer as the real backend would for one minute."""
+        self.failed.append(profile)
+        return WorkerAlertingTest(
+            profile=profile,
+            queue="maintenance" if profile is WorkerProfile.IO else "fingerprint",
+            workflow_id=f"alerting-test:worker-{profile.value}:20261103T0600Z",
+        )
+
+
 def backends() -> Backends:
     """Fresh fake backends."""
     return Backends(
@@ -267,6 +285,7 @@ def backends() -> Backends:
         audit=FakeAudit(),
         dry_runs=FakeDryRuns(),
         throughput=FakeThroughput(),
+        worker_alerting_test=FakeWorkerAlertingTest(),
     )
 
 

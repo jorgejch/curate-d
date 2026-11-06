@@ -12,6 +12,7 @@ from curate_d.domain import (
     derive_destination_id,
 )
 from curate_d.runtime.workflow_ids import (
+    alerting_test_workflow_id,
     classification_workflow_id,
     content_placement_workflow_id,
     destination_check_workflow_id,
@@ -154,3 +155,12 @@ def test_the_check_identifier_carries_the_identity() -> None:
     identity = derive_destination_id("pcloud", "acct-1", "/Library")
     check = destination_check_workflow_id(_destination("library").id, "c1")
     assert str(identity) in check.split(":")
+
+
+def test_an_alerting_test_is_keyed_on_its_profile_and_minute() -> None:
+    """One failure per profile per minute: the same minute collapses, the next fails again."""
+    first = alerting_test_workflow_id("io", "20261103T0600Z")
+    assert first == "alerting-test:worker-io:20261103T0600Z"
+    assert alerting_test_workflow_id("io", "20261103T0600Z") == first
+    assert alerting_test_workflow_id("io", "20261103T0601Z") != first
+    assert alerting_test_workflow_id("cpu", "20261103T0600Z") != first
