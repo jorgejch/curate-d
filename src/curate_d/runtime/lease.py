@@ -273,7 +273,8 @@ def libpq_conninfo(url: str) -> str:
     """Return libpq keyword connection information for a SQLAlchemy database URL.
 
     Every part and query parameter keeps its exact value. Rendering the URL again through
-    SQLAlchemy would write a space in a parameter as `+`, which libpq does not decode.
+    SQLAlchemy would write a space in a parameter as `+`, which libpq does not decode. A query
+    parameter takes precedence over the same part of the address, as when libpq reads the URL.
 
     Raises:
         ValueError: The URL repeats a query parameter key; the message names the key.
@@ -285,7 +286,7 @@ def libpq_conninfo(url: str) -> str:
         if not isinstance(value, str):
             raise ValueError(f"the database URL repeats the parameter {key!r}")
         parameters[key] = value
-    return make_conninfo(**{key: str(value) for key, value in parts.items()}, **parameters)
+    return make_conninfo(**({key: str(value) for key, value in parts.items()} | parameters))
 
 
 def lease_conninfo(settings: Settings) -> str:

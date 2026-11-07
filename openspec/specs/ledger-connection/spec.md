@@ -150,7 +150,8 @@ value.
 
 A process that opens a libpq connection from the ledger URL, such as a lease session, promotion or
 environment reset, SHALL pass every URL parameter to libpq with its exact value. A URL that repeats
-a parameter key MUST stop that connection before it opens, with an error that names the key.
+a parameter key MUST stop that connection before it opens, with an error that names the key. A
+query parameter SHALL take precedence over the same part of the address, as when libpq reads the URL.
 
 #### Scenario: A parameter value holds a space
 
@@ -161,6 +162,11 @@ a parameter key MUST stop that connection before it opens, with an error that na
 
 - **WHEN** the ledger URL holds the user `u@x` and the password `p/w`
 - **THEN** the connection information that the process gives to libpq holds the user `u@x` and the password `p/w`
+
+#### Scenario: A query parameter sets a part of the address
+
+- **WHEN** `CURATE_D_LEDGER_DATABASE_URL` holds the host `db.example` and the parameter `host` with the value `/var/run/postgresql`
+- **THEN** the connection information that the process gives to libpq holds the host `/var/run/postgresql`
 
 #### Scenario: A full URL repeats a parameter key
 

@@ -260,6 +260,14 @@ def test_libpq_conninfo_keeps_every_value_exact() -> None:
     }
 
 
+def test_libpq_conninfo_lets_a_query_parameter_override_the_address() -> None:
+    """A query `host` replaces the address host, as libpq reads the same URL."""
+    url = "postgresql+psycopg://u:p@db.example:5432/ledger?host=%2Fvar%2Frun%2Fpostgresql"
+    conninfo = conninfo_to_dict(libpq_conninfo(url))
+    assert conninfo["host"] == "/var/run/postgresql"
+    assert conninfo_to_dict(url.replace("+psycopg", ""))["host"] == "/var/run/postgresql"
+
+
 def test_libpq_conninfo_refuses_a_repeated_parameter() -> None:
     """A URL that repeats a key opens nothing; the error names the key."""
     with pytest.raises(ValueError, match="sslmode"):
