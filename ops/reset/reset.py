@@ -22,6 +22,7 @@ from psycopg import sql
 from sqlalchemy.engine import make_url
 
 from curate_d.config import DeploymentEnvironment, Settings
+from curate_d.runtime.lease import libpq_conninfo
 from curate_d.staging.factories import refresh_readiness_marker
 from curate_d.staging.object_store import build_client_factory
 
@@ -109,9 +110,8 @@ def settings_for(environment: str) -> Settings:
 
 def connect(settings: Settings) -> psycopg.Connection:
     """Open an autocommit connection to the ledger as the application role."""
-    url = make_url(str(settings.ledger_database_url)).set(drivername="postgresql")
     return psycopg.connect(
-        url.render_as_string(hide_password=False),
+        libpq_conninfo(str(settings.ledger_database_url)),
         autocommit=True,
         application_name="curate-d environment reset",
     )

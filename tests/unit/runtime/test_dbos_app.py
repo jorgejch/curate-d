@@ -9,6 +9,7 @@ from importlib.metadata import version
 
 import pytest
 from dbos import DBOS
+from sqlalchemy.engine import make_url
 
 from curate_d.config import DeploymentEnvironment, Settings
 from curate_d.runtime import dbos_app
@@ -29,6 +30,16 @@ from curate_d.runtime.identity import (
     ExecutorIdentityError,
     resolve_executor_id,
 )
+
+
+def test_the_dbos_system_url_keeps_the_ledger_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Options built into the ledger URL reach DBOS's configuration unchanged."""
+    monkeypatch.delenv("CURATE_D_LEDGER_DATABASE_URL", raising=False)
+    monkeypatch.setenv("CURATE_D_LEDGER_DATABASE_OPTIONS", "sslmode=disable")
+    config = build_dbos_config(Settings(_env_file=None), executor_id="worker-1")
+    system_url = config["system_database_url"]
+    assert system_url is not None
+    assert make_url(system_url).query == {"sslmode": "disable"}
 
 
 def test_the_system_database_is_the_ledger_database(monkeypatch: pytest.MonkeyPatch) -> None:

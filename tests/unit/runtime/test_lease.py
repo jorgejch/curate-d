@@ -10,6 +10,7 @@ import time
 
 import psycopg
 import pytest
+from psycopg.conninfo import conninfo_to_dict
 
 from curate_d.config import Settings
 from curate_d.runtime import lease as lease_module
@@ -19,6 +20,7 @@ from curate_d.runtime.lease import (
     connect_session,
     lease_conninfo,
     lease_key,
+    libpq_conninfo,
     version_lease_key,
 )
 from tests.unit.runtime.fake_lease import FakeLockServer, FakeSession
@@ -231,7 +233,53 @@ def test_the_lease_targets_the_ledger_database_as_libpq_url(
         "CURATE_D_LEDGER_DATABASE_URL",
         "postgresql+psycopg://dbos:secret@system:5432/dbos?sslmode=require",
     )
-    assert lease_conninfo(Settings()) == "postgresql://dbos:secret@system:5432/dbos?sslmode=require"
+    assert conninfo_to_dict(lease_conninfo(Settings())) == {
+        "host": "system",
+        "port": "5432",
+        "dbname": "dbos",
+        "user": "dbos",
+        "password": "secret",
+        "sslmode": "require",
+    }
+
+
+def test_libpq_conninfo_keeps_every_value_exact() -> None:
+    """A space in a parameter and reserved characters in credentials reach libpq unchanged."""
+    conninfo = libpq_conninfo(
+        "postgresql+psycopg://u%40x:p%2Fw@db.example:5432/ledger"
+        "?options=-c%20statement_timeout%3D5000&sslmode=disable"
+    )
+    assert conninfo_to_dict(conninfo) == {
+        "host": "db.example",
+        "port": "5432",
+        "dbname": "ledger",
+        "user": "u@x",
+        "password": "p/w",
+        "options": "-c statement_timeout=5000",
+        "sslmode": "disable",
+    }
+
+
+@pytest.mark.parametrize(("path", "dbname"), [("ledger%20prod", "ledger prod"), ("a%2Fb", "a/b")])
+def test_libpq_conninfo_decodes_the_database_name(path: str, dbname: str) -> None:
+    """A percent-encoded database name reaches libpq decoded, as libpq reads the same URL."""
+    url = f"postgresql+psycopg://u:p@db.example:5432/{path}"
+    assert conninfo_to_dict(libpq_conninfo(url))["dbname"] == dbname
+    assert conninfo_to_dict(url.replace("+psycopg", ""))["dbname"] == dbname
+
+
+def test_libpq_conninfo_lets_a_query_parameter_override_the_address() -> None:
+    """A query `host` replaces the address host, as libpq reads the same URL."""
+    url = "postgresql+psycopg://u:p@db.example:5432/ledger?host=%2Fvar%2Frun%2Fpostgresql"
+    conninfo = conninfo_to_dict(libpq_conninfo(url))
+    assert conninfo["host"] == "/var/run/postgresql"
+    assert conninfo_to_dict(url.replace("+psycopg", ""))["host"] == "/var/run/postgresql"
+
+
+def test_libpq_conninfo_refuses_a_repeated_parameter() -> None:
+    """A URL that repeats a key opens nothing; the error names the key."""
+    with pytest.raises(ValueError, match="sslmode"):
+        libpq_conninfo("postgresql://u:p@db/ledger?sslmode=disable&sslmode=require")
 
 
 def test_a_lease_for_settings_names_its_purpose(monkeypatch: pytest.MonkeyPatch) -> None:

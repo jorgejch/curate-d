@@ -5,11 +5,13 @@ environment; nothing here has a default that would silently work against product
 """
 
 import re
+from collections.abc import Mapping
 from decimal import Decimal
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
-from typing import Final, Self
+from typing import Final, Self, cast
+from urllib.parse import parse_qsl, quote, urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import (
@@ -29,7 +31,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from curate_d.domain.source import Provider
 
-_LOCAL_LEDGER_DSN = "postgresql+psycopg://curate_d:curate_d@localhost:5433/curate_d"
 _HIDDEN_INPUT: Final = "<hidden>"
 
 # Inclusive bounds of each cron field: minute, hour, day of month, month, day of week
@@ -40,6 +41,58 @@ _CRON_FIELD_BOUNDS: Final = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
 _CRON_ITEM: Final = re.compile(
     r"\*(?:/(?P<every>\d+))?|(?P<start>\d+)(?:-(?P<end>\d+)(?:/(?P<step>\d+))?)?"
 )
+
+
+def _ledger_url(fields: Mapping[str, object]) -> PostgresDsn:
+    """Return the ledger URL put together from the already validated URL part settings."""
+    user = cast(str, fields["ledger_database_user"])
+    options = _ledger_options(cast(str, fields["ledger_database_options"]))
+    password = cast(SecretStr, fields["ledger_database_password"])
+    # `PostgresDsn.build` does not encode: a reserved character would change the URL's meaning.
+    return PostgresDsn.build(
+        scheme="postgresql+psycopg",
+        username=quote(user, safe=""),
+        password=quote(password.get_secret_value(), safe=""),
+        host=cast(str, fields["ledger_database_host"]),
+        port=cast(int, fields["ledger_database_port"]),
+        path=cast(str, fields["ledger_database_name"]),
+        # `quote` writes a space as `%20`; libpq does not decode the `+` that `quote_plus` writes.
+        query=urlencode(options, quote_via=quote) or None,
+    )
+
+
+# Keys that set a part of the connection a part setting owns; `password`, `passfile` and
+# `sslpassword` would also put a secret in a plain setting.
+_LEDGER_PART_KEYS: Final = frozenset(
+    {"user", "password", "passfile", "sslpassword", "host", "hostaddr", "port", "dbname", "service"}
+)
+
+
+def _ledger_options(value: str) -> list[tuple[str, str]]:
+    """Return the key and value pairs of a ledger options query string.
+
+    Raises:
+        ValueError: The value is malformed, or a key is empty, repeated or a part key. The
+            message names the key, never a value.
+    """
+    if not value:
+        return []
+    try:
+        # Keep `key=` pairs, or the key checks below never see them.
+        pairs = parse_qsl(value, keep_blank_values=True, strict_parsing=True)
+    except ValueError:
+        raise ValueError("ledger_database_options is not a key=value&key=value string") from None
+    keys = [key for key, _ in pairs]
+    for key in keys:
+        if not key:
+            raise ValueError("ledger_database_options has an empty key")
+        if keys.count(key) > 1:
+            raise ValueError(f"ledger_database_options repeats the key {key!r}")
+        if key.lower() in _LEDGER_PART_KEYS:
+            raise ValueError(
+                f"ledger_database_options sets {key!r}, which a ledger_database_* setting owns"
+            )
+    return pairs
 
 
 def _without_input(error: ValidationError) -> ValidationError:
@@ -163,8 +216,44 @@ class Settings(BaseSettings):
         "always fails in that worker) in prod, or where no environment is named. Local and "
         "dev always serve them, so this has no effect there.",
     )
+    # The URL parts come before the URL: its default factory reads them.
+    ledger_database_user: str = Field(
+        default="curate_d",
+        min_length=1,
+        description="Ledger user. Ignored when `ledger_database_url` is set.",
+    )
+    ledger_database_password: SecretStr = Field(
+        default=SecretStr("curate_d"),
+        min_length=1,
+        description="Ledger password. Ignored when `ledger_database_url` is set.",
+    )
+    ledger_database_host: str = Field(
+        default="localhost",
+        # One name, IPv4 address or bracketed IPv6 address: the URL builder does not encode the
+        # host, so `/` would start the path and `,` would make a multi-host URL.
+        pattern=r"^(\[[0-9A-Fa-f:.]+\]|[^\s/\\?#@:,%\[\]]+)$",
+        description="Ledger host, local or remote. Ignored when `ledger_database_url` is set.",
+    )
+    ledger_database_port: int = Field(
+        default=5433,
+        ge=1,
+        le=65535,
+        description="Ledger port. Ignored when `ledger_database_url` is set.",
+    )
+    ledger_database_name: str = Field(
+        default="curate_d",
+        # The URL builder does not encode the path, so `?` would start the URL query.
+        pattern=r"^[A-Za-z0-9_.$-]+$",
+        description="Ledger database name. Ignored when `ledger_database_url` is set.",
+    )
+    ledger_database_options: str = Field(
+        default="",
+        description="Connection parameters added to the URL, as a query string: "
+        "`sslmode=disable&connect_timeout=10`. Keys that set a part of the connection are "
+        "refused. Ignored when `ledger_database_url` is set.",
+    )
     ledger_database_url: PostgresDsn = Field(
-        default=PostgresDsn(_LOCAL_LEDGER_DSN),
+        default_factory=_ledger_url,
         description="Ledger, audit log, application data, and DBOS's own tables (schema "
         "`dbos`): one database, so a ledger write and a workflow enqueue can share one "
         "transaction.",
@@ -434,6 +523,13 @@ class Settings(BaseSettings):
         "until each handle closes, so this bounds the pod's scratch use across readers "
         "rather than trusting the node's disk to be large enough.",
     )
+
+    @field_validator("ledger_database_options")
+    @classmethod
+    def _ledger_database_options_are_valid(cls, value: str) -> str:
+        """Reject options that are malformed or that set a part of the connection."""
+        _ledger_options(value)
+        return value
 
     @field_validator("recovery_sweep_schedule")
     @classmethod

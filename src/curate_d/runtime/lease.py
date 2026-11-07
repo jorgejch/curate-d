@@ -42,6 +42,7 @@ from hashlib import sha256
 from typing import Final, LiteralString, Protocol, Self
 
 import psycopg
+from psycopg.conninfo import make_conninfo
 from psycopg.rows import TupleRow
 from sqlalchemy.engine import make_url
 
@@ -268,10 +269,29 @@ class PostgresLeaseSession:
         self._connection.close()
 
 
+def libpq_conninfo(url: str) -> str:
+    """Return libpq keyword connection information for a SQLAlchemy database URL.
+
+    Every part and query parameter keeps its exact value. Rendering the URL again through
+    SQLAlchemy would write a space in a parameter as `+`, which libpq does not decode. A query
+    parameter takes precedence over the same part of the address, as when libpq reads the URL.
+
+    Raises:
+        ValueError: The URL repeats a query parameter key; the message names the key.
+    """
+    parsed = make_url(url)
+    parts = parsed.translate_connect_args(username="user", database="dbname")
+    parameters: dict[str, str] = {}
+    for key, value in parsed.query.items():
+        if not isinstance(value, str):
+            raise ValueError(f"the database URL repeats the parameter {key!r}")
+        parameters[key] = value
+    return make_conninfo(**({key: str(value) for key, value in parts.items()} | parameters))
+
+
 def lease_conninfo(settings: Settings) -> str:
-    """Return a libpq URL for the database holding the DBOS system tables."""
-    url = make_url(system_database_url(settings)).set(drivername="postgresql")
-    return url.render_as_string(hide_password=False)
+    """Return libpq connection information for the database holding the DBOS system tables."""
+    return libpq_conninfo(system_database_url(settings))
 
 
 def connect_dedicated(conninfo: str, *, application_name: str) -> psycopg.Connection[TupleRow]:
