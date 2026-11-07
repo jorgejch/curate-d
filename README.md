@@ -93,6 +93,14 @@ inference is CPU-only.
 
 Full stack with pinned versions lives in [`openspec/config.yaml`](openspec/config.yaml).
 
+## Standards
+
+curate.d is built to three standards, all under [the guarantee](#the-guarantee): DBOS's own
+guidance, the Twelve-Factor manifesto, and the coding standards in
+[`openspec/config.yaml`](openspec/config.yaml). [`docs/twelve-factor.md`](docs/twelve-factor.md)
+gives their precedence, the pinned manifesto text, and where curate.d conforms, is limited
+by DBOS, or has a gap.
+
 ## System dependencies
 
 Install these before `make install`; they're not pulled in by `uv`.
@@ -147,6 +155,13 @@ version, re-run the install and commit what changes:
 npx skills add dbos-inc/agent-skills --skill dbos-python -a claude-code codex -y
 ```
 
+The install can leave a copy at `.claude/skills/dbos-python` where the link was. Restore
+the link before you commit; the unit suite fails on a copy:
+
+```bash
+[ -L .claude/skills/dbos-python ] || { diff -r .claude/skills/dbos-python .agents/skills/dbos-python && rm -r .claude/skills/dbos-python && git restore .claude/skills/dbos-python; }
+```
+
 See [CONTRIBUTING.md](CONTRIBUTING.md) for how changes, commits, tests and pull requests
 are expected to look.
 
@@ -173,7 +188,7 @@ is verified separately against the real buckets.
   tests/integration/  tests that need the local stack: Postgres, RustFS and the rclone sidecar
   migrations/       Alembic migrations for the ledger schema
   docker/           container image build
-  docs/             staging, recovery, reset and rewind guides, diagrams
+  docs/             staging, recovery, reset and rewind guides, Twelve-Factor adoption, diagrams
   ops/              local stack config and operator scripts; deployment manifests
                     are kept outside this repository
   .github/          CI (checks, integration suite), image publishing, issue and PR templates

@@ -54,6 +54,15 @@ context: |
   - **TypeScript / React** - web interface. The control plane ships as an HTTP API first.
 
   ## Standards
+
+  Three standards govern how curate.d is built, under the safety guarantees. On a conflict the
+  earlier entry wins; a later one never overrides it.
+
+  1. **Safety guarantees** - above the standards: the Project paragraph above, and README, "The guarantee".
+  2. **DBOS** - the vendored `dbos-python` skill (`.agents/skills/dbos-python`, pinned in `skills-lock.json`), as amended by the departures in `CLAUDE.md`, "DBOS".
+  3. **Twelve-Factor** - the manifesto at the commit pinned in `docs/twelve-factor.md`, which records the status of each of its 33 rules. Where DBOS requires otherwise, DBOS wins and the rule's row says `Limited by DBOS`, naming the skill reference.
+  4. **Coding standards** - "Coding & Documentation Conventions" below, and:
+
   - **Versioning**: Semantic Versioning (SemVer: `vMAJOR.MINOR.PATCH`)
   - **Git Commits**: Conventional Commits (`feat:`, `fix:`, `chore:`, `refactor:`, `docs:`)
 
@@ -119,6 +128,8 @@ rules:
   specs:
     - "Write requirements in atomic, testable GIVEN/WHEN/THEN or RFC 2119 (MUST/SHALL) statements."
     - "Every requirement must specify expected behavior on failure, not just the happy path."
+  design:
+    - "Name each Twelve-Factor rule (I.1 to XII.2) the change departs from or brings into conformance, and update that rule's row in docs/twelve-factor.md in the same change. A departure names the higher standard that requires it."
   tasks:
     - "Every implementation task must include an automated test or concrete verification command."
     - "Keep tasks atomic: one logical commit per task."
