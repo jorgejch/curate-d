@@ -10,6 +10,24 @@
 > Keep it whole, as upstream ships it: don't trim it by hand, references to DBOS products
 > curate.d does not use included.
 
+## Standards
+
+Three standards govern this repository, under the safety guarantees. On a conflict the
+earlier entry wins; a later one never overrides it.
+
+1. **Safety guarantees**: above the standards. `README.md`, "The guarantee", and the
+   Project paragraph of `openspec/config.yaml`.
+2. **DBOS**: the `dbos-python` skill, as amended by the departures under [DBOS](#dbos).
+3. **Twelve-Factor**: the manifesto at the commit pinned in
+   [`docs/twelve-factor.md`](docs/twelve-factor.md), which records the status of each rule.
+4. **Coding standards**: `openspec/config.yaml`, "Coding & Documentation Conventions".
+
+A design names each Twelve-Factor rule its change departs from or brings into conformance,
+and the change updates that rule's row in `docs/twelve-factor.md`. A row says
+`Limited by DBOS` only where the skill or a recorded departure requires the behaviour, and
+it names the skill reference; a choice the skill only permits is ours, and counts as
+conformance or as a gap.
+
 ## Changes
 
 Make every change except a simple fix (a typo, a one-line bug fix, a doc correction)

@@ -206,6 +206,7 @@ The full list is in [`openspec/config.yaml`](openspec/config.yaml) and
 | All ledger mutations executed within DBOS workflows MUST use a DBOS datasource transaction defined through `runtime/datasource.py`. Never perform ledger mutations through `@DBOS.step()`, unmanaged SQLAlchemy sessions, or direct database access within workflow functions. Ledger mutations and their DBOS execution checkpoints must commit atomically. | `python -m curate_d.runtime.workflow_audit`, in `make lint` |
 | No private library internals (an underscore module or attribute, or a copy of private logic or SQL) without the maintainer's approval. | `tests/unit/test_no_library_internals.py`, ruff `TID251` |
 | No source file, test, migration or Make target reads another repository on the machine. | `tests/unit/test_isolation.py` |
+| The standards keep one order of precedence in `openspec/config.yaml`, `CLAUDE.md` and `docs/twelve-factor.md`. Every Twelve-Factor rule has one row and one status there, a rule limited by DBOS names a reference of the vendored skill, and `.claude/skills/dbos-python` is a link to that skill, not a copy. | `tests/unit/infrastructure/test_engineering_standards.py` |
 
 ### DBOS
 
