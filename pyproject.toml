@@ -43,6 +43,7 @@ dependencies = [
     "uvicorn[standard]~=0.54.0",
     "pydantic==2.14.2",
     "pydantic-settings==2.16.2",
+    "pydantic-core==2.50.2",
     # Provider APIs and the rclone remote-control API
     "httpx~=0.28",
     # Authenticated symmetric encryption for stored provider credentials
@@ -69,7 +70,7 @@ dependencies = [
     # defaults underneath the wire-behavior evidence, so it needs re-verifying against both
     # backends first. uv.lock fixes the exact release.
     "aioboto3~=15.5.0",
-    "pyrefly==1.4.0",
+    "pyrefly==1.4.0"
 ]
 
 # Deferred:
