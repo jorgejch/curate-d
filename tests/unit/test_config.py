@@ -194,7 +194,10 @@ def test_no_ledger_options_leave_the_url_without_a_query(monkeypatch: pytest.Mon
         "sslmode",
         "a=1&&b=2",
         "=x",
+        "=",
         "sslmode=disable&sslmode=require",
+        "sslmode=disable&sslmode=",
+        "password=",
         "password=other",
         "PASSWORD=other",
         "passfile=other",
@@ -217,6 +220,16 @@ def test_invalid_ledger_options_stop_settings_load(
         Settings(_env_file=None)
     _assert_hidden(raised.value, "other")
     assert all(line["input"] == "<hidden>" for line in raised.value.errors())
+
+
+def test_a_ledger_option_with_an_empty_value_reaches_the_derived_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An option key with an empty value is kept, not dropped."""
+    monkeypatch.delenv("CURATE_D_LEDGER_DATABASE_URL", raising=False)
+    monkeypatch.setenv("CURATE_D_LEDGER_DATABASE_OPTIONS", "sslmode=disable&application_name=")
+    raw = str(Settings(_env_file=None).ledger_database_url)
+    assert raw.endswith("?sslmode=disable&application_name=")
 
 
 def test_settings_are_frozen() -> None:

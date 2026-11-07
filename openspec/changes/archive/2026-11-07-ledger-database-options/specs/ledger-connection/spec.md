@@ -27,7 +27,7 @@ value.
 
 #### Scenario: An option names a part of the connection
 
-- **WHEN** settings load with `CURATE_D_LEDGER_DATABASE_OPTIONS` set to `password=other` or `host=other`
+- **WHEN** settings load with `CURATE_D_LEDGER_DATABASE_OPTIONS` set to `password=other`, `password=` or `host=other`
 - **THEN** settings fail to load, the error names `ledger_database_options`, and the error does not contain `other`
 
 #### Scenario: An option carries a secret
@@ -37,12 +37,12 @@ value.
 
 #### Scenario: The options are malformed
 
-- **WHEN** settings load with `CURATE_D_LEDGER_DATABASE_OPTIONS` set to `sslmode`, `a=1&&b=2` or `=x`
+- **WHEN** settings load with `CURATE_D_LEDGER_DATABASE_OPTIONS` set to `sslmode`, `a=1&&b=2`, `=x` or `=`
 - **THEN** settings fail to load, and the error names `ledger_database_options`
 
 #### Scenario: An option key repeats
 
-- **WHEN** settings load with `CURATE_D_LEDGER_DATABASE_OPTIONS` set to `sslmode=disable&sslmode=require`
+- **WHEN** settings load with `CURATE_D_LEDGER_DATABASE_OPTIONS` set to `sslmode=disable&sslmode=require` or `sslmode=disable&sslmode=`
 - **THEN** settings fail to load, and the error names `ledger_database_options`
 
 ### Requirement: Direct connections keep the URL parameters

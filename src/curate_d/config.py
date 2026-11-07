@@ -78,7 +78,8 @@ def _ledger_options(value: str) -> list[tuple[str, str]]:
     if not value:
         return []
     try:
-        pairs = parse_qsl(value, strict_parsing=True)
+        # Keep `key=` pairs, or the key checks below never see them.
+        pairs = parse_qsl(value, keep_blank_values=True, strict_parsing=True)
     except ValueError:
         raise ValueError("ledger_database_options is not a key=value&key=value string") from None
     keys = [key for key, _ in pairs]
