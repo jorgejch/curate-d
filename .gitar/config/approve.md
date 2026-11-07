@@ -35,10 +35,13 @@ Any one of these refuses the pull request:
   account: a commit a human authored and pushed stays eligible. The only exception is a category 4
   pull request's own commits, as that category defines them.
 - **Identity unknown.** The author of the pull request, or of any commit in it, can't be
-  established.
+  established. Category 4 needs only the pull request's author: its **Commits** condition states
+  the rule for commit data.
 - **From a fork**, or into any base but `dev`. `main` takes release merges only.
 - **Draft.**
-- **Risk above low**, or no risk assessment available.
+- **Risk above low**, or no risk assessment available. Category 4 alone also accepts medium:
+  a version change's impact is uncertain, which Gitar rates medium, and the required checks judge
+  it. A high rating or no rating refuses category 4 too.
 - **Too large**: more than 10 changed files or 200 changed lines. Category 4 is exempt: its diff
   rules bound it instead, since a grouped `uv.lock` update passes 200 lines in wheel hashes alone.
 - **Deletes, renames or moves a file**, or adds or changes a binary file.
@@ -62,17 +65,15 @@ request is category 4. Category 4 never combines with the others.
 4. **Dependabot updates**: a version or a security update that meets every one of these
    conditions. The two kinds follow the same conditions.
    - **Author.** `dependabot[bot]` opened it, from a branch in this repository.
-   - **Commits.** `dependabot[bot]` authored every commit. Each commit's committer is
-     `dependabot[bot]` or `web-flow`, the account GitHub records for the signed commits it
-     creates for Dependabot, rebases included. A commit authored by any other account, human or
-     bot, refuses: the diff is then no longer Dependabot's alone.
-   - **Update types.** The last commit's message ends in an `updated-dependencies:` block that
-     names every dependency the pull request changes. Judge each entry's update type from its old
-     and new versions in the diff (the `version` in `uv.lock`, the `FROM` tag), never from the
-     block alone: a security update's block carries no `update-type`. Compare the versions'
-     first three numeric parts: the same major and minor is a patch, the same major and a higher
-     minor is a minor, anything else is a major. When the block does give an `update-type`, it
-     must agree with the versions. Every entry is one of:
+   - **Commits.** Gitar's review does not show commit authors, committers or messages, and that
+     absence refuses nothing here. A commit the review does show as authored by another account,
+     human or bot, refuses: the diff is then no longer Dependabot's alone.
+   - **Update types.** The diff names the dependencies: every package whose `version` changes in
+     `uv.lock` and every image whose `FROM` tag changes. Judge each one's update type from its old
+     and new versions there. Compare the versions' first three numeric parts: the same major and
+     minor is a patch, the same major and a higher minor is a minor, anything else is a major. A
+     title or description that names a dependency or a version the diff contradicts refuses; one
+     that is missing or truncated does not. Every dependency is one of:
      - a `uv` patch, direct or indirect;
      - a `uv` minor whose old and new versions both have a major of `1` or more. SemVer lets a
        `0.y` minor break anything, so a minor of a `0.x` package (`fastapi`, `uvicorn`, `httpx`,
@@ -81,23 +82,23 @@ request is category 4. Category 4 never combines with the others.
 
      The ecosystem is the one in the branch name (`dependabot/uv/...`, `dependabot/docker/...`).
      A `github-actions` update of any type is refused: a new action release runs in CI with the
-     repository's secrets as soon as it merges. A major, a `docker` minor, a version whose parts
-     can't be compared, an `update-type` that disagrees with the versions, and a block that is
-     missing, can't be read or leaves out a changed dependency all refuse.
-   - **Not `dbos`.** No entry names `dbos`. `CLAUDE.md` requires a `dbos` bump to refresh the
-     vendored `.agents/skills/dbos-python` and its `skills-lock.json` pin in the same change, and
-     Dependabot does neither.
-   - **Not ignored.** No entry is an update that an `ignore` rule in `.github/dependabot.yml`
-     excludes from version updates, such as an `aioboto3` minor. GitHub's documentation does not
+     repository's secrets as soon as it merges. A major, a `docker` minor and a version whose parts
+     can't be compared all refuse.
+   - **Not `dbos`.** The diff changes no `dbos` version. `CLAUDE.md` requires a `dbos` bump to
+     refresh the vendored `.agents/skills/dbos-python` and its `skills-lock.json` pin in the same
+     change, and Dependabot does neither.
+   - **Not ignored.** No dependency's update is one that an `ignore` rule in
+     `.github/dependabot.yml` excludes from version updates, such as an `aioboto3` minor.
+     GitHub's documentation does not
      say that an `ignore` rule's `update-types` also holds back a security update, so this file
      holds the exclusion: such an update waits for a human.
    - **Version references only.** Every changed line is a version reference of a dependency the
-     block names:
-     - `uv.lock`: the named packages' versions, sources, sdists, wheels and hashes, and the
-       root project's copy of each named dependency's specifier (under `[package.metadata]`
+     update changes:
+     - `uv.lock`: those packages' versions, sources, sdists, wheels and hashes, and the
+       root project's copy of each one's specifier (under `[package.metadata]`
        `requires-dist` or `[package.metadata.requires-dev]`) when it matches the
        `pyproject.toml` rewrite. A package added to or removed from the lock refuses; name it.
-     - `pyproject.toml`: only the named dependencies' version specifiers, rewritten when the new
+     - `pyproject.toml`: only those dependencies' version specifiers, rewritten when the new
        version leaves the declared range (`sqlalchemy~=2.1.1` to `~=2.2.0`). A comment, another
        key or another dependency refuses.
      - `docker/Dockerfile`: only the tag and `@sha256:` digest of `FROM` lines. A digest that
@@ -122,17 +123,17 @@ Everything else needs a human, including, at least:
 ## When uncertain
 
 If any condition can't be established from the pull request's metadata, commits, changed files,
-review results and risk assessment, don't approve. Say which condition was not established and
+review results and risk assessment, don't approve; commit data under category 4 is the one
+exception, as its **Commits** condition states. Say which condition was not established and
 what would establish it. A pull request that is close to eligible is not eligible.
 
 ## Reporting
 
 - On approval under categories 1 to 3, name the eligible category each changed file falls under,
   and state that the author and every commit's author and committer are human accounts.
-- On approval under category 4, say whether it is a version or a security update, list each
-  dependency with its old and new version and the update type those versions give, and state that
-  `dependabot[bot]` authored every commit and that no package was added to or removed from
-  `uv.lock`. For a `uv` minor, state that no compatibility check other than the
+- On approval under category 4, list each dependency with its old and new version and the update
+  type those versions give, state the risk rating, and state that no package was added to or
+  removed from `uv.lock`. For a `uv` minor, state that no compatibility check other than the
   required checks applies.
 - On refusal, name the first condition that refused it.
 - Never claim a test, lint or check ran or passed; Gitar runs none. The ruleset decides merge
@@ -148,18 +149,18 @@ Approve:
   `Return the...`, and nothing else in the file changes.
 - A new test function in `tests/unit/` pins an edge case the spec names, using the existing
   fixtures unchanged.
-- `dependabot[bot]` opens "bump the python-patches group with 4 updates". Its one commit, signed
-  by `web-flow`, gives `semver-patch` for every entry, and only those four packages change in
-  `uv.lock`. A patch of `fastapi` from `0.142.2` to `0.142.3`
-  in that group is eligible too.
-- `dependabot[bot]` bumps `sqlalchemy` from `2.1.1` to `2.2.0` as `semver-minor`, rewriting
+- `dependabot[bot]` opens "bump the python-patches group with 4 updates". The `uv.lock` diff moves
+  each of the four by a patch and changes no other package, and Gitar rates it medium. A patch of
+  `fastapi` from `0.142.2` to `0.142.3` in that group is eligible too.
+- `dependabot[bot]` bumps `sqlalchemy` from `2.1.1` to `2.2.0`, rewriting
   `~=2.1.1` to `~=2.2.0` in `pyproject.toml` and in `uv.lock`'s `requires-dist`, and the package
   in `uv.lock`. Approve, and state that the required checks are the only compatibility test.
 - `dependabot[bot]` bumps the `python` image from `3.12.15-slim-trixie` to
-  `3.12.16-slim-trixie` as `semver-patch`, changing the tag and digest on each `FROM` line.
+  `3.12.16-slim-trixie`, changing the tag and digest on each `FROM` line.
+- `dependabot[bot]` bumps the `astral-sh/uv` image from `0.13.6` to `0.13.7`, changing one `FROM`
+  line's tag and digest. Gitar rates it medium, and its review shows no commit data.
 - `dependabot[bot]` opens a security update that moves `pypdf` from `6.21.0` to `6.21.1` and the
-  indirect `certifi` from `2026.10.5` to `2026.10.19`. Its block gives no `update-type`; the
-  `uv.lock` versions make both patches.
+  indirect `certifi` from `2026.10.5` to `2026.10.19`. The `uv.lock` versions make both patches.
 
 Refuse:
 
@@ -168,17 +169,20 @@ Refuse:
   `@claude` for a fix: carries a bot's commit.
 - `dependabot[bot]` bumps an action from `v8.3.0` to `v8.3.1` in the
   `actions-patches-and-minors` group: a `github-actions` update.
-- `dependabot[bot]` bumps `pydantic` from `2.13` to `3.0` as `semver-major`: a major update.
-- `dependabot[bot]` bumps `fastapi` from `0.142.2` to `0.162.0` as `semver-minor`: a minor of a
-  `0.x` package.
+- `dependabot[bot]` bumps `pydantic` from `2.13` to `3.0`: a major update.
+- `dependabot[bot]` bumps `fastapi` from `0.142.2` to `0.162.0`: a minor of a `0.x` package.
+- An otherwise eligible Dependabot update that Gitar rates high: risk above medium.
+- A maintainer's docs pull request that Gitar rates medium: only category 4 accepts medium.
+- A Dependabot pull request's description says `pypdf` moves to `6.21.1`, and the diff moves it to
+  `6.22.0`: the description contradicts the diff.
 - `dependabot[bot]` bumps the `uv` image from `0.13.5` to `0.14.0`: a `docker` minor.
 - `dependabot[bot]` changes a `FROM` digest under the same tag: a digest-only refresh.
 - `dependabot[bot]` opens a security update that moves `pillow` from `12.3.0` to `13.0.0`: the
-  `uv.lock` versions make it a major, though the block names no `update-type`.
+  `uv.lock` versions make it a major.
 - A `python-patches` group includes a `dbos` patch: `dbos` needs its skill refreshed.
 - `dependabot[bot]` opens a security update that moves `aioboto3` from `15.5.0` to `15.6.0`:
   `dependabot.yml` ignores `aioboto3` minors until they are re-verified against RustFS and OVH.
-- A maintainer pushes a fix onto a Dependabot pull request: a commit not authored by
+- The review shows a maintainer's commit on a Dependabot pull request: a commit not authored by
   `dependabot[bot]`.
 - A `python-patches` update adds a new package to `uv.lock`: the lock gains a package.
 - A docs fix also corrects a log message in `src/`: a log message is code.
