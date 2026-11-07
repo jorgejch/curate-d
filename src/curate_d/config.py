@@ -61,10 +61,10 @@ def _ledger_url(fields: Mapping[str, object]) -> PostgresDsn:
     )
 
 
-# Keys that set a part of the connection a part setting owns; `password` and `passfile` would
-# also put a secret in a plain setting.
+# Keys that set a part of the connection a part setting owns; `password`, `passfile` and
+# `sslpassword` would also put a secret in a plain setting.
 _LEDGER_PART_KEYS: Final = frozenset(
-    {"user", "password", "passfile", "host", "hostaddr", "port", "dbname", "service"}
+    {"user", "password", "passfile", "sslpassword", "host", "hostaddr", "port", "dbname", "service"}
 )
 
 

@@ -198,6 +198,7 @@ def test_no_ledger_options_leave_the_url_without_a_query(monkeypatch: pytest.Mon
         "password=other",
         "PASSWORD=other",
         "passfile=other",
+        "sslpassword=other",
         "host=other",
         "hostaddr=other",
         "port=other",
