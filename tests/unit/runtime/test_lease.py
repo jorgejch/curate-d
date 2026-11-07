@@ -260,6 +260,14 @@ def test_libpq_conninfo_keeps_every_value_exact() -> None:
     }
 
 
+@pytest.mark.parametrize(("path", "dbname"), [("ledger%20prod", "ledger prod"), ("a%2Fb", "a/b")])
+def test_libpq_conninfo_decodes_the_database_name(path: str, dbname: str) -> None:
+    """A percent-encoded database name reaches libpq decoded, as libpq reads the same URL."""
+    url = f"postgresql+psycopg://u:p@db.example:5432/{path}"
+    assert conninfo_to_dict(libpq_conninfo(url))["dbname"] == dbname
+    assert conninfo_to_dict(url.replace("+psycopg", ""))["dbname"] == dbname
+
+
 def test_libpq_conninfo_lets_a_query_parameter_override_the_address() -> None:
     """A query `host` replaces the address host, as libpq reads the same URL."""
     url = "postgresql+psycopg://u:p@db.example:5432/ledger?host=%2Fvar%2Frun%2Fpostgresql"
