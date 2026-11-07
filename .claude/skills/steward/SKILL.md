@@ -118,6 +118,33 @@ it passing.
   handle it. Otherwise don't push a parallel fix for it. Wait for the Action's run to
   finish, fetch the branch, and then handle whatever is still open.
 
+## Watching the PR
+
+When you steward a PR in a session, subscribe to its activity and handle each new review
+comment as it arrives, by the rules in Review comments. Do not wait to be asked again.
+
+- **Subscribe** when the session offers PR activity events. Otherwise poll every 2 to 3
+  minutes (`gh api repos/<owner>/<repo>/pulls/<n>/comments`, `.../pulls/<n>/reviews` and
+  `.../issues/<n>/comments`, or `gh pr view <n> --json state,reviews,comments`).
+- **A new review comment** is an inline comment, a review body or a PR comment that someone
+  else wrote after the last one you handled. Your own replies and commits are not new. A
+  bot comment (Gitar, SonarQube, Copilot) counts.
+- **Handle each one** as Review comments says: fix, validate, push and reply, or reply
+  proposing a change, or leave the thread open for the owner. A comment that is a
+  question for the owner or a security finding ends the automatic handling of that thread
+  only; keep watching the others.
+- **Stop** at the first of these:
+  - the PR is closed or merged;
+  - 10 minutes pass with no new review comment. Start the 10 minutes when you finish
+    handling the last comment (the push and the reply), not when it arrived. A new comment
+    restarts the count.
+- **On stop**, post nothing new. Tell the user in the session why you stopped, and list any
+  thread you left open and why.
+- Do not stop while a push you made is still waiting for its `Checks` or `Integration tests`
+  run to report: a failed run is also work for you. The 10 minutes count only after both
+  runs are green, or after you reported a failure you cannot fix under What never gets you
+  to green here.
+
 ## What never gets you to green here
 
 Each of these is a reason to stop and report, never a fix:
