@@ -71,14 +71,16 @@ cleanup of unrelated code.
   criteria. Gitar reads it from `dev`, so a pull request can't change the criteria for its own
   fixes, and the file turns nothing on: the `gitar-managed` label turns auto-apply on for one
   pull request. [`label-owner-prs.yml`](.github/workflows/label-owner-prs.yml) adds it to every
-  pull request the repository owner opens; Dependabot's never get it, since a Gitar commit would
-  end their auto-approval. `gitar auto-apply:off` turns it off on one pull request. A fix Gitar
-  commits always waits for a human review, as below.
+  pull request the repository owner opens; Dependabot's never get it, since a Gitar fix would
+  change more than version references and end their auto-approval. `gitar auto-apply:off` turns it
+  off on one pull request. A fix Gitar commits always waits for a human review, as below.
   [`.gitar/config/approve.md`](.gitar/config/approve.md) bounds which pull requests it may
-  approve, and so auto-merge: documentation prose, comment- and docstring-only changes, added
-  unit tests, and Dependabot version and security updates limited to `uv` patches, `uv` minors of
-  packages at `1.0` or above, and `docker` image patches, with the required checks as their only
-  compatibility test. Never another pull request a bot opened or committed to, never a
+  approve, and so auto-merge: documentation prose, comment- and docstring-only changes and added
+  unit tests at low risk, and, at low or medium risk, Dependabot version and security updates
+  limited to `uv` patches, `uv` minors of packages at `1.0` or above, and `docker` image patches,
+  with the required checks as their only compatibility test. Gitar's review shows no commit
+  authors, so it judges those updates from the pull request's author and its diff. Never another
+  pull request a bot opened or committed to, never a
   `github-actions` or `dbos` update or one `.github/dependabot.yml` ignores, and never one that
   changes `.gitar/`.
 
