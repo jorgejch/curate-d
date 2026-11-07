@@ -51,7 +51,9 @@ reads a `dict` field only as JSON, which is harder to write in a manifest and gi
 - a repeated key;
 - a key, compared without case, from `user`, `password`, `passfile`, `host`, `hostaddr`, `port`,
   `dbname` and `service`. Each of these sets a part of the connection that a part setting owns, and
-  `password` or `passfile` would put a secret in a plain field.
+  `password` or `passfile` would put a secret in a plain field;
+- the key `sslpassword`, the passphrase of the client's SSL key, which is a secret. It was added
+  after review on PR #147.
 
 The error message names the rejected key, never a value. `_hide_input_in_errors` then removes the
 input from the error, as it does for every field.

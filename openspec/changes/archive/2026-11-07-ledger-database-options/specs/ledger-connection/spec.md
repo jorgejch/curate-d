@@ -6,8 +6,9 @@
 
 The system SHALL read connection parameters from `CURATE_D_LEDGER_DATABASE_OPTIONS`, as a URL query
 string, and SHALL add them to the URL that the part settings build. The default SHALL be no
-parameter. A malformed value, a repeated key, or a key that names a part of the connection MUST
-stop the process at settings load, and the error MUST NOT contain the value.
+parameter. A malformed value, a repeated key, a key that names a part of the connection, or a key
+that carries a secret MUST stop the process at settings load, and the error MUST NOT contain the
+value.
 
 #### Scenario: No options are set
 
@@ -27,6 +28,11 @@ stop the process at settings load, and the error MUST NOT contain the value.
 #### Scenario: An option names a part of the connection
 
 - **WHEN** settings load with `CURATE_D_LEDGER_DATABASE_OPTIONS` set to `password=other` or `host=other`
+- **THEN** settings fail to load, the error names `ledger_database_options`, and the error does not contain `other`
+
+#### Scenario: An option carries a secret
+
+- **WHEN** settings load with `CURATE_D_LEDGER_DATABASE_OPTIONS` set to `sslkey=/k&sslpassword=other`
 - **THEN** settings fail to load, the error names `ledger_database_options`, and the error does not contain `other`
 
 #### Scenario: The options are malformed
