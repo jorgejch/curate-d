@@ -88,9 +88,11 @@ def test_a_full_ledger_url_takes_precedence_over_the_credentials(
     monkeypatch.setenv("CURATE_D_LEDGER_DATABASE_HOST", "ignored-host")
     monkeypatch.setenv("CURATE_D_LEDGER_DATABASE_PORT", "1234")
     monkeypatch.setenv("CURATE_D_LEDGER_DATABASE_NAME", "ignored_name")
+    monkeypatch.setenv("CURATE_D_LEDGER_DATABASE_OPTIONS", "application_name=ignored")
     url = make_url(str(Settings(_env_file=None).ledger_database_url))
     assert (url.username, url.password) == ("url-user", "url-pw")
     assert (url.host, url.port, url.database) == ("ledger-host", 5432, "ledger")
+    assert dict(url.query) == {}
 
 
 @pytest.mark.parametrize("host", ["db.example", "10.0.0.5", "[::1]"])
@@ -158,6 +160,61 @@ def test_an_empty_ledger_credential_stops_settings_load(
     with pytest.raises(ValidationError, match=f"ledger_database_{name}") as raised:
         Settings(_env_file=None)
     _assert_hidden(raised.value, "other-pw" if name == "user" else "other-user")
+    assert all(line["input"] == "<hidden>" for line in raised.value.errors())
+
+
+def test_ledger_options_reach_the_derived_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Options become the URL query, a space intact, beside the part settings."""
+    monkeypatch.delenv("CURATE_D_LEDGER_DATABASE_URL", raising=False)
+    monkeypatch.setenv(
+        "CURATE_D_LEDGER_DATABASE_OPTIONS",
+        "sslmode=disable&connect_timeout=10&options=-c statement_timeout=5000",
+    )
+    raw = str(Settings(_env_file=None).ledger_database_url)
+    url = make_url(raw)
+    assert dict(url.query) == {
+        "sslmode": "disable",
+        "connect_timeout": "10",
+        "options": "-c statement_timeout=5000",
+    }
+    assert (url.host, url.port, url.database) == ("localhost", 5433, "curate_d")
+    assert "+" not in raw.partition("?")[2]
+
+
+def test_no_ledger_options_leave_the_url_without_a_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default options add nothing, so the default URL is unchanged."""
+    for suffix in ("OPTIONS", "URL"):
+        monkeypatch.delenv(f"CURATE_D_LEDGER_DATABASE_{suffix}", raising=False)
+    assert "?" not in str(Settings(_env_file=None).ledger_database_url)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        "sslmode",
+        "a=1&&b=2",
+        "=x",
+        "sslmode=disable&sslmode=require",
+        "password=other",
+        "PASSWORD=other",
+        "passfile=other",
+        "host=other",
+        "hostaddr=other",
+        "port=other",
+        "user=other",
+        "dbname=other",
+        "service=other",
+    ],
+)
+def test_invalid_ledger_options_stop_settings_load(
+    monkeypatch: pytest.MonkeyPatch, options: str
+) -> None:
+    """Malformed options, or options that set a part, fail with no value in the error."""
+    monkeypatch.delenv("CURATE_D_LEDGER_DATABASE_URL", raising=False)
+    monkeypatch.setenv("CURATE_D_LEDGER_DATABASE_OPTIONS", options)
+    with pytest.raises(ValidationError, match="ledger_database_options") as raised:
+        Settings(_env_file=None)
+    _assert_hidden(raised.value, "other")
     assert all(line["input"] == "<hidden>" for line in raised.value.errors())
 
 

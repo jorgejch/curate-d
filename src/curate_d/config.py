@@ -11,7 +11,7 @@ from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 from typing import Final, Self, cast
-from urllib.parse import quote
+from urllib.parse import parse_qsl, quote, urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import (
@@ -46,6 +46,7 @@ _CRON_ITEM: Final = re.compile(
 def _ledger_url(fields: Mapping[str, object]) -> PostgresDsn:
     """Return the ledger URL put together from the already validated URL part settings."""
     user = cast(str, fields["ledger_database_user"])
+    options = _ledger_options(cast(str, fields["ledger_database_options"]))
     password = cast(SecretStr, fields["ledger_database_password"])
     # `PostgresDsn.build` does not encode: a reserved character would change the URL's meaning.
     return PostgresDsn.build(
@@ -55,7 +56,42 @@ def _ledger_url(fields: Mapping[str, object]) -> PostgresDsn:
         host=cast(str, fields["ledger_database_host"]),
         port=cast(int, fields["ledger_database_port"]),
         path=cast(str, fields["ledger_database_name"]),
+        # `quote` writes a space as `%20`; libpq does not decode the `+` that `quote_plus` writes.
+        query=urlencode(options, quote_via=quote) or None,
     )
+
+
+# Keys that set a part of the connection a part setting owns; `password` and `passfile` would
+# also put a secret in a plain setting.
+_LEDGER_PART_KEYS: Final = frozenset(
+    {"user", "password", "passfile", "host", "hostaddr", "port", "dbname", "service"}
+)
+
+
+def _ledger_options(value: str) -> list[tuple[str, str]]:
+    """Return the key and value pairs of a ledger options query string.
+
+    Raises:
+        ValueError: The value is malformed, or a key is empty, repeated or a part key. The
+            message names the key, never a value.
+    """
+    if not value:
+        return []
+    try:
+        pairs = parse_qsl(value, strict_parsing=True)
+    except ValueError:
+        raise ValueError("ledger_database_options is not a key=value&key=value string") from None
+    keys = [key for key, _ in pairs]
+    for key in keys:
+        if not key:
+            raise ValueError("ledger_database_options has an empty key")
+        if keys.count(key) > 1:
+            raise ValueError(f"ledger_database_options repeats the key {key!r}")
+        if key.lower() in _LEDGER_PART_KEYS:
+            raise ValueError(
+                f"ledger_database_options sets {key!r}, which a ledger_database_* setting owns"
+            )
+    return pairs
 
 
 def _without_input(error: ValidationError) -> ValidationError:
@@ -208,6 +244,12 @@ class Settings(BaseSettings):
         # The URL builder does not encode the path, so `?` would start the URL query.
         pattern=r"^[A-Za-z0-9_.$-]+$",
         description="Ledger database name. Ignored when `ledger_database_url` is set.",
+    )
+    ledger_database_options: str = Field(
+        default="",
+        description="Connection parameters added to the URL, as a query string: "
+        "`sslmode=disable&connect_timeout=10`. Keys that set a part of the connection are "
+        "refused. Ignored when `ledger_database_url` is set.",
     )
     ledger_database_url: PostgresDsn = Field(
         default_factory=_ledger_url,
@@ -480,6 +522,13 @@ class Settings(BaseSettings):
         "until each handle closes, so this bounds the pod's scratch use across readers "
         "rather than trusting the node's disk to be large enough.",
     )
+
+    @field_validator("ledger_database_options")
+    @classmethod
+    def _ledger_database_options_are_valid(cls, value: str) -> str:
+        """Reject options that are malformed or that set a part of the connection."""
+        _ledger_options(value)
+        return value
 
     @field_validator("recovery_sweep_schedule")
     @classmethod

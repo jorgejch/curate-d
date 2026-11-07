@@ -144,12 +144,13 @@ variables; credentials must be supplied through the secret-delivery mechanism.
 | Variable | Meaning / default |
 | --- | --- |
 | `CURATE_D_WORKER_PROFILE` | `io` or `cpu`; resolved by the worker profile module |
-| `CURATE_D_LEDGER_DATABASE_URL` | PostgreSQL cache-index and ledger connection. When set, it takes precedence over the five part variables below. When unset, the URL is put together from them. A remote database needs all five parts |
+| `CURATE_D_LEDGER_DATABASE_URL` | PostgreSQL cache-index and ledger connection. When set, it takes precedence over the six variables below. When unset, the URL is put together from them. A remote database needs all five parts |
 | `CURATE_D_LEDGER_DATABASE_USER` | Ledger user, default `curate_d`. Ignored when the URL is set |
 | `CURATE_D_LEDGER_DATABASE_PASSWORD` | Ledger password, default `curate_d`. Ignored when the URL is set |
 | `CURATE_D_LEDGER_DATABASE_HOST` | Ledger host, default `localhost`. Ignored when the URL is set |
 | `CURATE_D_LEDGER_DATABASE_PORT` | Ledger port, default `5433`. Ignored when the URL is set |
 | `CURATE_D_LEDGER_DATABASE_NAME` | Ledger database name, default `curate_d`. Ignored when the URL is set |
+| `CURATE_D_LEDGER_DATABASE_OPTIONS` | Connection parameters added to the URL, as a query string such as `sslmode=disable&connect_timeout=10`; default none. A malformed value, a repeated key, or a key that sets a part (`user`, `password`, `passfile`, `host`, `hostaddr`, `port`, `dbname`, `service`) stops startup. Ignored when the URL is set |
 | `CURATE_D_STAGING_S3_ENDPOINT_URL` | Explicit RustFS or OVH endpoint; unset disables staging |
 | `CURATE_D_STAGING_S3_BUCKET` | Required environment-specific bucket |
 | `CURATE_D_STAGING_S3_REGION` | Signing region; explicitly use `us-east-1` locally and the verified OVH value; model default is `US-EAST-VA` |
