@@ -66,6 +66,4 @@ docs/diagrams/**/*.browser-check.json
 # Misc.
 /.logfire/
 /.hypothesis/
-
-# Gemini
 /.gemini/
