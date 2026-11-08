@@ -17,7 +17,7 @@ earlier entry wins; a later one never overrides it.
 
 1. **Safety guarantees**: above the standards. `README.md`, "The guarantee", and the
    Project paragraph of `openspec/config.yaml`.
-2. **DBOS**: the `dbos-python` skill, as amended by the departures under [DBOS](#dbos).
+2. **DBOS**: the `dbos-python` skill, as amended by the departures under [DBOS](#dbos), which should be activelly kept to a minimum.
 3. **Twelve-Factor**: the manifesto at the commit pinned in
    [`docs/twelve-factor.md`](docs/twelve-factor.md), which records the status of each rule.
 4. **Coding standards**: `openspec/config.yaml`, "Coding & Documentation Conventions".
@@ -39,7 +39,8 @@ Write a proposal so its apply can run on several agents in parallel, as far as t
 allows: group `tasks.md` into work streams that touch disjoint files, state which streams
 depend on which and which can start at once, and keep shared edits (a migration, a
 settings field, this file) in one stream or one up-front task the others wait on. Say so
-in the design when a change can't be split.
+in the design when a change can't be split. Instruct the agent that a proposal that can
+be applied in parallel should be applied in parallel as indicated in tasks.md. 
 
 ## Integration tests
 
