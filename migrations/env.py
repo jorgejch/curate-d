@@ -336,9 +336,17 @@ async def _unknown_revisions(connection: AsyncConnection) -> tuple[list[str], li
     """Return the database revisions this build does not know, and the build's heads.
 
     The connection is left with no open transaction, so Alembic later begins its own.
+
+    Raises:
+        MigrationLockLostError: The lock's session ended before the read.
     """
-    unknown, build_heads = await connection.run_sync(_unknown_heads)
-    await connection.rollback()
+    try:
+        unknown, build_heads = await connection.run_sync(_unknown_heads)
+        await connection.rollback()
+    except DBAPIError as error:
+        if not error.connection_invalidated:
+            raise
+        raise _lock_lost("revision read", error) from error
     return unknown, build_heads
 
 
