@@ -39,7 +39,7 @@ finds the schema already at its target SHALL change nothing and exit 0.
 ### Requirement: A waiting run gives up after the configured timeout
 
 A run SHALL wait for the migration lock at most `CURATE_D_MIGRATION_LOCK_TIMEOUT_SECONDS` seconds,
-a positive number of seconds that defaults to 1800. When the wait ends without the lock, the run
+a positive finite number of seconds that defaults to 1800. When the wait ends without the lock, the run
 SHALL log one ERROR event, `migration.lock_timeout`, that names the setting and describes the
 holder when it is visible, SHALL exit non-zero, and SHALL NOT have changed the schema.
 
@@ -48,9 +48,9 @@ holder when it is visible, SHALL exit non-zero, and SHALL NOT have changed the s
 - **WHEN** another session holds the migration lock for longer than the timeout
 - **THEN** the run logs `migration.lock_timeout`, exits non-zero, and neither the ledger schema nor the DBOS system schema has changed
 
-#### Scenario: The setting is not a positive number
+#### Scenario: The setting is not a positive finite number
 
-- **WHEN** `CURATE_D_MIGRATION_LOCK_TIMEOUT_SECONDS` is zero, negative or not a number
+- **WHEN** `CURATE_D_MIGRATION_LOCK_TIMEOUT_SECONDS` is zero, negative, infinite or not a number
 - **THEN** settings load fails naming the field, and the run changes nothing
 
 #### Scenario: The wait is visible
@@ -107,7 +107,7 @@ DBOS SQL; its output SHALL say that the DBOS schema must be migrated separately.
 
 The DBOS system-schema and tracking-table steps write on connections of their own. After each of
 them the run SHALL ask the lock's own session whether it still holds the migration lock. A run
-whose lock is lost, there or during the ledger step, SHALL log one ERROR event,
+whose lock is lost, there, during the revision read or during the ledger step, SHALL log one ERROR event,
 `migration.lock_lost`, naming the step, SHALL apply no ledger revision and SHALL exit non-zero.
 
 #### Scenario: The lock's session ends while a DBOS step runs
