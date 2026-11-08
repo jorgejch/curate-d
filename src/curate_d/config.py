@@ -61,8 +61,10 @@ def _ledger_url(fields: Mapping[str, object]) -> PostgresDsn:
     )
 
 
-# Keys that set a part of the connection a part setting owns; `password`, `passfile` and
-# `sslpassword` would also put a secret in a plain setting.
+# Connection keys that `ledger_database_options` must not set, because a dedicated
+# `ledger_database_*` setting owns that part of the connection (user, host, port, name).
+# `password`, `passfile` and `sslpassword` are rejected for a second reason: they would
+# put a secret in a plain-text setting.
 _LEDGER_PART_KEYS: Final = frozenset(
     {"user", "password", "passfile", "sslpassword", "host", "hostaddr", "port", "dbname", "service"}
 )
