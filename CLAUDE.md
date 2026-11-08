@@ -95,6 +95,13 @@ machine: no sibling-path lookups, no environment variable pointing at another ch
 Checks on deployment manifests or infrastructure code live in those repositories.
 `tests/unit/test_isolation.py` fails the build on a reference to one.
 
+That rule binds the code, not the agent. An agent that works on curate.d may read the two
+related repositories, `jorgejch/flux-ovh` (deployment manifests under `apps/curate-d/`,
+cluster operators under `clusters/ovh/`) and `jorgejch/ovh-infra-terraform` (cluster, node
+pools, buckets and IAM), and may open pull requests against their `main` branches when a
+curate.d change needs a matching infrastructure change. Changes there land through a pull
+request, never a direct push.
+
 ## DBOS
 
 DBOS 3.x, embedded as a library. Settle every DBOS pattern question — where an effect runs,
