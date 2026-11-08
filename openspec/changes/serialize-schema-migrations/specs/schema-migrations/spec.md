@@ -77,9 +77,10 @@ derivation.
 
 ### Requirement: One migrator brings every schema in the ledger database up to date
 
-An online run SHALL bring the DBOS system schema and the ledger datasource's tracking table up to
-date, through DBOS's public migration API, while it holds the migration lock and before it applies
-the ledger revisions. An offline run (`alembic upgrade --sql`) SHALL take no lock and SHALL emit no
+An online `alembic upgrade` or `alembic downgrade` on a schema its build knows SHALL bring the
+DBOS system schema and the ledger datasource's tracking table up to date, through DBOS's public
+migration API, while it holds the migration lock and before it applies the ledger revisions. Every
+other online command SHALL run neither DBOS step. An offline run (`alembic upgrade --sql`) SHALL take no lock and SHALL emit no
 DBOS SQL; its output SHALL say that the DBOS schema must be migrated separately.
 
 #### Scenario: Upgrade on an empty database
@@ -91,6 +92,11 @@ DBOS SQL; its output SHALL say that the DBOS schema must be migrated separately.
 
 - **WHEN** the DBOS system-schema step raises
 - **THEN** the run exits non-zero naming the cause, applies no ledger revision, and releases the lock
+
+#### Scenario: A read-only command on an empty database
+
+- **WHEN** `alembic current` runs against a database with no `dbos` schema and no `alembic_version` table
+- **THEN** it exits 0 and creates neither
 
 #### Scenario: Offline run
 
@@ -140,7 +146,7 @@ downgrade from an unknown revision then fails with Alembic's error and changes n
 #### Scenario: Stamp on an unknown revision
 
 - **WHEN** `alembic stamp --purge head` runs on a database whose current revision the build does not know
-- **THEN** it reaches Alembic, sets `alembic_version` to the build's head, logs no `migration.schema_ahead`, and exits 0
+- **THEN** it runs neither DBOS step, reaches Alembic, sets `alembic_version` to the build's head, logs no `migration.schema_ahead`, and exits 0
 
 ### Requirement: Processes that run workflows verify the schema and never migrate it
 

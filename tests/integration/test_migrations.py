@@ -1026,6 +1026,16 @@ async def test_a_stamp_on_an_unknown_revision_reaches_alembic(empty_database: st
     assert (await _views_and_head(empty_database))[1] == head
 
 
+async def test_a_read_only_command_writes_no_ddl(empty_database: str) -> None:
+    """`alembic current` takes the lock, reaches Alembic and runs neither DBOS step."""
+    current = _run_alembic(empty_database, "current")
+
+    assert current.returncode == 0, current.stderr
+    assert "migration.lock_released" in current.stderr
+    assert not await _has_dbos_schema(empty_database)
+    assert ("public", "alembic_version") not in await _table_names(empty_database)
+
+
 async def _wait_until(condition: Callable[[], Awaitable[bool]], what: str) -> None:
     """Poll `condition` every 50 ms until it holds; fail after RUN_TIMEOUT_SECONDS."""
     deadline = time.monotonic() + RUN_TIMEOUT_SECONDS

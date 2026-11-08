@@ -182,8 +182,8 @@ address and backend start, and the holder's Alembic log shows its progress.
 
 ### D6. Downgrades and offline mode
 
-`alembic downgrade` runs the same `run_migrations_online` path, so it takes the lock and the DBOS
-and datasource steps run (both no-ops on a current schema). Offline mode stays lock-free and keeps
+`alembic downgrade` runs the same `run_migrations_online` path, so it takes the lock and, on a
+schema the build knows, the DBOS and datasource steps run (both no-ops on a current schema). Offline mode stays lock-free and keeps
 its note that the DBOS schema is migrated separately; the module docstring says both.
 
 ### D8. The application guarantees safety, not scheduling
@@ -226,12 +226,15 @@ After it takes the lock, `env.py` reads the database's current heads
 build's `ScriptDirectory`. An unknown revision means a newer build migrated this database. For an
 upgrade (the Alembic command, read from `config.cmd_opts`; only a missing `cmd_opts`, as from a
 programmatic call, counts as an upgrade, and every other command, `stamp --purge` the operator's
-repair of `alembic_version` included, reaches Alembic) `env.py` logs `migration.schema_ahead` (WARNING, the
+repair of `alembic_version` included, reaches Alembic without the DBOS steps) `env.py` logs `migration.schema_ahead` (WARNING, the
 database revision and the build's head), runs none of the DBOS, datasource and Alembic steps,
 releases the lock and exits 0. A newer build has already migrated all three schemas, and
 `DBOS.migrate` against a newer DBOS schema is undocumented, so the DBOS steps are skipped too. A
 downgrade from an unknown revision is left to Alembic, which fails and changes nothing: an
-operator who downgrades wants a result, not a silent exit.
+operator who downgrades wants a result, not a silent exit. The DBOS steps run only for `upgrade`
+and `downgrade` on a schema the build knows: on a schema ahead `DBOS.migrate` against a newer DBOS
+schema is undocumented, and `stamp`, `current` and `check` write no DDL of their own, so a
+read-only command creates no `dbos` schema on an empty database (review, 2026-11-07).
 
 Why: a deployment that runs the migration from an init container on every pod blocks a rollback
 without this: the old image's `env.py` fails on `Can't locate revision`, the pod never starts,

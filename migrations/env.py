@@ -33,7 +33,9 @@ An upgrade on a schema ahead of its build (a revision this build does not know, 
 by a newer build) logs `migration.schema_ahead`, changes nothing and exits 0, so an older
 image can start on a newer, backward-compatible schema. Only `alembic upgrade` takes that
 path: a downgrade from such a revision fails with Alembic's error, and `stamp`, `current`
-and the other commands reach Alembic unchanged.
+and the other commands reach Alembic unchanged. The DBOS steps run only for an upgrade or a
+downgrade on a schema this build knows: `DBOS.migrate` against a newer DBOS schema is
+undocumented, and the other commands write no DDL of their own.
 
 Offline mode (`--sql`) takes no lock and emits no DBOS SQL.
 """
@@ -86,6 +88,9 @@ _TRY_LOCK: Final = text("SELECT pg_try_advisory_lock(CAST(:key AS bigint))")
 _UNLOCK: Final = text("SELECT pg_advisory_unlock(CAST(:key AS bigint))")
 
 type Outcome = Literal["committed", "skipped"]
+
+_MIGRATING_COMMANDS: Final = frozenset({"upgrade", "downgrade"})
+"""The Alembic commands that change the schema, and so run the DBOS steps first."""
 
 
 class MigrationLockTimeoutError(RuntimeError):
@@ -287,33 +292,26 @@ def _unknown_heads(sync_connection: Connection) -> tuple[list[str], list[str]]:
     return unknown, list(script.get_heads())
 
 
-async def _schema_ahead(connection: AsyncConnection) -> bool:
-    """Return whether an upgrade finds the schema ahead of this build, logging it if so.
+async def _unknown_revisions(connection: AsyncConnection) -> tuple[list[str], list[str]]:
+    """Return the database revisions this build does not know, and the build's heads.
 
-    Only `upgrade` takes the schema-ahead path. Every other command reaches Alembic: a
-    downgrade from an unknown revision fails there, and `stamp --purge` is the operator's
-    repair of `alembic_version`. The connection is left with no open transaction, so
-    Alembic later begins its own.
+    The connection is left with no open transaction, so Alembic later begins its own.
     """
     unknown, build_heads = await connection.run_sync(_unknown_heads)
     await connection.rollback()
-    command = _alembic_command()
-    if not unknown or command != "upgrade":
-        return False
-    logger.warning(
-        "migration.schema_ahead",
-        database_revisions=unknown,
-        build_heads=build_heads,
-        command=command,
-    )
-    return True
+    return unknown, build_heads
 
 
 async def _migrate_under_lock(connection: AsyncConnection, settings: Settings, key: int) -> Outcome:
     """Migrate the DBOS system schema, the tracking table and the ledger, in that order.
 
-    `connection` holds the lock on `key`. The two DBOS steps run on connections of their
-    own, so the lock is verified after each before the next step writes.
+    `connection` holds the lock on `key`. Only `upgrade` takes the schema-ahead exit; every
+    other command reaches Alembic, where a downgrade from an unknown revision fails and
+    `stamp --purge` repairs `alembic_version`. The DBOS steps run only for an upgrade or a
+    downgrade on a schema this build knows: `DBOS.migrate` against a newer DBOS schema is
+    undocumented, and the other commands write no DDL of their own. The two DBOS steps run
+    on connections of their own, so the lock is verified after each before the next step
+    writes.
 
     Returns:
         `skipped` when the schema is ahead of this build and nothing ran, else `committed`.
@@ -321,14 +319,23 @@ async def _migrate_under_lock(connection: AsyncConnection, settings: Settings, k
     Raises:
         MigrationLockLostError: The lock's session ended during the run.
     """
-    if await _schema_ahead(connection):
+    unknown, build_heads = await _unknown_revisions(connection)
+    command = _alembic_command()
+    if unknown and command == "upgrade":
+        logger.warning(
+            "migration.schema_ahead",
+            database_revisions=unknown,
+            build_heads=build_heads,
+            command=command,
+        )
         return "skipped"
-    DBOS.migrate(system_database_url(settings), schema=SYSTEM_SCHEMA)
-    await _verify_lock_held(connection, key, "DBOS system schema")
-    await AsyncSQLAlchemyDatasource.migrate(
-        str(settings.ledger_database_url), schema=TRACKING_SCHEMA
-    )
-    await _verify_lock_held(connection, key, "datasource tracking table")
+    if not unknown and command in _MIGRATING_COMMANDS:
+        DBOS.migrate(system_database_url(settings), schema=SYSTEM_SCHEMA)
+        await _verify_lock_held(connection, key, "DBOS system schema")
+        await AsyncSQLAlchemyDatasource.migrate(
+            str(settings.ledger_database_url), schema=TRACKING_SCHEMA
+        )
+        await _verify_lock_held(connection, key, "datasource tracking table")
     try:
         await connection.run_sync(_run)
     except DBAPIError as error:

@@ -24,7 +24,7 @@ deployment repository (design D8).
 - [x] 3.4 Add the schema-ahead check of design D9 after the lock and before the DBOS step: read the current heads through `MigrationContext`, resolve each against `ScriptDirectory.from_config(config)`; on an unknown revision during an upgrade (`config.cmd_opts`, absent counts as upgrade) log WARNING `migration.schema_ahead` with the database revision and the build head, skip the DBOS, datasource and Alembic steps, release the lock and exit 0; leave a downgrade to Alembic. Verify on a fresh `make test-stack` by hand (`UPDATE alembic_version SET version_num = 'ffff_future'`, then `alembic upgrade head` exits 0 with the event and `alembic downgrade base` fails; restore the row) and later with the test of task 6.5.
 
 - [x] 3.5 (review, 2026-11-07) After each DBOS step, verify on the lock's connection that it still holds the key (`holds_lock` through `run_sync`); on a disconnect (`DBAPIError.connection_invalidated`) or a false answer, there or during Alembic's step, log ERROR `migration.lock_lost` with the step and exit 4 (`MigrationLockLostError`, `EXIT_LOCK_LOST`), as in design D4 and D5. Verify with the test of task 6.7.
-- [x] 3.6 (review, 2026-11-07) Make `_alembic_command` return the real command name, so only `upgrade` takes the schema-ahead path and `stamp`, `current` and `check` reach Alembic; a missing `cmd_opts` alone counts as `upgrade` (design D9). Verify with the test of task 6.6.
+- [x] 3.6 (review, 2026-11-07) Make `_alembic_command` return the real command name, so only `upgrade` takes the schema-ahead path and `stamp`, `current` and `check` reach Alembic; a missing `cmd_opts` alone counts as `upgrade`; run the DBOS steps only for `upgrade` and `downgrade` on a schema the build knows (design D6, D9). Verify with the tests of tasks 6.6 and 6.8.
 
 ## 4. Stream D: verify-only launch (`src/curate_d/runtime/dbos_app.py`, `src/curate_d/runtime/datasource.py`, `tests/unit/runtime/test_dbos_app.py`, `tests/unit/runtime/test_datasource.py` or the datasource's existing unit test file)
 
@@ -51,6 +51,8 @@ deployment repository (design D8).
 
 - [x] 6.6 (review, 2026-11-07) Add a test that upgrades to head, sets `alembic_version` to `ffff_future`, runs `alembic stamp --purge head`; assert exit 0, no `migration.schema_ahead` in stderr, and `alembic_version` at the build's head. Verify: `uv run pytest tests/integration/test_migrations.py --no-cov -k stamp`.
 - [x] 6.7 (review, 2026-11-07) Add a test that starts `alembic upgrade head` on the `empty_database` fixture, waits for the `dbos` schema to appear, ends the lock holder's session with `pg_terminate_backend`; assert exit 4, `migration.lock_lost` and `migration.lock_released` in stderr, and no `alembic_version` table. Verify: `uv run pytest tests/integration/test_migrations.py --no-cov -k lost_lock`.
+
+- [x] 6.8 (review, 2026-11-07) Add a test that runs `alembic current` on the `empty_database` fixture; assert exit 0 and that neither the `dbos` schema nor `alembic_version` exists afterwards. Verify: `uv run pytest tests/integration/test_migrations.py --no-cov -k read_only`.
 
 ## 7. Integration check
 
