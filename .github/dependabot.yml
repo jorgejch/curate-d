@@ -3,6 +3,8 @@
 # version updates only. No entry sets labels: gitar-managed turns on Gitar's auto-apply, and a
 # Gitar fix would change more than version references, which ends a Dependabot pull request's
 # auto-approval (.gitar/config/approve.md).
+# Every ignore rule is copied into approve.md's "Not ignored" list, which Gitar reads in place of
+# this file; the unit suite fails when the two differ, so change both together.
 # Patches are grouped and minors and majors are not: every pull request touching a
 # declared path runs the whole integration suite, again after every rebase onto dev.
 version: 2
