@@ -31,8 +31,9 @@ repair is to run the migration again.
 
 An upgrade on a schema ahead of its build (a revision this build does not know, written
 by a newer build) logs `migration.schema_ahead`, changes nothing and exits 0, so an older
-image can start on a newer, backward-compatible schema. A downgrade from such a revision
-fails with Alembic's error.
+image can start on a newer, backward-compatible schema. Only `alembic upgrade` takes that
+path: a downgrade from such a revision fails with Alembic's error, and `stamp`, `current`
+and the other commands reach Alembic unchanged.
 
 Offline mode (`--sql`) takes no lock and emits no DBOS SQL.
 """
@@ -266,8 +267,8 @@ def _alembic_command() -> str:
     command = getattr(config.cmd_opts, "cmd", None)
     if isinstance(command, tuple) and command:
         name = getattr(command[0], "__name__", None)
-        if name in ("upgrade", "downgrade"):
-            return str(name)
+        if isinstance(name, str) and name:
+            return name
     return "upgrade"
 
 
@@ -289,13 +290,15 @@ def _unknown_heads(sync_connection: Connection) -> tuple[list[str], list[str]]:
 async def _schema_ahead(connection: AsyncConnection) -> bool:
     """Return whether an upgrade finds the schema ahead of this build, logging it if so.
 
-    The connection is left with no open transaction, so Alembic later begins its own.
+    Only `upgrade` takes the schema-ahead path. Every other command reaches Alembic: a
+    downgrade from an unknown revision fails there, and `stamp --purge` is the operator's
+    repair of `alembic_version`. The connection is left with no open transaction, so
+    Alembic later begins its own.
     """
     unknown, build_heads = await connection.run_sync(_unknown_heads)
     await connection.rollback()
     command = _alembic_command()
     if not unknown or command != "upgrade":
-        # A downgrade from an unknown revision is left to Alembic, which fails.
         return False
     logger.warning(
         "migration.schema_ahead",

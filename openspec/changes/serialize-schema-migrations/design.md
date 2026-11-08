@@ -224,8 +224,9 @@ Alternatives considered and rejected:
 After it takes the lock, `env.py` reads the database's current heads
 (`MigrationContext.configure(connection).get_current_heads()`) and resolves each against the
 build's `ScriptDirectory`. An unknown revision means a newer build migrated this database. For an
-upgrade (the Alembic command, read from `config.cmd_opts`; a missing `cmd_opts`, as from a
-programmatic call, counts as an upgrade) `env.py` logs `migration.schema_ahead` (WARNING, the
+upgrade (the Alembic command, read from `config.cmd_opts`; only a missing `cmd_opts`, as from a
+programmatic call, counts as an upgrade, and every other command, `stamp --purge` the operator's
+repair of `alembic_version` included, reaches Alembic) `env.py` logs `migration.schema_ahead` (WARNING, the
 database revision and the build's head), runs none of the DBOS, datasource and Alembic steps,
 releases the lock and exits 0. A newer build has already migrated all three schemas, and
 `DBOS.migrate` against a newer DBOS schema is undocumented, so the DBOS steps are skipped too. A

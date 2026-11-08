@@ -119,8 +119,8 @@ whose lock is lost, there or during the ledger step, SHALL log one ERROR event,
 An online `alembic upgrade` that finds the database at a revision its build does not know SHALL
 treat the schema as ahead of the build: it SHALL log one WARNING event, `migration.schema_ahead`,
 naming the database revision and the build's head, SHALL apply no ledger, DBOS or datasource
-migration, and SHALL exit 0. An `alembic downgrade` from an unknown revision SHALL fail with
-Alembic's error, exit non-zero and change nothing.
+migration, and SHALL exit 0. Every other Alembic command SHALL reach Alembic unchanged; a
+downgrade from an unknown revision then fails with Alembic's error and changes nothing.
 
 #### Scenario: An older image migrates a newer database
 
@@ -136,6 +136,11 @@ Alembic's error, exit non-zero and change nothing.
 
 - **WHEN** `alembic downgrade <revision>` runs on a database whose current revision the build does not know
 - **THEN** it exits non-zero with Alembic's error and changes nothing
+
+#### Scenario: Stamp on an unknown revision
+
+- **WHEN** `alembic stamp --purge head` runs on a database whose current revision the build does not know
+- **THEN** it reaches Alembic, sets `alembic_version` to the build's head, logs no `migration.schema_ahead`, and exits 0
 
 ### Requirement: Processes that run workflows verify the schema and never migrate it
 

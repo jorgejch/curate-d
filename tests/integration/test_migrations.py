@@ -1009,6 +1009,23 @@ async def test_an_upgrade_on_a_schema_ahead_changes_nothing(empty_database: str)
     assert await _table_names(empty_database) == tables
 
 
+async def test_a_stamp_on_an_unknown_revision_reaches_alembic(empty_database: str) -> None:
+    """Only an upgrade takes the schema-ahead exit: `stamp --purge` repairs `alembic_version`."""
+    _alembic(empty_database, "upgrade", "head")
+    await _execute(
+        empty_database,
+        "UPDATE alembic_version SET version_num = :revision",
+        revision=_FUTURE_REVISION,
+    )
+    head = _script_directory().get_current_head()
+
+    stamped = _run_alembic(empty_database, "stamp", "--purge", "head")
+
+    assert stamped.returncode == 0, stamped.stderr
+    assert "migration.schema_ahead" not in stamped.stderr
+    assert (await _views_and_head(empty_database))[1] == head
+
+
 async def _wait_until(condition: Callable[[], Awaitable[bool]], what: str) -> None:
     """Poll `condition` every 50 ms until it holds; fail after RUN_TIMEOUT_SECONDS."""
     deadline = time.monotonic() + RUN_TIMEOUT_SECONDS
