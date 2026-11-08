@@ -82,7 +82,8 @@ cleanup of unrelated code.
   authors, so it judges those updates from the pull request's author and its diff. Never another
   pull request a bot opened or committed to, never a
   `github-actions` or `dbos` update or one `.github/dependabot.yml` ignores, and never one that
-  changes `.gitar/`.
+  changes `.gitar/`. Gitar's review doesn't read `dependabot.yml`, so `approve.md` copies its
+  `ignore` rules, and the unit suite fails when the two differ: change both together.
 
 ## Tests
 

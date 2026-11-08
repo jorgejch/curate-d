@@ -1,5 +1,6 @@
 """The Dependabot config's shape: ecosystems, target branch, schedule, groups and ignores."""
 
+import re
 from pathlib import Path
 from typing import cast
 
@@ -7,6 +8,7 @@ import yaml
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 CONFIG = REPOSITORY_ROOT / ".github" / "dependabot.yml"
+APPROVE_CRITERIA = REPOSITORY_ROOT / ".gitar" / "config" / "approve.md"
 
 type Document = dict[str, object]
 
@@ -27,6 +29,15 @@ _GROUPS: dict[str, tuple[str, list[str]]] = {
 _MINOR = "version-update:semver-minor"
 _MAJOR = "version-update:semver-major"
 _PATCH = "version-update:semver-patch"
+
+# The words approve.md's ignored list uses for each of dependabot.yml's update types.
+_UPDATE_TYPE_WORDS = {"patch": _PATCH, "minor": _MINOR, "major": _MAJOR}
+_NOT_IGNORED = re.compile(
+    r"\*\*Not ignored\.\*\*(?P<body>.*?)\*\*Version references only\.\*\*", re.S
+)
+_IGNORED_ITEM = re.compile(
+    r"^\s+- `(?P<ecosystem>[a-z-]+)` `(?P<dependency>[^`]+)`: (?P<types>[a-z ,]+)\.$", re.M
+)
 
 
 def _entries() -> list[Document]:
@@ -106,3 +117,35 @@ def test_no_ignore_holds_back_patches() -> None:
             assert update_types, name
             assert _PATCH not in update_types, name
             assert "versions" not in ignore, name
+
+
+def _approve_criteria_ignores() -> set[tuple[str, str, str]]:
+    """Return the (ecosystem, dependency, update type) triples approve.md lists as ignored."""
+    match = _NOT_IGNORED.search(APPROVE_CRITERIA.read_text(encoding="utf-8"))
+    assert match, "approve.md has no **Not ignored.** condition before **Version references only.**"
+    listed: set[tuple[str, str, str]] = set()
+    for item in _IGNORED_ITEM.finditer(match["body"]):
+        for word in re.split(r",\s*|\s+and\s+", item["types"].strip()):
+            listed.add((item["ecosystem"], item["dependency"], _UPDATE_TYPE_WORDS[word]))
+    return listed
+
+
+def _config_ignores() -> set[tuple[str, str, str]]:
+    """Return the (ecosystem, dependency, update type) triples dependabot.yml ignores."""
+    ignored: set[tuple[str, str, str]] = set()
+    for entry in _entries():
+        for ignore in cast(list[Document], entry.get("ignore", [])):
+            for update_type in cast(list[str], ignore.get("update-types", [])):
+                ignored.add(
+                    (
+                        cast(str, entry["package-ecosystem"]),
+                        cast(str, ignore["dependency-name"]),
+                        update_type,
+                    )
+                )
+    return ignored
+
+
+def test_approve_criteria_list_exactly_the_ignored_updates() -> None:
+    """Gitar's review can't read dependabot.yml, so approve.md copies its ignore rules."""
+    assert _approve_criteria_ignores() == _config_ignores()

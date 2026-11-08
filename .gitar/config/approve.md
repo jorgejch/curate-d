@@ -87,11 +87,16 @@ request is category 4. Category 4 never combines with the others.
    - **Not `dbos`.** The diff changes no `dbos` version. `CLAUDE.md` requires a `dbos` bump to
      refresh the vendored `.agents/skills/dbos-python` and its `skills-lock.json` pin in the same
      change, and Dependabot does neither.
-   - **Not ignored.** No dependency's update is one that an `ignore` rule in
-     `.github/dependabot.yml` excludes from version updates, such as an `aioboto3` minor.
-     GitHub's documentation does not
-     say that an `ignore` rule's `update-types` also holds back a security update, so this file
-     holds the exclusion: such an update waits for a human.
+   - **Not ignored.** No dependency's update is one of these, the `ignore` rules of
+     `.github/dependabot.yml`, copied here because Gitar's review does not read that file:
+     - `uv` `aioboto3`: minor.
+     - `docker` `python`: minor and major.
+
+     Judge this condition from this list alone, with the update type the **Update types**
+     condition gives: a dependency or an update type the list does not name is not ignored, and
+     an unread `dependabot.yml` refuses nothing. A unit test keeps the list equal to the file's
+     rules. GitHub's documentation does not say that an `ignore` rule's `update-types` also holds
+     back a security update, so this file holds the exclusion: such an update waits for a human.
    - **Version references only.** Every changed line is a version reference of a dependency the
      update changes:
      - `uv.lock`: those packages' versions, sources, sdists, wheels and hashes, and the
@@ -124,7 +129,9 @@ Everything else needs a human, including, at least:
 
 If any condition can't be established from the pull request's metadata, commits, changed files,
 review results and risk assessment, don't approve; commit data under category 4 is the one
-exception, as its **Commits** condition states. Say which condition was not established and
+exception, as its **Commits** condition states. Every fact a condition needs from a file the pull
+request doesn't change is stated in this file, so judge such a condition from this file and never
+withhold approval because the other file could not be read. Say which condition was not established and
 what would establish it. A pull request that is close to eligible is not eligible.
 
 ## Reporting
@@ -158,7 +165,11 @@ Approve:
 - `dependabot[bot]` bumps the `python` image from `3.12.15-slim-trixie` to
   `3.12.16-slim-trixie`, changing the tag and digest on each `FROM` line.
 - `dependabot[bot]` bumps the `astral-sh/uv` image from `0.13.6` to `0.13.7`, changing one `FROM`
-  line's tag and digest. Gitar rates it medium, and its review shows no commit data.
+  line's tag and digest. Gitar rates it medium, and its review shows no commit data. The ignored
+  list above doesn't name `astral-sh/uv`, so it is not ignored, whether or not
+  `.github/dependabot.yml` could be read.
+- `dependabot[bot]` bumps `aioboto3` from `15.5.0` to `15.5.1` in `python-patches`: the list
+  ignores only `aioboto3` minors, so a patch is not ignored.
 - `dependabot[bot]` opens a security update that moves `pypdf` from `6.21.0` to `6.21.1` and the
   indirect `certifi` from `2026.10.5` to `2026.10.19`. The `uv.lock` versions make both patches.
 
@@ -181,7 +192,7 @@ Refuse:
   `uv.lock` versions make it a major.
 - A `python-patches` group includes a `dbos` patch: `dbos` needs its skill refreshed.
 - `dependabot[bot]` opens a security update that moves `aioboto3` from `15.5.0` to `15.6.0`:
-  `dependabot.yml` ignores `aioboto3` minors until they are re-verified against RustFS and OVH.
+  the ignored list names `aioboto3` minors, which wait for re-verification against RustFS and OVH.
 - The review shows a maintainer's commit on a Dependabot pull request: a commit not authored by
   `dependabot[bot]`.
 - A `python-patches` update adds a new package to `uv.lock`: the lock gains a package.
