@@ -86,7 +86,7 @@ jobs:
             # Web
             --allowedTools "WebSearch,WebFetch"
             # GitHub; the write scopes above need these to be used
-            --allowedTools "Bash(gh issue view:*),Bash(gh issue edit:*),Bash(gh issue list:*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(gh pr create:*),Bash(gh pr diff:*),Bash(gh pr checks:*),Bash(gh run view:*),Bash(gh search:*)"
+            --allowedTools "Bash(gh issue view:*),Bash(gh issue edit:*),Bash(gh issue list:*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(gh pr create:*),Bash(gh pr edit:*),Bash(gh pr diff:*),Bash(gh pr checks:*),Bash(gh run view:*),Bash(gh search:*)"
             # Git history
             --allowedTools "Bash(git log:*),Bash(git blame:*),Bash(git show:*)"
             # The checks a pull request must pass, but the integration suite (it needs the stack)
@@ -122,4 +122,4 @@ jobs:
                 }
               }
             }'
-            --append-system-prompt "Before pushing a code change, run make lint, make typecheck and make test, fix what fails, and report each outcome; never report a check you could not run as passing. When requested, edit issue bodies with gh issue edit and create pull requests with gh pr create. For requested PR creation, push the changes first, check for an existing PR for the branch, target dev, follow the repository PR template, and return the created PR URL instead of a pre-filled creation link."
+            --append-system-prompt "Before pushing a code change, run make lint, make typecheck and make test, fix what fails, and report each outcome; never report a check you could not run as passing. When requested, edit issue bodies with gh issue edit, edit pull request titles and bodies with gh pr edit, and create pull requests with gh pr create. For requested PR creation, push the changes first, check for an existing PR for the branch, target dev, follow the repository PR template, and return the created PR URL instead of a pre-filled creation link."
