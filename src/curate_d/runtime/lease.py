@@ -61,6 +61,9 @@ _VERSION_KEY_DOMAIN: Final = b"curate-d/version-lease/v1"
 # The promotion fence's own domain, with a fixed name: one fence per application.
 _PROMOTION_FENCE_DOMAIN: Final = b"curate-d/promotion-fence/v1"
 _PROMOTION_FENCE_NAME: Final = "latest-version"
+# The schema migration lock's own domain, with a fixed name: one lock per application.
+_MIGRATION_LOCK_DOMAIN: Final = b"curate-d/migration-lock/v1"
+_MIGRATION_LOCK_NAME: Final = "schema"
 
 # libpq settings on the lease connection. Idle probes start after 10s and give up after
 # three unanswered 5s intervals; tcp_user_timeout bounds a probe whose bytes the server
@@ -126,6 +129,15 @@ def promotion_fence_key(application_name: str) -> int:
     return _advisory_key(_PROMOTION_FENCE_DOMAIN, application_name, _PROMOTION_FENCE_NAME)
 
 
+def migration_lock_key(application_name: str) -> int:
+    """Return the signed 64-bit advisory-lock key that serializes schema migrations.
+
+    Derived like `lease_key` under its own domain, so it collides with an executor,
+    version, promotion fence or schedule authority key only on a 64-bit hash collision.
+    """
+    return _advisory_key(_MIGRATION_LOCK_DOMAIN, application_name, _MIGRATION_LOCK_NAME)
+
+
 class LeaseSession(Protocol):
     """One database session able to hold advisory locks."""
 
@@ -159,6 +171,7 @@ class LeaseSession(Protocol):
 
 
 type SessionFactory = Callable[[], LeaseSession]
+type RowQuery = Callable[[LiteralString, Mapping[str, int]], tuple[object, ...] | None]
 
 _TRY_LOCK: Final = "SELECT pg_try_advisory_lock(%(key)s)"
 _UNLOCK: Final = "SELECT pg_advisory_unlock(%(key)s)"
@@ -200,6 +213,24 @@ def _key_halves(key: int) -> dict[str, int]:
     """Split a signed 64-bit key into the unsigned halves pg_locks reports."""
     unsigned = key & 0xFFFF_FFFF_FFFF_FFFF
     return {"high": unsigned >> 32, "low": unsigned & 0xFFFF_FFFF}
+
+
+def describe_holder(execute: RowQuery, key: int) -> str | None:
+    """Describe the session holding `key` as pid, application, address and start.
+
+    Args:
+        execute: Runs one parameterized query and returns its first row, or None.
+        key: The signed 64-bit advisory-lock key.
+
+    Returns:
+        `pid ... (application from address, since started)`, or None when no session
+        holds `key` visibly.
+    """
+    row = execute(_HOLDER, _key_halves(key))
+    if row is None:
+        return None
+    pid, application, address, started = row
+    return f"pid {pid} ({application or 'unknown'} from {address or 'local'}, since {started})"
 
 
 class PostgresLeaseSession:
@@ -251,11 +282,9 @@ class PostgresLeaseSession:
 
     def holder(self, key: int) -> str | None:
         """Describe the session holding `key` as pid, application, address and start."""
-        row = self._connection.execute(_HOLDER, _key_halves(key)).fetchone()
-        if row is None:
-            return None
-        pid, application, address, started = row
-        return f"pid {pid} ({application or 'unknown'} from {address or 'local'}, since {started})"
+        return describe_holder(
+            lambda query, params: self._connection.execute(query, params).fetchone(), key
+        )
 
     def holder_mode(self, key: int) -> str | None:
         """Return the mode another session holds `key` in: `exclusive`, `shared` or None."""

@@ -32,24 +32,29 @@ migration at once, so the migration itself must be safe for any number.
   applied revision, so a waiting run's operator can see why it waits and the waiting run logs
   `migration.lock_waiting` with the holder's description.
 - Offline mode (`alembic upgrade --sql`) takes no lock; its docstring says so.
-- A matching pull request in the deployment repository (which CLAUDE.md
-  now lets an agent read and open PRs against) gives both worker StatefulSets the `migrate`
-  init container the API Deployment already has, so every pod of every role runs
-  `alembic upgrade head` before its main container starts. That PR lands only after a
-  curate.d image with the lock is deployed: until then two parallel worker pods would be two
-  more unserialized runs.
+- An `alembic upgrade` that finds the database at a revision its build does not know treats the
+  schema as ahead of the build: it logs one WARNING event, `migration.schema_ahead`, changes
+  nothing and exits 0. That lets an older image start on a newer, backward-compatible schema,
+  which a rollback needs when the deployment runs the migration from every pod. A downgrade
+  from an unknown revision keeps Alembic's failure.
+- The guarantee this change gives is safety, not scheduling: `alembic upgrade head` is correct
+  from any number of invokers at once, and a process that runs workflows refuses to start on a
+  schema behind its build. How and when a deployment invokes the migration (an init container
+  on every pod, a release job, a hand step) stays the deployer's choice and is not part of this
+  repository. No change to any deployment repository is required or assumed.
 - Docs: `docs/recovery.md` (the breaking-deploy step that runs the migration, the alert list, the
   connection-pooling list of session-lock holders, Before deploying), `docs/reset.md`,
-  `docs/staging.md`'s settings table, `CLAUDE.md`'s DBOS section (and `AGENTS.md`, its copy) and
-  `env.py`'s module docstring.
+  `docs/staging.md`'s settings table, `docs/twelve-factor.md` (rows V.3 and XII.1), `CLAUDE.md`'s
+  DBOS section (and `AGENTS.md`, its copy) and `env.py`'s module docstring.
 
 ## Capabilities
 
 ### New Capabilities
 
 - `schema-migrations`: how the ledger and DBOS system schemas are brought to a revision: which
-  process migrates, how concurrent runs are serialized, how a waiting run gives up, and what a
-  process that does not migrate does when the schema is behind.
+  process migrates, how concurrent runs are serialized, how a waiting run gives up, what a run
+  does on a schema ahead of its build, and what a process that does not migrate does when the
+  schema is behind.
 
 ### Modified Capabilities
 
@@ -60,18 +65,19 @@ SQLAlchemy connection, not a libpq one, so no requirement there changes.
 ## Impact
 
 - `migrations/env.py`: the lock, the bounded wait, the DBOS and datasource steps under it, the
-  progress and timeout events, the exit code.
+  schema-ahead check, the progress and timeout events, the exit code.
 - `src/curate_d/runtime/lease.py`: `migration_lock_key` and its key domain.
 - `src/curate_d/config.py`: `migration_lock_timeout_seconds`.
 - `src/curate_d/runtime/dbos_app.py`, `src/curate_d/runtime/datasource.py`: `run_migrations=False`.
-- `tests/integration/test_migrations.py`: concurrent runs, the timeout, a launch on a schema
-  behind; `tests/unit/runtime/test_lease.py`, `tests/unit/test_config.py`,
+- `tests/integration/test_migrations.py`: concurrent runs, the timeout, a schema ahead, a launch
+  on a schema behind; `tests/unit/runtime/test_lease.py`, `tests/unit/test_config.py`,
   `tests/unit/runtime/test_dbos_app.py`: the key, the setting, the config flag.
 - Docs listed above. `Makefile` and `ops/reset/reset-environment.sh` do not change: they keep
   calling `alembic upgrade head`, now safe to call from several instances at once.
-- The deployment repository, separate PR: the two worker StatefulSet manifests (new `migrate`
-  init container), the comment in the API Deployment manifest, the application README, and a
-  manifest test. The curate.d code still reads nothing from that repository.
-- Operators: a DBOS package upgrade must run the migration before the new workers start, as a
-  ledger migration already must. In Kubernetes the init containers do that on every pod start;
-  locally and in a breaking deploy it is `make migrate`.
+- No deployment repository changes. A deployment that runs `alembic upgrade head` from an init
+  container on every pod becomes correct without any edit; a deployment that wants one run per
+  release can add it later, on its own schedule. The curate.d code reads nothing from any
+  deployment repository (`tests/unit/test_isolation.py`).
+- Operators: the migration must run before a build's workers start, for a ledger revision and
+  for a DBOS package bump alike; a worker that starts first fails launch with
+  `DBOSInitializationError` and restarts. Locally and in a breaking deploy it is `make migrate`.

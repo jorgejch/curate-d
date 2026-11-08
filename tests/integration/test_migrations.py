@@ -9,7 +9,8 @@ import json
 import os
 import subprocess
 import sys
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -17,11 +18,16 @@ from uuid import UUID, uuid4
 import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from dbos import DBOS
+from dbos import error as dbos_error
+from pydantic import PostgresDsn
 from sqlalchemy import make_url, text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from curate_d.config import Settings
 from curate_d.domain import derive_destination_id
+from curate_d.runtime import dbos_app
+from curate_d.runtime.lease import connect_session, libpq_conninfo, migration_lock_key
 
 pytestmark = pytest.mark.integration
 
@@ -49,17 +55,33 @@ async def empty_database(settings: Settings) -> AsyncIterator[str]:
         await admin.dispose()
 
 
-def _run_alembic(database_url: str, *arguments: str) -> subprocess.CompletedProcess[str]:
-    """Run the Alembic command line against one database and return how it ended."""
+def _alembic_environment(database_url: str, **overrides: str) -> dict[str, str]:
+    """Return this process's environment pointed at one database, with `overrides` set."""
     environment = dict(os.environ)
     environment["CURATE_D_LEDGER_DATABASE_URL"] = database_url
+    environment.update(overrides)
+    return environment
+
+
+def _run_alembic(
+    database_url: str,
+    *arguments: str,
+    environment: Mapping[str, str] | None = None,
+    timeout: float | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run the Alembic command line against one database and return how it ended.
+
+    Raises:
+        subprocess.TimeoutExpired: The run outlasted `timeout` seconds; it was killed.
+    """
     return subprocess.run(
         [sys.executable, "-m", "alembic", *arguments],
         cwd=REPOSITORY_ROOT,
-        env=environment,
+        env=dict(environment or _alembic_environment(database_url)),
         capture_output=True,
         text=True,
         check=False,
+        timeout=timeout,
     )
 
 
@@ -119,11 +141,16 @@ async def test_a_full_downgrade_round_trips(empty_database: str) -> None:
     assert (await _views_and_head(empty_database))[0] >= VIEWS
 
 
-def test_the_chain_has_a_single_head() -> None:
-    """Every revision descends from the one before: no two migrations share a parent."""
+def _script_directory() -> ScriptDirectory:
+    """Return this repository's Alembic migration chain."""
     config = Config(str(REPOSITORY_ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(REPOSITORY_ROOT / "migrations"))
-    assert len(ScriptDirectory.from_config(config).get_heads()) == 1
+    return ScriptDirectory.from_config(config)
+
+
+def test_the_chain_has_a_single_head() -> None:
+    """Every revision descends from the one before: no two migrations share a parent."""
+    assert len(_script_directory().get_heads()) == 1
 
 
 # 0022 adds what a dry run evaluated with and the unselected outcome.
@@ -791,3 +818,190 @@ async def test_the_downgrade_refuses_two_placements_under_one_name(empty_databas
 
     assert "cannot be restored" in reported
     assert (await _views_and_head(empty_database))[1] == DESTINATION_IDENTITY
+
+
+# The migration lock (migrations/env.py): concurrent runs serialize, a waiter gives up after
+# the timeout, workers only verify, and an upgrade on a schema ahead of its build is a no-op.
+MIGRATION_LOCK_KEY = migration_lock_key(dbos_app.APPLICATION_NAME)
+RUNNING_UPGRADE = "Running upgrade"
+CONCURRENT_RUNS = 3
+# Far below the 1800 s lock-timeout default, so a lock run that hangs (as when a waiter's
+# snapshot blocked DBOS's CREATE INDEX CONCURRENTLY) fails the test instead of CI's job.
+RUN_TIMEOUT_SECONDS = 300
+_FUTURE_REVISION = "ffff_future"
+
+
+def _upgrade_concurrently(database_url: str, logs: Path) -> list[tuple[int, str]]:
+    """Start `alembic upgrade head` CONCURRENT_RUNS times at once and wait for every run.
+
+    Output goes to files, not pipes, so a run never blocks on a pipe no one is reading
+    while another run waits for the lock it holds.
+
+    Returns:
+        Each run's return code and stderr.
+
+    Raises:
+        pytest.fail.Exception: The runs outlasted RUN_TIMEOUT_SECONDS; all were killed.
+    """
+    environment = _alembic_environment(database_url)
+    runs: list[tuple[subprocess.Popen[bytes], Path]] = []
+    for index in range(CONCURRENT_RUNS):
+        stderr_path = logs / f"upgrade-{index}.stderr"
+        with stderr_path.open("wb") as stderr:
+            process = subprocess.Popen(
+                [sys.executable, "-m", "alembic", "upgrade", "head"],
+                cwd=REPOSITORY_ROOT,
+                env=environment,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr,
+            )
+        runs.append((process, stderr_path))
+    deadline = time.monotonic() + RUN_TIMEOUT_SECONDS
+    try:
+        codes = [process.wait(timeout=max(0.0, deadline - time.monotonic())) for process, _ in runs]
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"concurrent upgrades still running after {RUN_TIMEOUT_SECONDS}s")
+    finally:
+        for process, _ in runs:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+    return [
+        (code, stderr_path.read_text()) for code, (_, stderr_path) in zip(codes, runs, strict=True)
+    ]
+
+
+def _running_upgrade_lines(stderr: str) -> int:
+    """Return how many revisions Alembic reports applying in one run's stderr."""
+    return sum(RUNNING_UPGRADE in line for line in stderr.splitlines())
+
+
+async def _table_names(database_url: str) -> set[tuple[str, str]]:
+    """Return every table and view in the `public` and `dbos` schemas as (schema, name)."""
+    return {
+        (str(schema), str(name))
+        for schema, name in await _rows(
+            database_url,
+            "SELECT table_schema, table_name FROM information_schema.tables "
+            "WHERE table_schema IN ('public', 'dbos')",
+        )
+    }
+
+
+async def _has_dbos_schema(database_url: str) -> bool:
+    """Return whether the database has a `dbos` schema."""
+    return bool(
+        await _rows(
+            database_url,
+            "SELECT 1 FROM information_schema.schemata WHERE schema_name = 'dbos'",
+        )
+    )
+
+
+async def _assert_at_head_with_system_tables(database_url: str) -> None:
+    """Assert the ledger is at the chain's head beside the DBOS and tracking tables."""
+    assert (await _views_and_head(database_url))[1] == _script_directory().get_current_head()
+    assert {("dbos", "workflow_status"), ("dbos", "datasource_outputs")} <= await _table_names(
+        database_url
+    )
+
+
+async def test_concurrent_upgrades_on_an_empty_database_apply_each_revision_once(
+    empty_database: str, tmp_path: Path
+) -> None:
+    """Upgrades started at once all exit 0, and every revision runs once across them."""
+    runs = _upgrade_concurrently(empty_database, tmp_path)
+
+    assert [code for code, _ in runs] == [0] * CONCURRENT_RUNS, [err for _, err in runs]
+    await _assert_at_head_with_system_tables(empty_database)
+    assert sum(_running_upgrade_lines(stderr) for _, stderr in runs) == len(
+        list(_script_directory().walk_revisions())
+    )
+
+
+async def test_concurrent_upgrades_one_revision_behind_apply_it_once(
+    empty_database: str, tmp_path: Path
+) -> None:
+    """Upgrades started at once one revision behind all exit 0; one of them applies it."""
+    script = _script_directory()
+    head_id = script.get_current_head()
+    assert head_id is not None
+    head = script.get_revision(head_id)
+    assert head is not None and isinstance(head.down_revision, str)
+    _alembic(empty_database, "upgrade", head.down_revision)
+
+    runs = _upgrade_concurrently(empty_database, tmp_path)
+
+    assert [code for code, _ in runs] == [0] * CONCURRENT_RUNS, [err for _, err in runs]
+    await _assert_at_head_with_system_tables(empty_database)
+    assert sum(_running_upgrade_lines(stderr) for _, stderr in runs) == 1
+
+
+async def test_a_lock_timeout_exits_3_and_changes_nothing(empty_database: str) -> None:
+    """A run that cannot take the held lock in time names the setting, exits 3, migrates nothing."""
+    holder = connect_session(
+        libpq_conninfo(empty_database), application_name="migration-test holder"
+    )
+    try:
+        assert holder.try_lock(MIGRATION_LOCK_KEY)
+
+        completed = _run_alembic(
+            empty_database,
+            "upgrade",
+            "head",
+            environment=_alembic_environment(
+                empty_database, CURATE_D_MIGRATION_LOCK_TIMEOUT_SECONDS="1"
+            ),
+            timeout=RUN_TIMEOUT_SECONDS,
+        )
+
+        assert completed.returncode == 3, completed.stderr
+        assert "migration.lock_waiting" in completed.stderr
+        assert "migration.lock_timeout" in completed.stderr
+        assert "CURATE_D_MIGRATION_LOCK_TIMEOUT_SECONDS" in completed.stderr
+        assert ("public", "alembic_version") not in await _table_names(empty_database)
+        assert not await _has_dbos_schema(empty_database)
+    finally:
+        holder.close()
+
+
+async def test_verify_only_launch_fails_on_an_unmigrated_database(
+    settings: Settings, empty_database: str
+) -> None:
+    """A worker's DBOS launch refuses a database with no system schema and creates none."""
+    unmigrated = settings.model_copy(update={"ledger_database_url": PostgresDsn(empty_database)})
+    DBOS.destroy()
+    try:
+        dbos_app.configure(unmigrated, executor_id="migration-verify-test")
+        with pytest.raises(dbos_error.DBOSInitializationError):
+            DBOS.launch()
+    finally:
+        DBOS.destroy()
+
+    assert not await _has_dbos_schema(empty_database)
+
+
+async def test_an_upgrade_on_a_schema_ahead_changes_nothing(empty_database: str) -> None:
+    """An upgrade from an unknown revision warns and exits 0; a downgrade from it fails."""
+    _alembic(empty_database, "upgrade", "head")
+    await _execute(
+        empty_database,
+        "UPDATE alembic_version SET version_num = :revision",
+        revision=_FUTURE_REVISION,
+    )
+    tables = await _table_names(empty_database)
+
+    upgraded = _run_alembic(empty_database, "upgrade", "head")
+
+    assert upgraded.returncode == 0, upgraded.stderr
+    assert "migration.schema_ahead" in upgraded.stderr
+    assert _FUTURE_REVISION in upgraded.stderr
+    assert RUNNING_UPGRADE not in upgraded.stderr
+    assert (await _views_and_head(empty_database))[1] == _FUTURE_REVISION
+    assert await _table_names(empty_database) == tables
+
+    downgraded = _run_alembic(empty_database, "downgrade", "base")
+
+    assert downgraded.returncode != 0, downgraded.stderr
+    assert (await _views_and_head(empty_database))[1] == _FUTURE_REVISION
+    assert await _table_names(empty_database) == tables

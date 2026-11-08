@@ -97,6 +97,29 @@ DBOS SQL; its output SHALL say that the DBOS schema must be migrated separately.
 - **WHEN** `alembic upgrade head --sql` runs
 - **THEN** it connects to no database, takes no lock, and emits only the ledger SQL
 
+### Requirement: An upgrade on a schema ahead of its build changes nothing and exits 0
+
+An online `alembic upgrade` that finds the database at a revision its build does not know SHALL
+treat the schema as ahead of the build: it SHALL log one WARNING event, `migration.schema_ahead`,
+naming the database revision and the build's head, SHALL apply no ledger, DBOS or datasource
+migration, and SHALL exit 0. An `alembic downgrade` from an unknown revision SHALL fail with
+Alembic's error, exit non-zero and change nothing.
+
+#### Scenario: An older image migrates a newer database
+
+- **WHEN** `alembic upgrade head` runs from a build whose migration chain does not contain the database's current revision
+- **THEN** it logs `migration.schema_ahead`, exits 0, and `alembic_version`, the DBOS system schema and the tracking table are unchanged
+
+#### Scenario: The database is behind the build
+
+- **WHEN** `alembic upgrade head` runs on a database whose current revision is in the build's chain but is not head
+- **THEN** it applies the pending revisions and exits 0
+
+#### Scenario: Downgrade from an unknown revision
+
+- **WHEN** `alembic downgrade <revision>` runs on a database whose current revision the build does not know
+- **THEN** it exits non-zero with Alembic's error and changes nothing
+
 ### Requirement: Processes that run workflows verify the schema and never migrate it
 
 A worker SHALL configure DBOS and the ledger datasource so that launch verifies the DBOS system

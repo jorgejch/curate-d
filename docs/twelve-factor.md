@@ -107,7 +107,7 @@ this repository; a row that mentions them states the finding in general terms.
 | --- | --- | --- | --- |
 | V.1 | Conforms | *Distinct stages.* Build is the image (`.github/workflows/docker-publish.yml`); release is the image tag plus config, applied through GitOps; run is the container command. | - |
 | V.2 | Gap | *Immutable releases.* A change of config or of a secret restarts no process and gets no new release identifier. | deployment |
-| V.3 | Gap | *Complexity in the build, minimal run.* Schema migration runs at process start: the deployment manifests run `alembic upgrade head` when the API starts, and the workers leave `run_migrations` at its default for DBOS and for the datasource (`src/curate_d/runtime/dbos_app.py`, `src/curate_d/runtime/datasource.py`). The skill supports the fix (`references/lifecycle-config.md`, "Least-Privilege Deployments"). | both; [#7](https://github.com/jorgejch/curate-d/issues/7) |
+| V.3 | Gap | *Complexity in the build, minimal run.* No process of this repository migrates at start: the workers set `run_migrations=False` for DBOS and for the datasource, and only verify the schema (`src/curate_d/runtime/dbos_app.py`, `src/curate_d/runtime/datasource.py`). `migrations/env.py` is the one serialized, idempotent migrator of the DBOS system schema, the datasource tracking table and the ledger revisions, and `make migrate` is its name. What stays open is whether a deployment runs it once per release or from every pod. That is a deployment choice outside this repository, not an application defect. The skill describes the split (`references/lifecycle-config.md`, "Least-Privilege Deployments"). | deployment; [#7](https://github.com/jorgejch/curate-d/issues/7), `serialize-schema-migrations` |
 
 ### VI. Processes
 
@@ -173,7 +173,7 @@ this repository; a row that mentions them states the finding in general terms.
 
 | Rule | Status | Evidence, or what is unmet | Authority or tracking |
 | --- | --- | --- | --- |
-| XII.1 | Gap | *Admin tasks as one-off processes.* The deployment manifests run the migrations on every API start, with no lock (`migrations/env.py`), and the workers neither wait for them nor check the ledger schema. | both; [#7](https://github.com/jorgejch/curate-d/issues/7) |
+| XII.1 | Gap | *Admin tasks as one-off processes.* The migration is one admin command, `alembic upgrade head` (`make migrate`): concurrent runs wait for the migration lock (`migrations/env.py`), and a run that finds the schema current exits 0. The workers never migrate, and fail launch on a schema behind their build. What stays open is whether a deployment runs the command once per release or from every pod. That is a deployment choice outside this repository, not an application defect. | deployment; [#7](https://github.com/jorgejch/curate-d/issues/7), `serialize-schema-migrations` |
 | XII.2 | Gap | *Admin processes in the same environment.* `ops/reset/reset.py` is not in the image (`.dockerignore` excludes `ops/`). The other admin commands ship in the package. | application |
 
 ## Keeping this page true

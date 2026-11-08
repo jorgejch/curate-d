@@ -7,6 +7,8 @@ that losing it is reported exactly once.
 
 import threading
 import time
+from collections.abc import Mapping
+from typing import LiteralString
 
 import psycopg
 import pytest
@@ -18,11 +20,15 @@ from curate_d.runtime.lease import (
     ExecutorLease,
     ExecutorLeaseUnavailableError,
     connect_session,
+    describe_holder,
     lease_conninfo,
     lease_key,
     libpq_conninfo,
+    migration_lock_key,
+    promotion_fence_key,
     version_lease_key,
 )
+from curate_d.runtime.schedule_authority import schedule_authority_key
 from tests.unit.runtime.fake_lease import FakeLockServer, FakeSession
 
 
@@ -540,3 +546,68 @@ def test_failed_partial_acquire_cleanup_closes_the_session(
     assert server.mode(lease.key) is None
     assert server.holders[version_key] is other
     other.close()
+
+
+# The schema migration lock.
+
+
+def test_the_migration_lock_key_is_pinned() -> None:
+    """A changed derivation lets an old and a new build migrate one database at once."""
+    assert migration_lock_key("curate-d") == -6874338539243385261
+
+
+def test_the_migration_lock_key_is_stable_and_a_signed_bigint() -> None:
+    """pg_advisory_lock takes a signed bigint, and every invoker must derive the same one."""
+    key = migration_lock_key("curate-d")
+    assert key == migration_lock_key("curate-d")
+    assert -(2**63) <= key < 2**63
+
+
+def test_the_migration_lock_key_is_distinct_per_application() -> None:
+    """Another application's migrations never wait on this one's."""
+    assert migration_lock_key("other-app") != migration_lock_key("curate-d")
+
+
+def test_the_migration_lock_key_is_its_own() -> None:
+    """The lock never aliases another key spelled like its name."""
+    assert migration_lock_key("curate-d") not in {
+        lease_key("curate-d", "schema"),
+        version_lease_key("curate-d", "schema"),
+        promotion_fence_key("curate-d"),
+        schedule_authority_key("curate-d"),
+    }
+
+
+# The holder description.
+
+
+def test_describe_holder_renders_the_holding_session() -> None:
+    """The row's pid, application, address and start name the holder."""
+    calls: list[tuple[str, Mapping[str, int]]] = []
+    key = -6874338539243385261
+
+    def execute(query: LiteralString, params: Mapping[str, int]) -> tuple[object, ...]:
+        """Record the query and return one holder row."""
+        calls.append((query, params))
+        return (4242, "curate-d migrate", "10.0.0.7", "2026-11-07 09:00:00-08")
+
+    assert describe_holder(execute, key) == (
+        "pid 4242 (curate-d migrate from 10.0.0.7, since 2026-11-07 09:00:00-08)"
+    )
+    [(query, params)] = calls
+    assert "pg_locks" in query
+    unsigned = key & 0xFFFF_FFFF_FFFF_FFFF
+    assert params == {"high": unsigned >> 32, "low": unsigned & 0xFFFF_FFFF}
+
+
+def test_describe_holder_returns_none_without_a_row() -> None:
+    """No visible holder is None, not an empty description."""
+    assert describe_holder(lambda query, params: None, 1) is None
+
+
+def test_describe_holder_falls_back_for_a_missing_application_and_address() -> None:
+    """A session with no application name over a local socket still reads clearly."""
+    row = (7, None, None, "2026-11-07 09:00:00-08")
+    assert describe_holder(lambda query, params: row, 1) == (
+        "pid 7 (unknown from local, since 2026-11-07 09:00:00-08)"
+    )

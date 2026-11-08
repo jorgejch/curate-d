@@ -124,6 +124,12 @@ how it is made idempotent, whether it belongs in a workflow — against the `dbo
   `dbos_app.configure`: DBOS attaches its log handler at construction, so DBOS constructed
   first still runs but exports no DBOS log lines. The `dbos[otel]` extra supplies that
   handler. This is a setting the skill lists, not a departure.
+- `build_dbos_config` and `create_ledger_datasource` set `run_migrations=False`, so
+  `DBOS.launch()` and the datasource only verify their schemas. `migrations/env.py` is the
+  only migrator of the DBOS system schema and the datasource tracking table, under the
+  migration lock (`runtime/lease.py`, `migration_lock_key`). A `dbos` package bump therefore
+  needs `make migrate` before its workers start, or launch fails with
+  `DBOSInitializationError`. This is a setting the skill lists, not a departure.
 - Workflow IDs are deterministic (`runtime/workflow_ids.py`) so duplicate enqueues
   collapse. Don't substitute random IDs.
 - The DBOS system tables live in the ledger database (schema `dbos`), and separating them
@@ -147,7 +153,8 @@ how it is made idempotent, whether it belongs in a workflow — against the `dbo
   DBOS's documented tables by raw SQL. That is a schema dependency, not a private API:
   re-check it on every DBOS upgrade (`tests/integration/test_workflow_views.py`,
   `test_migrations.py`). Those migrations need the DBOS system schema, so
-  `migrations/env.py` brings it up to date before Alembic's own migrations run. The
+  `migrations/env.py` brings it up to date under the migration lock, before Alembic's own
+  migrations run. The
   workflow-history prune itself goes through the public `list_workflows` and
   `delete_workflows`; it re-reads each batch's status before deleting it, and since a
   delete has no read-back, the re-read→delete window is a documented gap

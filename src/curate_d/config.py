@@ -260,6 +260,13 @@ class Settings(BaseSettings):
         "`dbos`): one database, so a ledger write and a workflow enqueue can share one "
         "transaction.",
     )
+    migration_lock_timeout_seconds: float = Field(
+        default=1800.0,
+        gt=0,
+        description="How long an online `alembic upgrade` or `alembic downgrade` waits for "
+        "another migration run to release the migration lock. On timeout the run logs "
+        "`migration.lock_timeout`, exits 3 and changes nothing.",
+    )
     credential_encryption_key: SecretStr | None = Field(
         default=None,
         description="Key protecting stored provider credentials. Required before any "
