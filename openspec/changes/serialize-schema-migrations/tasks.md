@@ -47,7 +47,7 @@ deployment repository (design D8).
 ## 7. Integration check
 
 - [x] 7.1 Run `make lint`, `make typecheck` and `uv run pytest -n auto tests/unit --no-cov`, and verify that all pass.
-- [ ] 7.2 Run `make test-integration-parallel`, which starts a fresh stack per shard and migrates it through the new `env.py`, and verify that it passes, including the fixtures that `DBOS.launch()` and `create_ledger_datasource` on the migrated stack.
+- [x] 7.2 Run `make test-integration-parallel`, which starts a fresh stack per shard and migrates it through the new `env.py`, and verify that it passes, including the fixtures that `DBOS.launch()` and `create_ledger_datasource` on the migrated stack.
 
 ## Workflow follow-up
 
