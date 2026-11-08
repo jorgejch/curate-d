@@ -215,6 +215,18 @@ def _key_halves(key: int) -> dict[str, int]:
     return {"high": unsigned >> 32, "low": unsigned & 0xFFFF_FFFF}
 
 
+def holds_lock(execute: RowQuery, key: int) -> bool:
+    """Return whether the session running `execute` holds the lock on `key`, per pg_locks.
+
+    Args:
+        execute: Runs one parameterized query on the session's own connection and returns
+            its first row, or None.
+        key: The signed 64-bit advisory-lock key.
+    """
+    row = execute(_HOLDS, _key_halves(key))
+    return row is not None and row[0] is True
+
+
 def describe_holder(execute: RowQuery, key: int) -> str | None:
     """Describe the session holding `key` as pid, application, address and start.
 
@@ -270,7 +282,9 @@ class PostgresLeaseSession:
 
     def holds(self, key: int) -> bool:
         """Return whether this session still holds the lock on `key`, per pg_locks."""
-        return self._scalar(_HOLDS, _key_halves(key)) is True
+        return holds_lock(
+            lambda query, params: self._connection.execute(query, params).fetchone(), key
+        )
 
     def unlock(self, key: int) -> None:
         """Release this session's lock on `key`."""

@@ -103,6 +103,13 @@ Alert on these events:
   exits `3` and changes nothing. Find the holder the event names (its pid, application name,
   address and backend start) and let it finish or end its session, then run the migration
   again. If the holder is a long migration, raise the setting instead.
+- `migration.lock_lost`: the session holding the migration lock ended before the run finished
+  (an idle-session timeout, a pooler that swapped the backend, an operator, a reset). The
+  DBOS system-schema and tracking-table steps run on connections of their own, so the one in
+  flight finished without the lock, and another run may have taken the lock meanwhile; the
+  event names the step. The run exits `4` and applied no ledger revision. Run the migration
+  again: both DBOS steps are idempotent. Then find why the session ended; a pooler cause
+  shows under [Connection pooling](#connection-pooling).
 
 Logged, not alerted on, because they need no action or the restart that follows repairs
 them:
@@ -137,7 +144,8 @@ PgBouncer defaults to, swaps the server connection between statements. The lock 
 one backend and the next statement runs on another, so probes report the lock lost, the
 unlock misses it, and the orphaned lock blocks that key until the pooler recycles the
 backend. You would see `recovery_sweep.version_lock_lost`,
-`worker.schedule_reconciliation_unverified`, executor-lease loss at startup, and
+`worker.schedule_reconciliation_unverified`, executor-lease loss at startup,
+`migration.lock_lost` from a migration whose lock probe ran on another backend, and
 `migration.lock_timeout` from a migration that waits on an orphaned migration lock.
 
 The ledger database URL must therefore reach PostgreSQL directly or through a session-mode

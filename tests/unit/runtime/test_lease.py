@@ -21,6 +21,7 @@ from curate_d.runtime.lease import (
     ExecutorLeaseUnavailableError,
     connect_session,
     describe_holder,
+    holds_lock,
     lease_conninfo,
     lease_key,
     libpq_conninfo,
@@ -611,3 +612,33 @@ def test_describe_holder_falls_back_for_a_missing_application_and_address() -> N
     assert describe_holder(lambda query, params: row, 1) == (
         "pid 7 (unknown from local, since 2026-11-07 09:00:00-08)"
     )
+
+
+# The holder check.
+
+
+def test_holds_lock_is_true_for_a_held_key() -> None:
+    """A true EXISTS row means the session running the query holds the key."""
+    calls: list[tuple[str, Mapping[str, int]]] = []
+    key = -6874338539243385261
+
+    def execute(query: LiteralString, params: Mapping[str, int]) -> tuple[object, ...]:
+        """Record the query and answer that the key is held."""
+        calls.append((query, params))
+        return (True,)
+
+    assert holds_lock(execute, key) is True
+    [(query, params)] = calls
+    assert "pg_backend_pid()" in query
+    unsigned = key & 0xFFFF_FFFF_FFFF_FFFF
+    assert params == {"high": unsigned >> 32, "low": unsigned & 0xFFFF_FFFF}
+
+
+def test_holds_lock_is_false_for_a_released_key() -> None:
+    """A false EXISTS row means the session does not hold the key."""
+    assert holds_lock(lambda query, params: (False,), 1) is False
+
+
+def test_holds_lock_is_false_without_a_row() -> None:
+    """No row at all is not a held lock."""
+    assert holds_lock(lambda query, params: None, 1) is False

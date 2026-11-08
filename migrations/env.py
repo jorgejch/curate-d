@@ -23,6 +23,12 @@ update its queue rows, so the DBOS step must come first. The migrations assume t
 schema lives in the ledger database: a separated system database is migrated here, but the
 ledger database then has no `dbos` tables and 0005 fails.
 
+The two DBOS steps run on connections of their own, so a lock session that dies while one
+runs does not stop it. After each of them the run asks its own session whether it still
+holds the lock; a lost lock, there or during Alembic's own step, logs `migration.lock_lost`
+and exits 4 without applying a ledger revision. Both DBOS steps are idempotent, so the
+repair is to run the migration again.
+
 An upgrade on a schema ahead of its build (a revision this build does not know, written
 by a newer build) logs `migration.schema_ahead`, changes nothing and exits 0, so an older
 image can start on a newer, backward-compatible schema. A downgrade from such a revision
@@ -45,6 +51,7 @@ from alembic.script import ScriptDirectory
 from alembic.util import CommandError
 from dbos import DBOS, AsyncSQLAlchemyDatasource
 from sqlalchemy import Connection, pool, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection, async_engine_from_config
 
 from curate_d.config import Settings, get_settings
@@ -52,7 +59,7 @@ from curate_d.ledger.tables import metadata
 from curate_d.observability import configure_logging, get_logger
 from curate_d.runtime.datasource import TRACKING_SCHEMA
 from curate_d.runtime.dbos_app import APPLICATION_NAME, SYSTEM_SCHEMA, system_database_url
-from curate_d.runtime.lease import describe_holder, migration_lock_key
+from curate_d.runtime.lease import describe_holder, holds_lock, migration_lock_key
 
 config = context.config
 
@@ -65,6 +72,9 @@ logger = get_logger(__name__)
 
 EXIT_LOCK_TIMEOUT: Final = 3
 """Another run held the migration lock past the timeout; nothing was changed."""
+
+EXIT_LOCK_LOST: Final = 4
+"""The lock's session ended mid-run; no ledger revision was applied. Run it again."""
 
 LOCK_TIMEOUT_SETTING: Final = "CURATE_D_MIGRATION_LOCK_TIMEOUT_SECONDS"
 
@@ -79,6 +89,10 @@ type Outcome = Literal["committed", "skipped"]
 
 class MigrationLockTimeoutError(RuntimeError):
     """The migration lock stayed held past the timeout; nothing was changed."""
+
+
+class MigrationLockLostError(RuntimeError):
+    """The session holding the migration lock ended before the run finished."""
 
 
 def _database_url() -> str:
@@ -196,6 +210,54 @@ async def _release_lock(
     logger.info("migration.lock_released", outcome=outcome)
 
 
+def _lock_lost(step: str, cause: BaseException | None) -> MigrationLockLostError:
+    """Log `migration.lock_lost` for `step` and return the error to raise.
+
+    Args:
+        step: The step that found the lock gone: the one just finished, whose writes on
+            DBOS's connections may have run unprotected, or the ledger step itself.
+        cause: The driver error that revealed it, or None when pg_locks said so.
+    """
+    logger.error("migration.lock_lost", step=step, cause=None if cause is None else repr(cause))
+    return MigrationLockLostError(
+        f"the migration lock's session ended during the {step} step; "
+        "no ledger revision was applied, run the migration again"
+    )
+
+
+async def _verify_lock_held(connection: AsyncConnection, key: int, step: str) -> None:
+    """Ask the lock's own session whether it still holds `key`, after `step` ran elsewhere.
+
+    The DBOS steps write on connections of their own, so the lock session was idle
+    meanwhile and may have been ended (an idle-session timeout, an operator, a reset). A
+    dead session answers with a disconnect; a live one that lost the lock cannot happen for
+    a session lock, but pg_locks is asked rather than assumed.
+
+    Raises:
+        MigrationLockLostError: The session is gone or no longer holds the lock.
+    """
+
+    def holds(sync_connection: Connection) -> bool:
+        """Run lease.py's holder check on the driver connection."""
+
+        def execute(query: LiteralString, params: Mapping[str, int]) -> tuple[object, ...] | None:
+            """Run one psycopg-style query and return its first row."""
+            row = sync_connection.exec_driver_sql(query, dict(params)).fetchone()
+            return None if row is None else tuple(row)
+
+        return holds_lock(execute, key)
+
+    try:
+        held = await connection.run_sync(holds)
+        await connection.commit()
+    except DBAPIError as error:
+        if not error.connection_invalidated:
+            raise
+        raise _lock_lost(step, error) from error
+    if not held:
+        raise _lock_lost(step, None)
+
+
 def _alembic_command() -> str:
     """Return the name of the Alembic command running this environment.
 
@@ -244,19 +306,33 @@ async def _schema_ahead(connection: AsyncConnection) -> bool:
     return True
 
 
-async def _migrate_under_lock(connection: AsyncConnection, settings: Settings) -> Outcome:
+async def _migrate_under_lock(connection: AsyncConnection, settings: Settings, key: int) -> Outcome:
     """Migrate the DBOS system schema, the tracking table and the ledger, in that order.
+
+    `connection` holds the lock on `key`. The two DBOS steps run on connections of their
+    own, so the lock is verified after each before the next step writes.
 
     Returns:
         `skipped` when the schema is ahead of this build and nothing ran, else `committed`.
+
+    Raises:
+        MigrationLockLostError: The lock's session ended during the run.
     """
     if await _schema_ahead(connection):
         return "skipped"
     DBOS.migrate(system_database_url(settings), schema=SYSTEM_SCHEMA)
+    await _verify_lock_held(connection, key, "DBOS system schema")
     await AsyncSQLAlchemyDatasource.migrate(
         str(settings.ledger_database_url), schema=TRACKING_SCHEMA
     )
-    await connection.run_sync(_run)
+    await _verify_lock_held(connection, key, "datasource tracking table")
+    try:
+        await connection.run_sync(_run)
+    except DBAPIError as error:
+        if not error.connection_invalidated:
+            raise
+        # Alembic's transaction died with the session, so nothing of it was committed.
+        raise _lock_lost("ledger revisions", error) from error
     return "committed"
 
 
@@ -265,6 +341,7 @@ async def run_migrations_online() -> None:
 
     Raises:
         MigrationLockTimeoutError: Another run held the lock past the timeout.
+        MigrationLockLostError: The lock's session ended during the run.
     """
     configure_logging(level=logging.INFO)
     settings = get_settings()
@@ -278,7 +355,7 @@ async def run_migrations_online() -> None:
             outcome = "rolled back"
             failing = True
             try:
-                outcome = await _migrate_under_lock(connection, settings)
+                outcome = await _migrate_under_lock(connection, settings, key)
                 failing = False
             finally:
                 await _release_lock(connection, key, outcome, failing=failing)
@@ -293,3 +370,5 @@ else:
         asyncio.run(run_migrations_online())
     except MigrationLockTimeoutError:
         sys.exit(EXIT_LOCK_TIMEOUT)
+    except MigrationLockLostError:
+        sys.exit(EXIT_LOCK_LOST)

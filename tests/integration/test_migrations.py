@@ -5,12 +5,14 @@ migration that only works when something else ran first. These tests create a da
 their own and drive the Alembic command line against it, as CI and a deployment do.
 """
 
+import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -1005,3 +1007,62 @@ async def test_an_upgrade_on_a_schema_ahead_changes_nothing(empty_database: str)
     assert downgraded.returncode != 0, downgraded.stderr
     assert (await _views_and_head(empty_database))[1] == _FUTURE_REVISION
     assert await _table_names(empty_database) == tables
+
+
+async def _wait_until(condition: Callable[[], Awaitable[bool]], what: str) -> None:
+    """Poll `condition` every 50 ms until it holds; fail after RUN_TIMEOUT_SECONDS."""
+    deadline = time.monotonic() + RUN_TIMEOUT_SECONDS
+    while not await condition():
+        if time.monotonic() > deadline:
+            pytest.fail(f"{what} did not happen within {RUN_TIMEOUT_SECONDS}s")
+        await asyncio.sleep(0.05)
+
+
+def _lock_holder_pid(database_url: str) -> int | None:
+    """Return the pid of the session holding the migration lock, if one is visible."""
+    observer = connect_session(
+        libpq_conninfo(database_url), application_name="migration-test observer"
+    )
+    try:
+        description = observer.holder(MIGRATION_LOCK_KEY)
+    finally:
+        observer.close()
+    if description is None:
+        return None
+    match = re.match(r"pid (\d+)", description)
+    assert match is not None, description
+    return int(match.group(1))
+
+
+async def test_a_lost_lock_session_stops_the_run_before_the_ledger_step(
+    empty_database: str, tmp_path: Path
+) -> None:
+    """A run whose lock session is ended logs `migration.lock_lost`, exits 4, migrates nothing."""
+    stderr_path = tmp_path / "upgrade.stderr"
+    with stderr_path.open("wb") as stderr:
+        process = subprocess.Popen(
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            cwd=REPOSITORY_ROOT,
+            env=_alembic_environment(empty_database),
+            stdout=subprocess.DEVNULL,
+            stderr=stderr,
+        )
+    try:
+        # The `dbos` schema appears only once the DBOS step runs, after the lock and the
+        # schema-ahead read, so the kill lands on a session idle while DBOS writes on its
+        # own connections, or inside Alembic's own step. Both must end as a lost lock.
+        await _wait_until(lambda: _has_dbos_schema(empty_database), "the DBOS step")
+        pid = _lock_holder_pid(empty_database)
+        assert pid is not None
+        await _execute(empty_database, "SELECT pg_terminate_backend(:pid)", pid=pid)
+        code = process.wait(timeout=RUN_TIMEOUT_SECONDS)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+    log = stderr_path.read_text()
+
+    assert code == 4, log
+    assert "migration.lock_lost" in log
+    assert "migration.lock_released" in log
+    assert ("public", "alembic_version") not in await _table_names(empty_database)

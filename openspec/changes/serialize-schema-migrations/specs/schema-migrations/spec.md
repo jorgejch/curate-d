@@ -34,7 +34,7 @@ finds the schema already at its target SHALL change nothing and exit 0.
 #### Scenario: The holder's connection is lost
 
 - **WHEN** the connection of the run holding the lock is lost before it commits
-- **THEN** its transaction rolls back, the lock is released with the session, and a waiting run takes the lock and applies what is still pending
+- **THEN** its transaction rolls back, the lock is released with the session, the run that lost it logs `migration.lock_lost` and exits non-zero, and a waiting run takes the lock and applies what is still pending
 
 ### Requirement: A waiting run gives up after the configured timeout
 
@@ -96,6 +96,23 @@ DBOS SQL; its output SHALL say that the DBOS schema must be migrated separately.
 
 - **WHEN** `alembic upgrade head --sql` runs
 - **THEN** it connects to no database, takes no lock, and emits only the ledger SQL
+
+### Requirement: A run that loses its lock applies no ledger revision
+
+The DBOS system-schema and tracking-table steps write on connections of their own. After each of
+them the run SHALL ask the lock's own session whether it still holds the migration lock. A run
+whose lock is lost, there or during the ledger step, SHALL log one ERROR event,
+`migration.lock_lost`, naming the step, SHALL apply no ledger revision and SHALL exit non-zero.
+
+#### Scenario: The lock's session ends while a DBOS step runs
+
+- **WHEN** the session holding the migration lock is ended after the run started the DBOS system-schema step
+- **THEN** the run logs `migration.lock_lost`, exits non-zero, and no ledger revision is applied
+
+#### Scenario: The lock's session ends during the ledger step
+
+- **WHEN** the session holding the migration lock is ended while Alembic applies the ledger revisions
+- **THEN** Alembic's transaction rolls back, the run logs `migration.lock_lost` and exits non-zero, and `alembic_version` is as it was before the run
 
 ### Requirement: An upgrade on a schema ahead of its build changes nothing and exits 0
 

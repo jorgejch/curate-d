@@ -144,6 +144,20 @@ Integration fixtures that `configure(...)` and `DBOS.launch()` run on a stack `m
 migrated through `env.py`, so they keep working; the unit pin on `run_dbos_database_migrations`'s
 signature in `test_dbos_app.py` moves to `DBOS.migrate` and `AsyncSQLAlchemyDatasource.migrate`.
 
+The two DBOS steps write on connections of their own, and the public API gives no way to run
+them on the lock's connection. So the run follows CLAUDE.md's rule for that case: lock on our
+own connection, write through the public API, verify afterwards that the lock still holds, and
+name one ERROR event when it does not. After each DBOS step, `env.py` asks the lock's session
+whether it still holds the key (`holds_lock`, factored out of `PostgresLeaseSession.holds` as
+`describe_holder` was). A dead session answers with a disconnect (`DBAPIError` with
+`connection_invalidated`); a live session cannot lose a session lock, but pg_locks is asked
+rather than assumed. A loss, there or during Alembic's own step, logs `migration.lock_lost`
+(ERROR, with the step) and exits 4 with no ledger revision applied. The window itself stays:
+a DBOS step already running when the session dies finishes without the lock, and a waiter may
+start its own DBOS step beside it. Detection makes that visible and keeps the ledger step out of
+it; both DBOS steps are idempotent, so the repair is to run the migration again (added after
+review, 2026-11-07).
+
 ### D5. Events and exit code
 
 `env.py` calls `configure_logging(level=INFO)` after Alembic's `fileConfig`, so the named events
@@ -158,6 +172,9 @@ per-revision progress a holder's operator sees). Events:
   and the holder; then `MigrationLockTimeoutError` is raised and `env.py` exits with code 3, as
   `promote` does on its fence (`EXIT_FENCED`). Nothing was written: the lock is taken before the
   DBOS step.
+- `migration.lock_lost` (ERROR): the lock's session ended mid-run (D4); names the step that
+  found it. `MigrationLockLostError` is raised and `env.py` exits with code 4. No ledger
+  revision was applied; the DBOS steps are idempotent, so the repair is a rerun.
 - `migration.lock_released` (INFO) after unlock, with `outcome` committed or rolled back.
 
 No heartbeat from the holder: the waiter's one line names the holder's pid, application name,
@@ -277,6 +294,12 @@ rollback boundary.
   that `docs/recovery.md` triage would surface. Accepted.
 - [The deployment still migrates from every pod] → Correct but not Twelve-Factor V.3/XII.1;
   recorded as a deployment choice in `docs/twelve-factor.md` (D10), not hidden.
+- [The lock session dies while a DBOS step runs on its own connection] → The step finishes
+  unprotected and a waiter may take the lock meanwhile; that window cannot be closed through
+  the public API. The run verifies the lock after each DBOS step and before Alembic (D4), logs
+  `migration.lock_lost`, exits 4 and applies no ledger revision; the integration test ends the
+  holder's session mid-run and asserts exactly that. The DBOS steps are idempotent, so a rerun
+  repairs. Accepted and named in `docs/recovery.md`'s alert list.
 - [`DBOS.migrate` or the datasource migrate internally waits or fails under our lock] → They run
   one at a time under our lock, so their own contention path is never taken. If one raises, the
   run exits non-zero naming the cause and the lock is released in `finally`.
