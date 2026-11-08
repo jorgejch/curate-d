@@ -179,3 +179,8 @@ of the build SHALL be accepted.
 
 - **WHEN** several workers launch at once on a migrated database
 - **THEN** none of them migrates, and none blocks another on a migration lock
+
+#### Scenario: The local stack migrates before its workers start
+
+- **WHEN** `make stack-up` starts the local stack on an empty database
+- **THEN** the `migrate` service runs `alembic upgrade head` and exits 0 before the API and the workers start, and the workers launch

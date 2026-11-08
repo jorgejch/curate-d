@@ -235,7 +235,8 @@ datasource tracking table, and never migrate them: `build_dbos_config` and
 the ledger revisions. It must therefore run before a build's workers start. The deployment
 decides what runs it: an init container on every pod, a release job or a hand step. Each of
 these is safe, alone or together, because concurrent runs wait for the migration lock.
-Locally and in a breaking deploy it is `make migrate`.
+Locally, `make stack-up` runs it as the compose `migrate` service before the API and the workers
+start; by hand and in a breaking deploy it is `make migrate`.
 
 - A `dbos` package bump is a migration in this sense. Without the migration, the new workers
   fail launch with `DBOSInitializationError` and restart until it has run.

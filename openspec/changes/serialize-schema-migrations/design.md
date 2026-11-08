@@ -140,6 +140,12 @@ bumps the `dbos` package must run `make migrate` before its workers start, or la
 `DBOSInitializationError`; a ledger migration already has that rule. This is a setting the skill
 lists, not a departure, and is recorded in CLAUDE.md's DBOS section as `enable_otlp` is.
 
+Locally, `compose.yaml` gains a one-shot `migrate` service (`alembic upgrade head` from the same
+image) that the API and both workers wait on with `service_completed_successfully`. Before this
+change the workers migrated at launch, so `make stack-up` needed no step of its own; `make
+test-stack` migrates from the host and names its services, so it is unchanged (review,
+2026-11-08).
+
 Integration fixtures that `configure(...)` and `DBOS.launch()` run on a stack `make test-stack`
 migrated through `env.py`, so they keep working; the unit pin on `run_dbos_database_migrations`'s
 signature in `test_dbos_app.py` moves to `DBOS.migrate` and `AsyncSQLAlchemyDatasource.migrate`.

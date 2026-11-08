@@ -73,7 +73,9 @@ SQLAlchemy connection, not a libpq one, so no requirement there changes.
   on a schema behind; `tests/unit/runtime/test_lease.py`, `tests/unit/test_config.py`,
   `tests/unit/runtime/test_dbos_app.py`: the key, the setting, the config flag.
 - Docs listed above. `Makefile` and `ops/reset/reset-environment.sh` do not change: they keep
-  calling `alembic upgrade head`, now safe to call from several instances at once.
+  calling `alembic upgrade head`, now safe to call from several instances at once. `compose.yaml`
+  gains a one-shot `migrate` service the API and the workers wait on, since the workers no longer
+  migrate at launch and `make stack-up` had no other migration step.
 - No deployment repository changes. A deployment that runs `alembic upgrade head` from an init
   container on every pod becomes correct without any edit; a deployment that wants one run per
   release can add it later, on its own schedule. The curate.d code reads nothing from any
