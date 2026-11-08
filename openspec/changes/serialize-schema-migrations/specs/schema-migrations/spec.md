@@ -120,6 +120,16 @@ whose lock is lost, there or during the ledger step, SHALL log one ERROR event,
 - **WHEN** the session holding the migration lock is ended while Alembic applies the ledger revisions
 - **THEN** Alembic's transaction rolls back, the run logs `migration.lock_lost` and exits non-zero, and `alembic_version` is as it was before the run
 
+### Requirement: No server idle timeout ends the lock's session
+
+The run SHALL turn PostgreSQL's idle-session timeouts off on the lock's session for its duration,
+so that only a deliberate end of the session or a network failure loses the lock.
+
+#### Scenario: The database's idle-session timeout is shorter than the wait
+
+- **WHEN** the database sets `idle_session_timeout` below the lock poll interval and another session holds the migration lock for longer than that
+- **THEN** the run's session survives the wait, takes the lock when it is released, and exits 0
+
 ### Requirement: An upgrade on a schema ahead of its build changes nothing and exits 0
 
 An online `alembic upgrade` that finds the database at a revision its build does not know SHALL

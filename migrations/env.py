@@ -24,10 +24,13 @@ schema lives in the ledger database: a separated system database is migrated her
 ledger database then has no `dbos` tables and 0005 fails.
 
 The two DBOS steps run on connections of their own, so a lock session that dies while one
-runs does not stop it. After each of them the run asks its own session whether it still
-holds the lock; a lost lock, there or during Alembic's own step, logs `migration.lock_lost`
-and exits 4 without applying a ledger revision. Both DBOS steps are idempotent, so the
-repair is to run the migration again.
+runs does not stop it. The lock session sits idle meanwhile, so the run turns PostgreSQL's
+idle-session timeouts off on it and sets libpq keepalives, as the lease connections do:
+only a deliberate end of the session (an operator, `ops/reset`) or a network partition
+loses the lock. After each DBOS step the run asks its own session whether it still holds
+the lock; a lost lock, there or during Alembic's own step, logs `migration.lock_lost` and
+exits 4 without applying a ledger revision. Both DBOS steps are idempotent, so the repair
+is to run the migration again.
 
 An upgrade on a schema ahead of its build (a revision this build does not know, written
 by a newer build) logs `migration.schema_ahead`, changes nothing and exits 0, so an older
@@ -62,7 +65,16 @@ from curate_d.ledger.tables import metadata
 from curate_d.observability import configure_logging, get_logger
 from curate_d.runtime.datasource import TRACKING_SCHEMA
 from curate_d.runtime.dbos_app import APPLICATION_NAME, SYSTEM_SCHEMA, system_database_url
-from curate_d.runtime.lease import describe_holder, holds_lock, migration_lock_key
+from curate_d.runtime.lease import (
+    CONNECT_TIMEOUT_SECONDS,
+    KEEPALIVES_COUNT,
+    KEEPALIVES_IDLE_SECONDS,
+    KEEPALIVES_INTERVAL_SECONDS,
+    TCP_USER_TIMEOUT_MILLISECONDS,
+    describe_holder,
+    holds_lock,
+    migration_lock_key,
+)
 
 config = context.config
 
@@ -84,6 +96,20 @@ LOCK_TIMEOUT_SETTING: Final = "CURATE_D_MIGRATION_LOCK_TIMEOUT_SECONDS"
 LOCK_POLL_INTERVAL_SECONDS: Final = 0.5
 """How long a waiting run sleeps between two probes of the migration lock."""
 
+# libpq settings for the lock connection, the lease connections' (`connect_dedicated`).
+_CONNECT_ARGS: Final = {
+    "connect_timeout": CONNECT_TIMEOUT_SECONDS,
+    "keepalives": 1,
+    "keepalives_idle": KEEPALIVES_IDLE_SECONDS,
+    "keepalives_interval": KEEPALIVES_INTERVAL_SECONDS,
+    "keepalives_count": KEEPALIVES_COUNT,
+    "tcp_user_timeout": TCP_USER_TIMEOUT_MILLISECONDS,
+}
+# Session-scoped and user-settable, so no privilege is needed; 0 turns a timeout off.
+_IDLE_TIMEOUTS_OFF: Final = (
+    text("SET idle_session_timeout = 0"),
+    text("SET idle_in_transaction_session_timeout = 0"),
+)
 _TRY_LOCK: Final = text("SELECT pg_try_advisory_lock(CAST(:key AS bigint))")
 _UNLOCK: Final = text("SELECT pg_advisory_unlock(CAST(:key AS bigint))")
 
@@ -145,6 +171,20 @@ async def _holder(connection: AsyncConnection, key: int) -> str:
         return describe_holder(execute, key)
 
     return await connection.run_sync(describe) or "holder not visible"
+
+
+async def _keep_session_alive(connection: AsyncConnection) -> None:
+    """Turn the server's idle-session timeouts off on the lock's session for this run.
+
+    The session lock lives on this connection, which sits idle outside a transaction while
+    it waits for the lock and while the DBOS steps write on connections of their own, and
+    idle in a transaction while a long revision runs. A server-side idle timeout would end
+    the session and release the lock mid-run. Both settings are user-settable and scoped to
+    this session; the keepalives in `_CONNECT_ARGS` cover a silent network drop.
+    """
+    for statement in _IDLE_TIMEOUTS_OFF:
+        await connection.execute(statement)
+    await connection.commit()
 
 
 async def _acquire_lock(connection: AsyncConnection, key: int, timeout_seconds: float) -> None:
@@ -358,9 +398,12 @@ async def run_migrations_online() -> None:
     key = migration_lock_key(APPLICATION_NAME)
     section = config.get_section(config.config_ini_section, {})
     section["sqlalchemy.url"] = str(settings.ledger_database_url)
-    engine = async_engine_from_config(section, prefix="sqlalchemy.", poolclass=pool.NullPool)
+    engine = async_engine_from_config(
+        section, prefix="sqlalchemy.", poolclass=pool.NullPool, connect_args=dict(_CONNECT_ARGS)
+    )
     try:
         async with engine.connect() as connection:
+            await _keep_session_alive(connection)
             await _acquire_lock(connection, key, settings.migration_lock_timeout_seconds)
             outcome = "rolled back"
             failing = True

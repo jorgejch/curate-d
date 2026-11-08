@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
+import psycopg
 import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
@@ -1034,6 +1035,47 @@ async def test_a_read_only_command_writes_no_ddl(empty_database: str) -> None:
     assert "migration.lock_released" in current.stderr
     assert not await _has_dbos_schema(empty_database)
     assert ("public", "alembic_version") not in await _table_names(empty_database)
+
+
+async def test_the_lock_session_outlives_the_databases_idle_timeout(
+    empty_database: str, tmp_path: Path
+) -> None:
+    """`idle_session_timeout` does not end a waiter's idle session; it takes the lock later."""
+    _alembic(empty_database, "upgrade", "head")
+    database = make_url(empty_database).database
+    # Shorter than the 0.5 s between two lock probes; applies to sessions opened from now on.
+    await _execute(
+        empty_database, f"ALTER DATABASE \"{database}\" SET idle_session_timeout = '400ms'"
+    )
+    holder = psycopg.connect(libpq_conninfo(empty_database), autocommit=True)
+    stderr_path = tmp_path / "upgrade.stderr"
+    try:
+        holder.execute("SET idle_session_timeout = 0")
+        holder.execute("SELECT pg_advisory_lock(%s)", (MIGRATION_LOCK_KEY,))
+        with stderr_path.open("wb") as stderr:
+            process = subprocess.Popen(
+                [sys.executable, "-m", "alembic", "upgrade", "head"],
+                cwd=REPOSITORY_ROOT,
+                env=_alembic_environment(empty_database),
+                stdout=subprocess.DEVNULL,
+                stderr=stderr,
+            )
+        try:
+            await asyncio.sleep(2.0)
+            holder.close()
+            code = process.wait(timeout=RUN_TIMEOUT_SECONDS)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+    finally:
+        holder.close()
+    log = stderr_path.read_text()
+
+    assert code == 0, log
+    assert "migration.lock_waiting" in log
+    assert "migration.lock_acquired" in log
+    assert RUNNING_UPGRADE not in log
 
 
 async def _wait_until(condition: Callable[[], Awaitable[bool]], what: str) -> None:

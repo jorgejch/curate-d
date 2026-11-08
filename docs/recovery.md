@@ -103,8 +103,9 @@ Alert on these events:
   exits `3` and changes nothing. Find the holder the event names (its pid, application name,
   address and backend start) and let it finish or end its session, then run the migration
   again. If the holder is a long migration, raise the setting instead.
-- `migration.lock_lost`: the session holding the migration lock ended before the run finished
-  (an idle-session timeout, a pooler that swapped the backend, an operator, a reset). The
+- `migration.lock_lost`: the session holding the migration lock ended before the run finished.
+  The run turns the server's idle-session timeouts off on that session, so the cause is a
+  pooler that swapped the backend, an operator, a reset or a network failure. The
   DBOS system-schema and tracking-table steps run on connections of their own, so the one in
   flight finished without the lock, and another run may have taken the lock meanwhile; the
   event names the step. The run exits `4` and applied no ledger revision. Run the migration

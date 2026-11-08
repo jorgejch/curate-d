@@ -158,6 +158,16 @@ start its own DBOS step beside it. Detection makes that visible and keeps the le
 it; both DBOS steps are idempotent, so the repair is to run the migration again (added after
 review, 2026-11-07).
 
+The accidental cause is removed: the lock session is idle outside a transaction exactly while
+the DBOS steps run, which is the state `idle_session_timeout` ends, and idle in a transaction
+while a long revision runs, which `idle_in_transaction_session_timeout` ends. `env.py` sets both
+to 0 on its session (user-settable, session-scoped) and opens the connection with the lease
+connections' libpq keepalives. What is left is a deliberate end of the session (an operator,
+`ops/reset`) or a network partition, both detected. Closing the window fully needs the two
+public migrate functions to accept a caller's engine or connection; that is a feature request
+upstream (`dbos-inc/dbos-transact-py`), and curate.d takes no private route to it (maintainer
+decision, 2026-11-08).
+
 ### D5. Events and exit code
 
 `env.py` calls `configure_logging(level=INFO)` after Alembic's `fileConfig`, so the named events
@@ -300,10 +310,12 @@ rollback boundary.
   recorded as a deployment choice in `docs/twelve-factor.md` (D10), not hidden.
 - [The lock session dies while a DBOS step runs on its own connection] → The step finishes
   unprotected and a waiter may take the lock meanwhile; that window cannot be closed through
-  the public API. The run verifies the lock after each DBOS step and before Alembic (D4), logs
-  `migration.lock_lost`, exits 4 and applies no ledger revision; the integration test ends the
-  holder's session mid-run and asserts exactly that. The DBOS steps are idempotent, so a rerun
-  repairs. Accepted and named in `docs/recovery.md`'s alert list.
+  the public API. The run turns the server's idle-session timeouts off on its session and sets
+  keepalives, so no timeout causes it; it verifies the lock after each DBOS step and before
+  Alembic (D4), logs `migration.lock_lost`, exits 4 and applies no ledger revision. Integration
+  tests end the holder's session mid-run and run a waiter under a database idle timeout shorter
+  than its poll interval. The DBOS steps are idempotent, so a rerun repairs. Named in
+  `docs/recovery.md`'s alert list; the full fix is the upstream feature request in D4.
 - [`DBOS.migrate` or the datasource migrate internally waits or fails under our lock] → They run
   one at a time under our lock, so their own contention path is never taken. If one raises, the
   run exits non-zero naming the cause and the lock is released in `finally`.
