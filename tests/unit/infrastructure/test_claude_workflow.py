@@ -133,6 +133,13 @@ def test_claude_can_run_the_checks() -> None:
     assert _step("Install dependencies")["run"] == "uv sync --locked --no-build"
 
 
+def test_claude_can_make_the_github_writes_it_is_asked_for() -> None:
+    """Editing an issue, creating a pull request and editing one are allowed."""
+    tools = _allowed_tools()
+    for command in ("gh issue edit", "gh pr create", "gh pr edit"):
+        assert f"Bash({command}:*)" in tools
+
+
 def test_the_checkout_keeps_full_history() -> None:
     """`git log` and `git blame` need the history a depth-1 clone drops."""
     checkout = _step("Checkout repository")
