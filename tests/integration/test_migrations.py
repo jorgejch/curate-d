@@ -992,6 +992,8 @@ async def test_an_upgrade_on_a_schema_ahead_changes_nothing(empty_database: str)
         "UPDATE alembic_version SET version_num = :revision",
         revision=_FUTURE_REVISION,
     )
+    # Without the system schema, a DBOS step that ran would recreate it.
+    await _execute(empty_database, "DROP SCHEMA dbos CASCADE")
     tables = await _table_names(empty_database)
 
     upgraded = _run_alembic(empty_database, "upgrade", "head")
@@ -1001,12 +1003,14 @@ async def test_an_upgrade_on_a_schema_ahead_changes_nothing(empty_database: str)
     assert _FUTURE_REVISION in upgraded.stderr
     assert RUNNING_UPGRADE not in upgraded.stderr
     assert (await _views_and_head(empty_database))[1] == _FUTURE_REVISION
+    assert not await _has_dbos_schema(empty_database)
     assert await _table_names(empty_database) == tables
 
     downgraded = _run_alembic(empty_database, "downgrade", "base")
 
     assert downgraded.returncode != 0, downgraded.stderr
     assert (await _views_and_head(empty_database))[1] == _FUTURE_REVISION
+    assert not await _has_dbos_schema(empty_database)
     assert await _table_names(empty_database) == tables
 
 
