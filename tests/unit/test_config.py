@@ -248,11 +248,11 @@ def test_the_migration_lock_timeout_is_read_from_the_environment(
     assert Settings(_env_file=None).migration_lock_timeout_seconds == 90.0
 
 
-@pytest.mark.parametrize("value", ["0", "-1", "abc"])
+@pytest.mark.parametrize("value", ["0", "-1", "abc", "inf", "nan"])
 def test_an_invalid_migration_lock_timeout_stops_settings_load(
     monkeypatch: pytest.MonkeyPatch, value: str
 ) -> None:
-    """A non-positive or non-numeric migration lock timeout fails on its own field."""
+    """A non-positive, non-finite or non-numeric migration lock timeout fails on its own field."""
     monkeypatch.setenv("CURATE_D_MIGRATION_LOCK_TIMEOUT_SECONDS", value)
     with pytest.raises(ValidationError, match="migration_lock_timeout_seconds"):
         Settings(_env_file=None)

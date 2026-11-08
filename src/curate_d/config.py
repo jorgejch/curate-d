@@ -263,6 +263,7 @@ class Settings(BaseSettings):
     migration_lock_timeout_seconds: float = Field(
         default=1800.0,
         gt=0,
+        allow_inf_nan=False,
         description="How long an online `alembic upgrade` or `alembic downgrade` waits for "
         "another migration run to release the migration lock. On timeout the run logs "
         "`migration.lock_timeout`, exits 3 and changes nothing.",
