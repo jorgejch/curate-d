@@ -106,7 +106,7 @@ this repository; a row that mentions them states the finding in general terms.
 | Rule | Status | Evidence, or what is unmet | Authority or tracking |
 | --- | --- | --- | --- |
 | V.1 | Conforms | *Distinct stages.* Build is the image (`.github/workflows/docker-publish.yml`); release is the image tag plus config, applied through GitOps; run is the container command. | - |
-| V.2 | Gap | *Immutable releases.* A change of config or of a secret restarts no process and gets no new release identifier. | deployment |
+| V.2 | Gap | *Immutable releases.* A change of config or of a secret restarts no process and gets no new release identifier. A rebuild of a dev commit republishes its tag, `dev-<commit timestamp>-<sha>` (`.github/workflows/docker-publish.yml`), and while `TESSERACT_VERSION` floats (II.1) the rebuilt image can differ under the same identifier. | both |
 | V.3 | Gap | *Complexity in the build, minimal run.* Schema migration runs at process start: the deployment manifests run `alembic upgrade head` when the API starts, and the workers leave `run_migrations` at its default for DBOS and for the datasource (`src/curate_d/runtime/dbos_app.py`, `src/curate_d/runtime/datasource.py`). The skill supports the fix (`references/lifecycle-config.md`, "Least-Privilege Deployments"). | both; [#7](https://github.com/jorgejch/curate-d/issues/7) |
 
 ### VI. Processes

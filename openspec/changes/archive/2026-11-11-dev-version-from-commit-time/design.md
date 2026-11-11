@@ -41,10 +41,13 @@ equality or membership.
 
 - **V.1, distinct stages:** still conforms. The release identifier is now fixed by the commit
   rather than by the build run.
-- **II.1, deterministic build and run:** stays a gap, and it now has one more consequence: a
-  rebuild of a commit republishes the same tag, and with `TESSERACT_VERSION=5.5.*` floating the
-  rebuilt image can differ from the first. Rebuilds of a dev commit are rare, and the row's fix
-  (pinning Tesseract) closes this too.
+- **V.2, immutable releases:** a new departure, recorded in its row. Before, every dev build got
+  a tag of its own, so a dev tag never changed contents. Now a rebuild of a commit republishes
+  its tag, and while `TESSERACT_VERSION=5.5.*` floats the rebuilt image can differ from the first
+  under the same identifier. Accepted because rebuilds of a dev commit are rare and run the same
+  code; pinning Tesseract (II.1) closes it.
+- **II.1, deterministic build and run:** stays a gap, unchanged; its fix also closes the V.2
+  departure above.
 
 ## Risks / Trade-offs
 
