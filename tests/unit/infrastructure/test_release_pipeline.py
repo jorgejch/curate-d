@@ -229,6 +229,8 @@ def dated_commit(tmp_path: Path) -> tuple[Path, str]:
     when = "2026-11-10T23:01:14-08:00"
     env = {
         **os.environ,
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_AUTHOR_NAME": "t",
         "GIT_AUTHOR_EMAIL": "t@example.invalid",
         "GIT_COMMITTER_NAME": "t",
