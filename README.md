@@ -13,11 +13,10 @@ Autonomous multi-cloud file and media organizer.
 
 Curate.d ingests files and media from multiple cloud storage and photo providers,
 classifies them by content and context, and files them into a consistent naming and
-folder structure on a target cloud — running in the background without asking for
-approval on every file.
+folder structure rendered following structured, and declarative policies.
 
-> **Status: pre-release.** The organizer is implemented and verified end to end against a
-> development deployment. See the [staging guide](docs/staging.md).
+> **Status: pre-release.** The organizer is implemented and verified end to end for pCloud in 
+> a dev deployment. See the [staging guide](docs/staging.md).
 
 ## The guarantee
 
