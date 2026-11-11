@@ -133,8 +133,8 @@ def test_a_release_tag_must_match_the_packaged_version() -> None:
 def test_the_packaged_version_is_what_dbos_reports() -> None:
     """The check above is only meaningful if the code reads the same source.
 
-    A dev image appends a `+dev.<timestamp>.<sha>` label; the release a tag names is the
-    package component, which must match pyproject.
+    A dev image runs as its own tag instead; only a release image runs as the packaged
+    version, which must match pyproject.
     """
     from curate_d.runtime.dbos_app import APPLICATION_VERSION
 
@@ -142,9 +142,9 @@ def test_the_packaged_version_is_what_dbos_reports() -> None:
     declared = next(
         line.split('"')[1] for line in pyproject.splitlines() if line.startswith("version = ")
     )
-    package, _, label = APPLICATION_VERSION.partition("+")
-    assert declared == package
-    assert not label or re.fullmatch(r"dev\.\d{14}\.[0-9a-f]{7,40}", label), label
+    assert declared == APPLICATION_VERSION or re.fullmatch(
+        r"dev-\d{14}-[0-9a-f]{7,40}", APPLICATION_VERSION
+    ), APPLICATION_VERSION
 
 
 def test_the_release_guards_run_before_anything_reaches_the_registry() -> None:
@@ -175,10 +175,29 @@ def test_build_and_push_is_the_only_job_and_waits_on_none() -> None:
     assert "needs" not in cast(Document, jobs["build-and-push"])
 
 
-def test_the_dev_tag_sorts_by_build_time() -> None:
-    """Flux's dev ImagePolicy orders `dev-<UTC timestamp>-<sha>` tags; this is that shape."""
+def test_the_dev_tag_sorts_by_commit_time() -> None:
+    """Flux's dev ImagePolicy orders `dev-<UTC timestamp>-<sha>` tags; this is that shape.
+
+    The stamp is the commit's, not the build's: a build-time stamp gives one commit a new
+    tag per build, and a re-run of an older commit's build a tag Flux would deploy.
+    """
     dev_tag = next(t for t in _emitted_tags() if t.startswith("type=raw"))
-    assert "dev-{{date 'YYYYMMDDHHmmss'}}-{{sha}}" in dev_tag
+    assert "dev-${{ steps.stamp.outputs.commit_time }}-{{sha}}" in dev_tag
+    assert "{{date" not in dev_tag
+
+
+def test_the_commit_time_is_read_in_utc_and_only_on_dev() -> None:
+    """`--date=format-local` renders in `TZ`, so the stamp is UTC whatever the runner's zone."""
+    stamp = next(s for s in _build_steps() if s.get("id") == "stamp")
+    run = cast(str, stamp["run"])
+    assert "TZ=UTC git log -1 --format=%cd --date=format-local:%Y%m%d%H%M%S" in run
+    assert '"$GITHUB_SHA"' in run
+    assert "^[0-9]{14}$" in run
+    assert stamp["if"] == "github.ref == 'refs/heads/dev'"
+    names = [str(s.get("name", "")) for s in _build_steps()]
+    assert names.index(str(stamp["name"])) < next(
+        i for i, n in enumerate(names) if "container metadata" in n
+    )
 
 
 def test_only_a_dev_image_is_built_with_its_build_revision() -> None:

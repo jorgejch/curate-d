@@ -188,8 +188,12 @@ def test_the_configured_executor_id_overrides_dbos_vmid(
         DBOS.destroy()
 
 
-# The local label a dev image adds: `dev.<14-digit UTC timestamp>.<hex sha>`.
-_DEV_LABEL = re.compile(r"dev\.\d{14}\.[0-9a-f]{7,40}")
+# A dev image's version, its own tag: `dev-<14-digit UTC commit timestamp>-<hex sha>`.
+_DEV_VERSION = re.compile(r"dev-\d{14}-[0-9a-f]{7,40}")
+
+# A Kubernetes label value: at most 63 characters, alphanumerics, `-`, `_` and `.`,
+# starting and ending with an alphanumeric.
+_LABEL_VALUE = re.compile(r"[A-Za-z0-9]([A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?")
 
 
 def _import_application_version(build_revision: str | None) -> subprocess.CompletedProcess[str]:
@@ -216,18 +220,19 @@ def test_the_application_version_comes_from_package_metadata() -> None:
 
     A constant written here could drift from the released version, and a v0.2.0 image
     would go on enqueueing and recovering work as 0.1.0 with nothing reporting it. A dev
-    image only appends a local label, so the package component is what must match.
+    image runs as its own tag instead, which names the commit it was built from.
     """
-    package, _, label = APPLICATION_VERSION.partition("+")
-    assert package == version("curate-d")
-    assert not label or _DEV_LABEL.fullmatch(label), f"{label!r} is not a dev build label"
+    assert version("curate-d") == APPLICATION_VERSION or _DEV_VERSION.fullmatch(
+        APPLICATION_VERSION
+    ), f"{APPLICATION_VERSION!r} is neither the packaged version nor a dev tag"
 
 
 def test_the_application_version_is_a_release_version() -> None:
-    """Check the application version's package component follows MAJOR.MINOR.PATCH."""
-    package = APPLICATION_VERSION.partition("+")[0]
-    parts = package.split(".")
-    assert len(parts) == 3, f"{package!r} is not MAJOR.MINOR.PATCH"
+    """Check a release application version follows MAJOR.MINOR.PATCH."""
+    if _DEV_VERSION.fullmatch(APPLICATION_VERSION):
+        pytest.skip("a dev image runs as its tag, not a release version")
+    parts = APPLICATION_VERSION.split(".")
+    assert len(parts) == 3, f"{APPLICATION_VERSION!r} is not MAJOR.MINOR.PATCH"
     assert all(part.isdigit() for part in parts)
 
 
@@ -238,11 +243,11 @@ def test_a_release_image_imports_as_exactly_the_packaged_version() -> None:
     assert result.stdout.strip() == version("curate-d")
 
 
-def test_a_dev_image_imports_as_its_build_of_the_packaged_version() -> None:
-    """Import with a dev tag and get `<package>+dev.<timestamp>.<sha>`."""
+def test_a_dev_image_imports_as_its_tag() -> None:
+    """Import with a dev tag and get the tag."""
     result = _import_application_version("dev-20261003201500-e69d801")
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == f"{version('curate-d')}+dev.20261003201500.e69d801"
+    assert result.stdout.strip() == "dev-20261003201500-e69d801"
 
 
 def test_a_malformed_build_revision_fails_the_import() -> None:
@@ -260,15 +265,26 @@ def test_a_release_image_runs_as_the_packaged_version() -> None:
     assert application_version("0.1.1", "") == "0.1.1"
 
 
-def test_a_dev_image_runs_as_its_own_build_of_the_packaged_version() -> None:
-    """The dev tag becomes a local version label, so each dev build is a distinct version."""
-    assert (
-        application_version("0.1.1", "dev-20261003201500-e69d801")
-        == "0.1.1+dev.20261003201500.e69d801"
+def test_a_dev_image_runs_as_its_tag() -> None:
+    """The dev tag is the version, so each dev commit is a distinct version."""
+    assert application_version("0.1.1", "dev-20261003201500-e69d801") == (
+        "dev-20261003201500-e69d801"
     )
     assert application_version("0.1.1", "dev-20261003201500-e69d801") != application_version(
         "0.1.1", "dev-20261003211500-0a1b2c3"
     )
+
+
+def test_a_dev_version_is_a_kubernetes_label_value() -> None:
+    """A per-version worker controller labels and names its resources by version.
+
+    A `+` local version label is valid in neither, which is why a dev image runs as its tag.
+    """
+    longest = application_version("0.1.1", f"dev-20261003201500-{'a' * 40}")
+    assert _LABEL_VALUE.fullmatch(longest), longest
+    # dbos-version-controller's `spec.version` pattern, for the 7-character sha CI tags with.
+    built = application_version("0.1.1", "dev-20261003201500-e69d801")
+    assert re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,48}", built), built
 
 
 @pytest.mark.parametrize(

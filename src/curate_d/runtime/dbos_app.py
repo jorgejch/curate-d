@@ -52,11 +52,11 @@ def application_name(environment: DeploymentEnvironment | None) -> str:
 # would still enqueue and recover work as 0.1.0, and nothing would report the mismatch.
 # One source of truth, and the release pipeline checks the tag against it.
 #
-# A dev image adds its build to that version (see `application_version`), so every dev
-# build is a distinct version: DBOS's latest version then names the newest build, which
+# A dev image runs as its own tag instead (see `application_version`), so every dev
+# commit is a distinct version: DBOS's latest version then names the newest build, which
 # is what schedule ownership relies on. Release images carry no build revision.
 BUILD_REVISION_ENV: Final = "CURATE_D_BUILD_REVISION"
-_DEV_BUILD_REVISION: Final = re.compile(r"dev-(?P<stamp>\d{14})-(?P<sha>[0-9a-f]{7,40})")
+_DEV_BUILD_REVISION: Final = re.compile(r"dev-\d{14}-[0-9a-f]{7,40}")
 
 
 def application_version(package_version: str, build_revision: str | None) -> str:
@@ -64,25 +64,26 @@ def application_version(package_version: str, build_revision: str | None) -> str
 
     Args:
         package_version: The packaged version, as the release pipeline checks it.
-        build_revision: The image's dev tag, `dev-<UTC timestamp>-<sha>`, baked in by CI
-            for dev builds; None or empty for a release image.
+        build_revision: The image's dev tag, `dev-<UTC commit timestamp>-<sha>`, baked in
+            by CI for dev builds; None or empty for a release image.
 
     Returns:
-        `package_version` for a release image, else `<package>+dev.<timestamp>.<sha>`: a
-        local version label, so the release it leads to still reads first.
+        `package_version` for a release image, else the dev tag itself. The tag, unlike a
+        `+dev` local version label, is a valid Kubernetes label value and resource name
+        part, so one string names the image, the DBOS version and the pods running it. It
+        is fixed by the commit, so rebuilding a commit runs as the same version.
 
     Raises:
         ValueError: `build_revision` is set but is not a dev tag.
     """
     if not build_revision:
         return package_version
-    match = _DEV_BUILD_REVISION.fullmatch(build_revision)
-    if match is None:
+    if _DEV_BUILD_REVISION.fullmatch(build_revision) is None:
         raise ValueError(
             f"{BUILD_REVISION_ENV}={build_revision!r} is not a dev image tag "
             "(dev-<14-digit UTC timestamp>-<hex sha>)"
         )
-    return f"{package_version}+dev.{match['stamp']}.{match['sha']}"
+    return build_revision
 
 
 APPLICATION_VERSION = application_version(version("curate-d"), os.environ.get(BUILD_REVISION_ENV))

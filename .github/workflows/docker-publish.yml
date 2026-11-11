@@ -86,6 +86,22 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v4
 
+      # The dev tag's stamp is the commit's time, not the build's: rebuilding a commit
+      # publishes the same tag and runs as the same DBOS version, and re-running an older
+      # commit's build can't publish a tag that sorts after newer commits (Flux would roll
+      # dev back to it). Read from git rather than metadata-action's commit_date, which
+      # falls back to the build time without a sign when it can't read the commit.
+      - name: Stamp the dev build with its commit time
+        id: stamp
+        if: github.ref == 'refs/heads/dev'
+        run: |
+          stamp=$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y%m%d%H%M%S "$GITHUB_SHA")
+          if ! [[ "$stamp" =~ ^[0-9]{14}$ ]]; then
+            echo "::error::could not read the commit time of ${GITHUB_SHA} (got '${stamp}')."
+            exit 1
+          fi
+          echo "commit_time=${stamp}" >> "$GITHUB_OUTPUT"
+
       - name: Extract container metadata
         id: meta
         uses: docker/metadata-action@v6
@@ -96,7 +112,7 @@ jobs:
             type=semver,pattern=v{{major}}.{{minor}}
             # Not is_default_branch: the default branch moves to main once there is a
             # prod release, and the dev environment must keep receiving dev's images.
-            type=raw,value=dev-{{date 'YYYYMMDDHHmmss'}}-{{sha}},enable=${{ github.ref == 'refs/heads/dev' }}
+            type=raw,value=dev-${{ steps.stamp.outputs.commit_time }}-{{sha}},enable=${{ github.ref == 'refs/heads/dev' }}
 
       - name: Build and push image
         uses: docker/build-push-action@v7
@@ -106,9 +122,9 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # On dev the only tag is the dev one, so `version` is that tag: the image's
-          # DBOS application version names its build. A release image gets none and runs
-          # as the bare packaged version the release guard checked.
+          # On dev the only tag is the dev one, so `version` is that tag, and it is the
+          # image's DBOS application version. A release image gets none and runs as the
+          # bare packaged version the release guard checked.
           build-args: |
             CURATE_D_BUILD_REVISION=${{ github.ref == 'refs/heads/dev' && steps.meta.outputs.version || '' }}
           cache-from: type=gha

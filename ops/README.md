@@ -82,9 +82,11 @@ Three guards enforce it, because any one alone leaves a gap:
 CI detects violations; it cannot prevent the tag existing. A GitHub ruleset restricting
 tag creation is the complement if you want that too.
 
-A dev image is built with its own tag as `CURATE_D_BUILD_REVISION`, so it runs as the
-DBOS application version `<packaged version>+dev.<timestamp>.<sha>`; a release image has
-none and runs as the bare packaged version the tag guard checked. Every build is
+A dev image is tagged `dev-<UTC timestamp>-<sha>`, with the commit's committer time as the
+timestamp, and is built with that tag as `CURATE_D_BUILD_REVISION`, so it runs as the DBOS
+application version `dev-<timestamp>-<sha>`; a release image has none and runs as the bare
+packaged version the tag guard checked. Rebuilding a commit gives the same tag and version,
+so a re-run build never looks newer than the commits after it. Every dev commit is
 therefore a distinct version, and DBOS's latest version is the newest build. That is
 what decides which workers may apply and delete persisted schedules: an older build
 restarting mid-rollout is never the latest, so it cannot remove a schedule a newer one
