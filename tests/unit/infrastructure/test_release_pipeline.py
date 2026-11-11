@@ -4,7 +4,10 @@ CI produces tags here and Flux selects them in the GitOps repository. These test
 tags this repository emits; the policies that select them are checked where they live.
 """
 
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 from typing import cast
 
@@ -198,6 +201,66 @@ def test_the_commit_time_is_read_in_utc_and_only_on_dev() -> None:
     assert names.index(str(stamp["name"])) < next(
         i for i, n in enumerate(names) if "container metadata" in n
     )
+
+
+def _run_stamp_step(repository: Path, sha: str, runner_zone: str) -> tuple[int, str]:
+    """Run the stamp step's script in `repository` as Actions would; return its exit and output."""
+    stamp = next(s for s in _build_steps() if s.get("id") == "stamp")
+    output = repository / "github_output"
+    output.write_text("", encoding="utf-8")
+    result = subprocess.run(
+        ["bash", "-e", "-c", cast(str, stamp["run"])],
+        cwd=repository,
+        env={**os.environ, "GITHUB_SHA": sha, "GITHUB_OUTPUT": str(output), "TZ": runner_zone},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    return result.returncode, output.read_text(encoding="utf-8")
+
+
+@pytest.fixture
+def dated_commit(tmp_path: Path) -> tuple[Path, str]:
+    """Return a repository holding one commit made at 2026-11-10 23:01:14 -08:00, and its sha."""
+    git = shutil.which("git")
+    if git is None:
+        pytest.skip("git is not installed")
+    when = "2026-11-10T23:01:14-08:00"
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.invalid",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.invalid",
+        "GIT_AUTHOR_DATE": when,
+        "GIT_COMMITTER_DATE": when,
+    }
+    for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "dated"]):
+        subprocess.run([git, *args], cwd=tmp_path, env=env, check=True, timeout=30)
+    sha = subprocess.run(
+        [git, "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    return tmp_path, sha
+
+
+@pytest.mark.parametrize("runner_zone", ["UTC", "America/Los_Angeles", "Asia/Tokyo"])
+def test_the_stamp_step_writes_the_commit_time_in_utc(
+    dated_commit: tuple[Path, str], runner_zone: str
+) -> None:
+    """Run the step itself: the same commit gives the same stamp in any runner zone."""
+    repository, sha = dated_commit
+    code, output = _run_stamp_step(repository, sha, runner_zone)
+    assert code == 0
+    assert output == "commit_time=20261111070114\n"
+
+
+def test_the_stamp_step_fails_without_a_readable_commit(dated_commit: tuple[Path, str]) -> None:
+    """An unreadable commit must fail the build, never publish a tag with an empty stamp."""
+    repository, _ = dated_commit
+    code, output = _run_stamp_step(repository, "0" * 40, "UTC")
+    assert code != 0
+    assert output == ""
 
 
 def test_only_a_dev_image_is_built_with_its_build_revision() -> None:
