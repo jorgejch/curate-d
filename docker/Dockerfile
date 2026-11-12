@@ -100,7 +100,9 @@ ARG CURATE_D_BUILD_REVISION=""
 RUN if [ -n "${CURATE_D_BUILD_REVISION}" ]; then \
         actual="$(sha256sum /usr/share/curate-d/build-environment | cut -c1-12)" \
         && [ "${CURATE_D_BUILD_REVISION##*-}" = "${actual}" ] \
-        || { echo "${CURATE_D_BUILD_REVISION} does not end in this image's build environment hash ${actual}" >&2; exit 1; }; \
+        || { echo "${CURATE_D_BUILD_REVISION} does not end in" \
+                "this image's build environment hash ${actual}" >&2; \
+             exit 1; }; \
     fi
 
 ENV PATH="/app/.venv/bin:${PATH}" \
