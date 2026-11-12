@@ -22,7 +22,9 @@ name: Build and Publish Container
 # built from: the commit, and a hash of the system packages apt resolved, the one input the
 # commit does not fix. A build whose tag (or, on dev, whose commit) is already published
 # pushes nothing, so each dev commit has one image and the dev image policy never sees two
-# tags with one timestamp. New system packages reach dev with a new commit.
+# tags with one timestamp. New system packages reach dev with a commit that changes the
+# Dockerfile's `system` stage, normally Dependabot's base image digest update: the cache
+# reuses the apt layer for any other commit.
 #
 # Pushing to main without a tag builds nothing: such an image would match neither
 # image policy and would only cost registry storage.

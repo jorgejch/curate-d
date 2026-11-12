@@ -95,8 +95,14 @@ A published tag is never pushed again. Each dev image is also tagged with its co
 `dev-<UTC timestamp>-<sha>`; a build whose commit alias, or whose release tag, already exists
 pushes nothing. A rebuild of a dev commit therefore keeps the image the commit was first
 published with, even when apt now resolves other packages, and no two dev tags share a
-timestamp. To deploy new system packages, merge a commit to `dev`; for a release, cut a new
-patch release.
+timestamp.
+
+System packages are resolved again only when the `system` stage's inputs change: the base
+image digest, the `apt-get` step or `TESSERACT_VERSION`. Any other commit, a `uv.lock`
+change included, reuses the cached layer and keeps the same packages and hash. Dependabot's
+weekly digest update of the base image is the normal refresh: upstream rebuilds the image
+for Debian security fixes. For an urgent fix, merge the pending Dependabot update or edit
+the `apt-get` step. For a release, cut a new patch release.
 
 Every dev commit is therefore a distinct version, and DBOS's latest version is the newest
 build. That is what decides which workers may apply and delete persisted schedules: an older build

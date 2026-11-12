@@ -61,9 +61,18 @@ change pins it by digest.
   pushes nothing. Only the registry's "not found" counts as unpublished, and any other answer
   fails the run. Without this, a rebuild with other packages would publish a second hashed tag
   with the commit's timestamp, and Flux's ImagePolicy, which orders by timestamp, could pick
-  either. A rebuild is a manual re-run; new system packages reach dev with a new commit, as any
-  change does. Alternative: let the newest rebuild win. That needs an order the tag can't carry
+  either. A rebuild is a manual re-run. New system packages reach dev with a commit that
+  changes the `system` stage's inputs (see the next decision). Alternative: let the newest rebuild win. That needs an order the tag can't carry
   without a build time, which brings back the problem this change removes.
+- **System packages refresh when the `system` stage's inputs change.** The build cache keys
+  the `apt-get` layer on the base image digest, the step's text and `TESSERACT_VERSION`. Any
+  other commit, a `uv.lock` change included, reuses the cached layer, so its packages and
+  hash stay the same. The refresh comes with Dependabot's weekly digest update of the base
+  image: upstream rebuilds it for Debian security fixes, and a new digest makes the next
+  build run `apt-get` again, with a new hash. An eviction of the cache entry has the same
+  effect. Alternative: clear the cache, or bust it on a schedule. Not taken: that refreshes
+  packages without a commit that says so, and Dependabot already brings the base image's
+  fixes.
 - **A release tag is published once.** The same lookup, on `vMAJOR.MINOR.PATCH`, makes a re-run
   of a release build push nothing. Without it a re-run overwrote the release (and moved the
   `vMAJOR.MINOR` tag) with whatever apt resolved that day. A release gets no hash: its DBOS
@@ -95,7 +104,9 @@ change pins it by digest.
 - [A wrong clock on a direct push stamps a commit earlier than its parent] → Flux keeps the
   newer image; the next merge fixes the order. Changes reach `dev` by pull request.
 - [A rebuild to take a security fix in a system package publishes nothing] → Intended: the
-  commit keeps its image. Merge any commit to `dev` to build with the new packages.
+  commit keeps its image. Change the `system` stage's inputs to build with new packages:
+  normally merge the pending Dependabot base image update; for an urgent fix, edit the
+  `apt-get` step or `TESSERACT_VERSION`.
 - [Two runs of one commit at the same moment both find the alias missing] → A concurrency
   group per ref and commit makes the second wait, so it finds the first's image published.
 - [The `system` stage misses the builder's cache between the two builds] → The image build fails
