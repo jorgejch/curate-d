@@ -17,9 +17,11 @@ its log handler to the logger provider installed at construction, so DBOS constr
 still runs but exports no DBOS log lines.
 """
 
+import hashlib
 import os
 import re
 from importlib.metadata import version
+from pathlib import Path
 from typing import Final
 
 from dbos import DBOS, DBOSClient, DBOSConfig
@@ -56,32 +58,57 @@ def application_name(environment: DeploymentEnvironment | None) -> str:
 # commit is a distinct version: DBOS's latest version then names the newest build, which
 # is what schedule ownership relies on. Release images carry no build revision.
 BUILD_REVISION_ENV: Final = "CURATE_D_BUILD_REVISION"
-_DEV_BUILD_REVISION: Final = re.compile(r"dev-\d{14}-[0-9a-f]{7,40}")
+_DEV_BUILD_REVISION: Final = re.compile(r"dev-\d{14}-[0-9a-f]{7,12}-(?P<environment>[0-9a-f]{12})")
+
+BUILD_ENVIRONMENT_PATH: Final = Path("/usr/share/curate-d/build-environment")
+"""The image's installed system packages, one `name:arch=version` per line (docker/Dockerfile)."""
 
 
-def application_version(package_version: str, build_revision: str | None) -> str:
+def application_version(
+    package_version: str,
+    build_revision: str | None,
+    build_environment: Path = BUILD_ENVIRONMENT_PATH,
+) -> str:
     """Return the DBOS application version for a build of `package_version`.
 
     Args:
         package_version: The packaged version, as the release pipeline checks it.
-        build_revision: The image's dev tag, `dev-<UTC commit timestamp>-<sha>`, baked in
-            by CI for dev builds; None or empty for a release image.
+        build_revision: The image's dev tag, `dev-<UTC commit timestamp>-<sha>-<environment
+            hash>`, baked in by CI for dev builds; None or empty for a release image.
+        build_environment: The image's list of installed system packages. Read only for a
+            dev tag, whose last part must be the first 12 hex digits of its SHA-256.
 
     Returns:
         `package_version` for a release image, else the dev tag itself. The tag, unlike a
         `+dev` local version label, is a valid Kubernetes label value and resource name
         part, so one string names the image, the DBOS version and the pods running it. It
-        is fixed by the commit, so rebuilding a commit runs as the same version.
+        names the commit and the system packages, so an image with other packages can't
+        run as it.
 
     Raises:
-        ValueError: `build_revision` is set but is not a dev tag.
+        ValueError: `build_revision` is set but is not a dev tag, or its environment hash
+            is not the hash of `build_environment`, or that file can't be read.
     """
     if not build_revision:
         return package_version
-    if _DEV_BUILD_REVISION.fullmatch(build_revision) is None:
+    match = _DEV_BUILD_REVISION.fullmatch(build_revision)
+    if match is None:
         raise ValueError(
             f"{BUILD_REVISION_ENV}={build_revision!r} is not a dev image tag "
-            "(dev-<14-digit UTC timestamp>-<hex sha>)"
+            "(dev-<14-digit UTC timestamp>-<hex sha>-<12-digit hex environment hash>)"
+        )
+    try:
+        packages = build_environment.read_bytes()
+    except OSError as error:
+        raise ValueError(
+            f"{BUILD_REVISION_ENV}={build_revision!r} names a build environment, "
+            f"but {build_environment} can't be read: {error}"
+        ) from error
+    actual = hashlib.sha256(packages).hexdigest()[:12]
+    if match["environment"] != actual:
+        raise ValueError(
+            f"{BUILD_REVISION_ENV}={build_revision!r} names build environment "
+            f"{match['environment']}, but this image's is {actual}"
         )
     return build_revision
 

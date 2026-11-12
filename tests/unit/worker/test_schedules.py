@@ -1,8 +1,10 @@
 """Which worker may apply and retire the application's persisted schedules, and when."""
 
+import hashlib
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -241,11 +243,14 @@ def test_an_older_version_leaves_a_newer_ones_schedules_alone(
 
 
 def test_an_older_dev_build_of_the_same_release_keeps_a_newer_builds_schedule(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Dev builds of one packaged version are distinct versions, so the older one is not latest."""
-    older = application_version("0.1.1", "dev-20261003100000-1111111")
-    newer = application_version("0.1.1", "dev-20261003110000-2222222")
+    packages = tmp_path / "build-environment"
+    packages.write_bytes(b"tesseract-ocr:amd64=5.5.0-1+b1\n")
+    environment = hashlib.sha256(packages.read_bytes()).hexdigest()[:12]
+    older = application_version("0.1.1", f"dev-20261003100000-1111111-{environment}", packages)
+    newer = application_version("0.1.1", f"dev-20261003110000-2222222-{environment}", packages)
     store = _SharedSchedules(latest=older).install(monkeypatch)
     older_declares = [_entry("kept-pass")]
     newer_declares = [_entry("kept-pass"), _entry("added-pass")]

@@ -1,11 +1,13 @@
 """DBOS configuration."""
 
+import hashlib
 import inspect
 import os
 import re
 import subprocess
 import sys
 from importlib.metadata import version
+from pathlib import Path
 
 import pytest
 from dbos import DBOS
@@ -15,6 +17,7 @@ from curate_d.config import DeploymentEnvironment, Settings
 from curate_d.runtime import dbos_app
 from curate_d.runtime.dbos_app import (
     APPLICATION_VERSION,
+    BUILD_ENVIRONMENT_PATH,
     BUILD_REVISION_ENV,
     SYSTEM_SCHEMA,
     application_name,
@@ -188,12 +191,25 @@ def test_the_configured_executor_id_overrides_dbos_vmid(
         DBOS.destroy()
 
 
-# A dev image's version, its own tag: `dev-<14-digit UTC commit timestamp>-<hex sha>`.
-_DEV_VERSION = re.compile(r"dev-\d{14}-[0-9a-f]{7,40}")
+# A dev image's version, its own tag:
+# `dev-<14-digit UTC commit timestamp>-<hex sha>-<12-digit hex environment hash>`.
+_DEV_VERSION = re.compile(r"dev-\d{14}-[0-9a-f]{7,12}-[0-9a-f]{12}")
 
 # A Kubernetes label value: at most 63 characters, alphanumerics, `-`, `_` and `.`,
 # starting and ending with an alphanumeric.
 _LABEL_VALUE = re.compile(r"[A-Za-z0-9]([A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?")
+
+_PACKAGES = b"libpq5:amd64=17.6-0+deb13u1\ntesseract-ocr:amd64=5.5.0-1+b1\n"
+_PACKAGES_HASH = hashlib.sha256(_PACKAGES).hexdigest()[:12]
+_DEV_TAG = f"dev-20261003201500-e69d801-{_PACKAGES_HASH}"
+
+
+@pytest.fixture
+def build_environment(tmp_path: Path) -> Path:
+    """Write an image's list of installed system packages and return its path."""
+    path = tmp_path / "build-environment"
+    path.write_bytes(_PACKAGES)
+    return path
 
 
 def _import_application_version(build_revision: str | None) -> subprocess.CompletedProcess[str]:
@@ -243,11 +259,15 @@ def test_a_release_image_imports_as_exactly_the_packaged_version() -> None:
     assert result.stdout.strip() == version("curate-d")
 
 
-def test_a_dev_image_imports_as_its_tag() -> None:
-    """Import with a dev tag and get the tag."""
-    result = _import_application_version("dev-20261003201500-e69d801")
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "dev-20261003201500-e69d801"
+def test_a_dev_tag_without_the_images_package_list_fails_the_import() -> None:
+    """Outside an image there is no package list, so a dev tag can't be checked and fails."""
+    if BUILD_ENVIRONMENT_PATH.exists():
+        pytest.skip(f"{BUILD_ENVIRONMENT_PATH} exists: this runs inside an image")
+    result = _import_application_version(_DEV_TAG)
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert "ValueError" in result.stderr
+    assert "can't be read" in result.stderr
 
 
 def test_a_malformed_build_revision_fails_the_import() -> None:
@@ -259,41 +279,63 @@ def test_a_malformed_build_revision_fails_the_import() -> None:
     assert "is not a dev image tag" in result.stderr
 
 
-def test_a_release_image_runs_as_the_packaged_version() -> None:
+def test_a_release_image_runs_as_the_packaged_version(tmp_path: Path) -> None:
     """No build revision, or an empty one from an unset build arg, adds nothing."""
-    assert application_version("0.1.1", None) == "0.1.1"
-    assert application_version("0.1.1", "") == "0.1.1"
+    missing = tmp_path / "absent"
+    assert application_version("0.1.1", None, missing) == "0.1.1"
+    assert application_version("0.1.1", "", missing) == "0.1.1"
 
 
-def test_a_dev_image_runs_as_its_tag() -> None:
+def test_a_dev_image_runs_as_its_tag(build_environment: Path) -> None:
     """The dev tag is the version, so each dev commit is a distinct version."""
-    assert application_version("0.1.1", "dev-20261003201500-e69d801") == (
-        "dev-20261003201500-e69d801"
-    )
-    assert application_version("0.1.1", "dev-20261003201500-e69d801") != application_version(
-        "0.1.1", "dev-20261003211500-0a1b2c3"
-    )
+    assert application_version("0.1.1", _DEV_TAG, build_environment) == _DEV_TAG
+    other_commit = f"dev-20261003211500-0a1b2c3-{_PACKAGES_HASH}"
+    assert application_version("0.1.1", other_commit, build_environment) == other_commit
+
+
+def test_a_dev_tag_hashed_from_other_packages_is_refused(build_environment: Path) -> None:
+    """An image whose packages are not the ones its tag names can't run as that tag."""
+    with pytest.raises(ValueError, match=f"but this image's is {_PACKAGES_HASH}"):
+        application_version("0.1.1", "dev-20261003201500-e69d801-000000000000", build_environment)
+
+
+def test_a_dev_tag_without_a_readable_package_list_is_refused(tmp_path: Path) -> None:
+    """A missing package list fails closed rather than skipping the check."""
+    with pytest.raises(ValueError, match="can't be read"):
+        application_version("0.1.1", _DEV_TAG, tmp_path / "absent")
 
 
 def test_a_dev_version_is_a_kubernetes_label_value() -> None:
     """A per-version worker controller labels and names its resources by version.
 
     A `+` local version label is valid in neither, which is why a dev image runs as its tag.
+    The longest tag the version check accepts must fit both.
     """
-    longest = application_version("0.1.1", f"dev-20261003201500-{'a' * 40}")
+    longest = f"dev-20261003201500-{'a' * 12}-{'b' * 12}"
+    assert _DEV_VERSION.fullmatch(longest)
     assert _LABEL_VALUE.fullmatch(longest), longest
-    # dbos-version-controller's `spec.version` pattern, for the 7-character sha CI tags with.
-    built = application_version("0.1.1", "dev-20261003201500-e69d801")
-    assert re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,48}", built), built
+    # dbos-version-controller's `spec.version` pattern.
+    assert re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,48}", longest), longest
 
 
 @pytest.mark.parametrize(
-    "revision", ["v0.1.1", "dev-2026-e69d801", "dev-20261003201500-E69D801", "e69d801"]
+    "revision",
+    [
+        "v0.1.1",
+        "dev-2026-e69d801",
+        "dev-20261003201500-e69d801",
+        "dev-20261003201500-E69D801-0123456789ab",
+        f"dev-20261003201500-{'a' * 40}-0123456789ab",
+        "dev-20261003201500-e69d801-0123456789",
+        "e69d801",
+    ],
 )
-def test_a_build_revision_that_is_not_a_dev_tag_is_refused(revision: str) -> None:
+def test_a_build_revision_that_is_not_a_dev_tag_is_refused(
+    revision: str, build_environment: Path
+) -> None:
     """A malformed revision fails at import rather than naming an untraceable version."""
     with pytest.raises(ValueError, match="not a dev image tag"):
-        application_version("0.1.1", revision)
+        application_version("0.1.1", revision, build_environment)
 
 
 def test_the_system_schema_migration_binding_still_exists() -> None:
