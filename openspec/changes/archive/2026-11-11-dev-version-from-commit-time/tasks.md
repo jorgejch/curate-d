@@ -18,4 +18,4 @@ Streams 1 and 2 touch disjoint files and can run at once; stream 3 waits on both
 ## 3. Integration
 
 - [x] 3.1 Sync the delta into `openspec/specs/release-pipeline/spec.md` and archive in the same pull request
-- [ ] 3.2 Open the flux-ovh pull request that makes the dev ImagePolicy select `dev-<timestamp>-<sha>-<hash>`
+- [x] 3.2 Open the flux-ovh pull request that makes the dev ImagePolicy select `dev-<timestamp>-<sha>-<hash>` (jorgejch/flux-ovh#76; it merges after this one publishes its first hashed tag)
