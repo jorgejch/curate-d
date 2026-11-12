@@ -22,8 +22,8 @@ A PR into `dev` (or `main`, for a release) merges when all of these hold:
   blocked: bring the base in (see Commits for rebase or merge) and push.
 
 Both check names are required by the ruleset and pinned by tests; never rename them. The
-SonarQube scan runs inside `Checks`. Treat its quality-gate findings as review-bot
-findings to verify, not as orders.
+SonarQube scan runs inside `Checks`. Its quality gate is not the only signal: check the
+PR's open SonarQube issues too (see SonarQube issues).
 
 ## Before every push
 
@@ -118,6 +118,35 @@ it passing.
   handle it. Otherwise don't push a parallel fix for it. Wait for the Action's run to
   finish, fetch the branch, and then handle whatever is still open.
 
+## SonarQube issues
+
+A passing quality gate can still leave issues open on the PR's new code, so check the
+issues themselves after every `Checks` run of a push, yours or anyone's. Project key and
+organization are in `sonar-project.properties`.
+
+- **With the SonarQube MCP server** (when the session has it), use it, not the web API:
+  `search_sonar_issues_in_projects` with `projectKeys` and `pullRequest` (the PR number) and
+  `issueStatuses` `OPEN` and `CONFIRMED`; `search_security_hotspots` with `pullRequest` and
+  status `TO_REVIEW`; `get_project_quality_gate_status`; and `show_rule` for a rule you
+  don't know.
+- **Without it** (the `claude.yml` Action, for one), read the public web API:
+
+  ```bash
+  curl -s "https://sonarcloud.io/api/issues/search?componentKeys=<projectKey>&pullRequest=<n>&issueStatuses=OPEN,CONFIRMED"
+  curl -s "https://sonarcloud.io/api/hotspots/search?projectKey=<projectKey>&pullRequest=<n>&status=TO_REVIEW"
+  ```
+
+- **Handle each issue** as a review-bot finding: verify it against the code and the rule.
+  A valid one is a small, local ask (Review comments): fix, validate, push, and name the
+  rule and commit in the PR or in the session. A finding you judge invalid: say why to the
+  owner, and leave its status alone; never mark an issue accepted or a false positive, or
+  a hotspot safe, yourself.
+- **A security issue or hotspot** follows Review comments' security rule: no details on
+  the PR, the owner hears it privately.
+- **Confirm a fix** through the same lookup after the push's `Checks` run reports: the issue
+  must no longer be open. The analysis runs only in CI; local analysis
+  (`sonar analyze agentic`) is not available for this organization.
+
 ## Watching the PR
 
 When you steward a PR in a session, subscribe to its activity and handle each new review
@@ -144,6 +173,8 @@ comment as it arrives, by the rules in Review comments. Do not wait to be asked 
   run to report: a failed run is also work for you. The 10 minutes count only after both
   runs are green, or after you reported a failure you cannot fix under What never gets you
   to green here.
+- **After each `Checks` run**, check the SonarQube issues (see SonarQube issues). An open
+  issue is a new review comment for these rules.
 
 ## What never gets you to green here
 
