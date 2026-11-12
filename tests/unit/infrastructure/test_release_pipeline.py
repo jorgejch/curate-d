@@ -203,47 +203,97 @@ def test_the_commit_time_is_read_in_utc_and_only_on_dev() -> None:
     )
 
 
-def _run_stamp_step(repository: Path, sha: str, runner_zone: str) -> tuple[int, str]:
-    """Run the stamp step's script in `repository` as Actions would; return its exit and output."""
-    stamp = next(s for s in _build_steps() if s.get("id") == "stamp")
-    output = repository / "github_output"
+def _step(step_id: str) -> Document:
+    """Return the build-and-push step with the given `id`."""
+    return next(s for s in _build_steps() if s.get("id") == step_id)
+
+
+def _run_script(script: str, cwd: Path, env: dict[str, str], output: Path) -> tuple[int, str, str]:
+    """Run a step's script with `bash -e`, as Actions does; return exit, output file, stderr."""
     output.write_text("", encoding="utf-8")
     result = subprocess.run(
-        ["bash", "-e", "-c", cast(str, stamp["run"])],
-        cwd=repository,
-        env={**os.environ, "GITHUB_SHA": sha, "GITHUB_OUTPUT": str(output), "TZ": runner_zone},
+        ["bash", "-e", "-c", script],
+        cwd=cwd,
+        env={**env, "GITHUB_OUTPUT": str(output)},
         capture_output=True,
         text=True,
         check=False,
         timeout=30,
     )
-    return result.returncode, output.read_text(encoding="utf-8")
+    return result.returncode, output.read_text(encoding="utf-8"), result.stdout + result.stderr
+
+
+def _isolated_git_env(home: Path) -> dict[str, str]:
+    """Return an environment where git reads no caller, user or system state.
+
+    Every `GIT_*` variable is dropped: under a git hook, `GIT_DIR` and `GIT_INDEX_FILE`
+    point at the caller's repository, and git would write there. `HOME` and the config
+    variables keep user and system config out, and the ceiling stops git from finding a
+    repository above the copy.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    home.mkdir(exist_ok=True)
+    env.update(
+        {
+            "HOME": str(home),
+            "XDG_CONFIG_HOME": str(home / ".config"),
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CEILING_DIRECTORIES": str(home.parent),
+        }
+    )
+    return env
+
+
+def _run_stamp_step(repository: Path, sha: str, runner_zone: str) -> tuple[int, str]:
+    """Run the stamp step's script in `repository` as Actions would; return its exit and output."""
+    env = {**_isolated_git_env(repository.parent / "home"), "GITHUB_SHA": sha, "TZ": runner_zone}
+    code, output, _ = _run_script(
+        cast(str, _step("stamp")["run"]), repository, env, repository.parent / "github_output"
+    )
+    return code, output
 
 
 @pytest.fixture
 def dated_commit(tmp_path: Path) -> tuple[Path, str]:
-    """Return a repository holding one commit made at 2026-11-10 23:01:14 -08:00, and its sha."""
+    """Return a throwaway copy of this repository with a commit dated 2026-11-10 23:01:14 -08:00.
+
+    The copy is a clone, so the test never writes to the checkout it runs from, and it
+    reads no user or system git config. The commit is the one the test needs on top of
+    the copied head; the second item is its sha.
+    """
     git = shutil.which("git")
     if git is None:
         pytest.skip("git is not installed")
+    env = _isolated_git_env(tmp_path / "home")
+    repository = tmp_path / "repository"
+    subprocess.run(
+        [git, "clone", "--quiet", "--depth", "1", REPOSITORY_ROOT.as_uri(), str(repository)],
+        env=env,
+        check=True,
+        timeout=120,
+    )
     when = "2026-11-10T23:01:14-08:00"
-    env = {
-        **os.environ,
-        "GIT_CONFIG_GLOBAL": os.devnull,
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_AUTHOR_NAME": "t",
-        "GIT_AUTHOR_EMAIL": "t@example.invalid",
-        "GIT_COMMITTER_NAME": "t",
-        "GIT_COMMITTER_EMAIL": "t@example.invalid",
-        "GIT_AUTHOR_DATE": when,
-        "GIT_COMMITTER_DATE": when,
-    }
-    for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "dated"]):
-        subprocess.run([git, *args], cwd=tmp_path, env=env, check=True, timeout=30)
+    identity = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid"}
+    identity |= {"GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+    identity |= {"GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when}
+    subprocess.run(
+        [git, "commit", "--quiet", "--allow-empty", "--no-verify", "-m", "dated"],
+        cwd=repository,
+        env={**env, **identity},
+        check=True,
+        timeout=30,
+    )
     sha = subprocess.run(
-        [git, "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True
+        [git, "rev-parse", "HEAD"],
+        cwd=repository,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
     ).stdout.strip()
-    return tmp_path, sha
+    return repository, sha
 
 
 @pytest.mark.parametrize("runner_zone", ["UTC", "America/Los_Angeles", "Asia/Tokyo"])
