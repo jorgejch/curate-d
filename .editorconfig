@@ -654,7 +654,7 @@ ij_python_format_injected_fragments = true
 ij_python_from_import_new_line_after_left_parenthesis = true
 ij_python_from_import_new_line_before_right_parenthesis = true
 ij_python_from_import_parentheses_force_if_multiline = true
-ij_python_from_import_trailing_comma_if_multiline = false
+ij_python_from_import_trailing_comma_if_multiline = true
 ij_python_from_import_wrapping = normal
 ij_python_hang_closing_brackets = true
 ij_python_keep_blank_lines_in_code = 2
@@ -711,9 +711,9 @@ ij_python_tuple_wrapping = normal
 ij_python_use_continuation_indent_for_arguments = false
 ij_python_use_continuation_indent_for_collection_and_comprehensions = false
 ij_python_use_continuation_indent_for_parameters = false
-ij_python_use_trailing_comma_in_arguments_list = false
+ij_python_use_trailing_comma_in_arguments_list = true
 ij_python_use_trailing_comma_in_collections = true
-ij_python_use_trailing_comma_in_parameter_list = false
+ij_python_use_trailing_comma_in_parameter_list = true
 ij_python_wrap_long_lines = true
 
 [{*.tf,*.tfvars}]
