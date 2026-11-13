@@ -344,24 +344,6 @@ ij_python_use_trailing_comma_in_collections = true
 ij_python_use_trailing_comma_in_parameter_list = true
 ij_python_wrap_long_lines = true
 
-[{*.tf,*.tfvars}]
-indent_size = 2
-ij_hcl-terraform_array_wrapping = normal
-ij_hcl-terraform_import_providers_automatically = true
-ij_hcl-terraform_keep_blank_lines_in_code = 2
-ij_hcl-terraform_keep_indents_on_empty_lines = false
-ij_hcl-terraform_keep_line_breaks = true
-ij_hcl-terraform_line_commenter_character = pound_sign_(#)
-ij_hcl-terraform_object_wrapping = normal
-ij_hcl-terraform_property_alignment = on_equals
-ij_hcl-terraform_run_tf_fmt_on_reformat = true
-ij_hcl-terraform_space_after_comma = true
-ij_hcl-terraform_space_before_comma = false
-ij_hcl-terraform_spaces_around_assignment_operators = true
-ij_hcl-terraform_spaces_within_braces = false
-ij_hcl-terraform_spaces_within_brackets = false
-ij_hcl-terraform_wrap_long_lines = false
-
 [{*.toml,Cargo.lock,Cargo.toml.orig,Gopkg.lock,Pipfile,pdm.lock,poetry.lock,pyproject.toml,uv.lock}]
 ij_toml_keep_indents_on_empty_lines = false
 
