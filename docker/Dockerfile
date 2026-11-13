@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.19
+# syntax=docker/dockerfile:1.19@sha256:b6afd42430b15f2d2a4c5a02b919e98a525b785b1aaff16747d2f623364e39b6
 #
 # ONE image for the API and both worker profiles. Not just to save build and pull cost:
 # DBOS pins in-flight workflows to an application version, so an API and a worker running
@@ -50,9 +50,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-build --no-dev
 
 # ---------------------------------------------------------------------------
-# Runtime.
+# System packages. The only image input the commit does not fix: apt resolves
+# them when the layer is built, and TESSERACT_VERSION floats.
 # ---------------------------------------------------------------------------
-FROM python:3.12.15-slim-trixie@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704 AS runtime
+FROM python:3.12.15-slim-trixie@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704 AS system
 ARG TESSERACT_VERSION
 
 # tesseract backs the local OCR tier. libpq is needed even with psycopg[binary],
@@ -65,6 +66,25 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libpq5 \
     && rm -rf /var/lib/apt/lists/*
 
+# The build environment: every installed package as `name:arch=version`, sorted. A dev
+# tag ends in the first 12 hex digits of its SHA-256, so a rebuild that resolves other
+# packages gets a new tag instead of overwriting the old one. The grep fails the build on
+# an empty or partial list.
+RUN mkdir -p /usr/share/curate-d \
+    && dpkg-query --show --showformat='${Package}:${Architecture}=${Version}\n' > /tmp/packages \
+    && LC_ALL=C sort /tmp/packages > /usr/share/curate-d/build-environment \
+    && rm /tmp/packages \
+    && grep -q '^tesseract-ocr:' /usr/share/curate-d/build-environment
+
+# CI builds this target first, to hash the list before it names the tag.
+FROM scratch AS build-environment
+COPY --from=system /usr/share/curate-d/build-environment /build-environment
+
+# ---------------------------------------------------------------------------
+# Runtime.
+# ---------------------------------------------------------------------------
+FROM system AS runtime
+
 # Non-root, and the filesystem is read-only at runtime (see the manifests). Anything
 # that needs to write gets an explicit volume.
 RUN groupadd --gid 65532 curated \
@@ -73,9 +93,18 @@ RUN groupadd --gid 65532 curated \
 WORKDIR /app
 COPY --from=builder --chown=65532:65532 /app /app
 
-# The dev image tag, passed by CI for dev builds only; empty in a release image. It makes
-# each dev build a distinct DBOS application version (runtime/dbos_app.py).
+# The dev image tag, passed by CI for dev builds only; empty in a release image. It is the
+# image's DBOS application version (runtime/dbos_app.py). Its last part must be this
+# image's own build environment hash: a tag hashed from other packages fails the build,
+# so nothing is pushed under it.
 ARG CURATE_D_BUILD_REVISION=""
+RUN if [ -n "${CURATE_D_BUILD_REVISION}" ]; then \
+        actual="$(sha256sum /usr/share/curate-d/build-environment | cut -c1-12)" \
+        && [ "${CURATE_D_BUILD_REVISION##*-}" = "${actual}" ] \
+        || { echo "${CURATE_D_BUILD_REVISION} does not end in" \
+                "this image's build environment hash ${actual}" >&2; \
+             exit 1; }; \
+    fi
 
 ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \

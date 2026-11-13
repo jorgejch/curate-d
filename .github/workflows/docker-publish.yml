@@ -2,8 +2,9 @@ name: Build and Publish Container
 
 # Two environments, one image.
 #
-#   push to dev       -> dev-<UTC timestamp>-<sha>, which a deployment's dev image policy
-#                        can order by timestamp
+#   push to dev       -> dev-<UTC commit timestamp>-<sha>-<environment hash>, which a
+#                        deployment's dev image policy can order by timestamp, and the
+#                        commit alias dev-<UTC commit timestamp>-<sha>
 #   push tag vX.Y.Z   -> semver tags, which a deployment's production image policy can select
 #
 # The rule for production: a semver tag whose commit is on main, and nothing else.
@@ -16,6 +17,14 @@ name: Build and Publish Container
 #   3. The tag must equal the packaged version. DBOS pins in-flight workflows to that
 #      version, so a v0.2.0 image built from a 0.1.0 package would keep enqueueing and
 #      recovering work as 0.1.0 with nothing reporting the mismatch.
+#
+# A published tag never changes (Twelve-Factor V.2). A dev tag names everything the image is
+# built from: the commit, and a hash of the system packages apt resolved, the one input the
+# commit does not fix. A build whose tag (or, on dev, whose commit) is already published
+# pushes nothing, so each dev commit has one image and the dev image policy never sees two
+# tags with one timestamp. New system packages reach dev with a commit that changes the
+# Dockerfile's `system` stage, normally Dependabot's base image digest update: the cache
+# reuses the apt layer for any other commit.
 #
 # Pushing to main without a tag builds nothing: such an image would match neither
 # image policy and would only cost registry storage.
@@ -33,6 +42,12 @@ on:
       - dev
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
+
+# Two runs of one commit wait for each other, so the second finds the first's image
+# published and pushes nothing: a published tag is never pushed again.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
 
 jobs:
   build-and-push:
@@ -86,6 +101,46 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v4
 
+      # The dev tag's stamp is the commit's time, not the build's: a rebuild of a commit
+      # finds the commit's alias already published, and no tag sorts after the tags of
+      # newer commits (Flux would roll dev back to it). Read from git rather than metadata-action's commit_date, which
+      # falls back to the build time without a sign when it can't read the commit.
+      - name: Stamp the dev build with its commit time
+        id: stamp
+        if: github.ref == 'refs/heads/dev'
+        run: |
+          stamp=$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y%m%d%H%M%S "$GITHUB_SHA")
+          if ! [[ "$stamp" =~ ^[0-9]{14}$ ]]; then
+            echo "::error::could not read the commit time of ${GITHUB_SHA} (got '${stamp}')."
+            exit 1
+          fi
+          echo "commit_time=${stamp}" >> "$GITHUB_OUTPUT"
+
+      # Builds only the stage that lists the installed system packages. The image build
+      # below reuses that stage from this builder's cache, and fails if its own list does
+      # not hash to the tag's last part (docker/Dockerfile).
+      - name: List the system packages the build resolves
+        if: github.ref == 'refs/heads/dev'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: build-environment
+          outputs: type=local,dest=${{ runner.temp }}/build-environment
+          cache-from: type=gha
+
+      - name: Hash the build environment
+        id: environment
+        if: github.ref == 'refs/heads/dev'
+        run: |
+          manifest="${RUNNER_TEMP}/build-environment/build-environment"
+          hash=$(sha256sum "$manifest" | cut -c1-12)
+          if ! [[ -s "$manifest" && "$hash" =~ ^[0-9a-f]{12}$ ]]; then
+            echo "::error::could not hash the build environment at ${manifest}."
+            exit 1
+          fi
+          echo "hash=${hash}" >> "$GITHUB_OUTPUT"
+
       - name: Extract container metadata
         id: meta
         uses: docker/metadata-action@v6
@@ -96,9 +151,41 @@ jobs:
             type=semver,pattern=v{{major}}.{{minor}}
             # Not is_default_branch: the default branch moves to main once there is a
             # prod release, and the dev environment must keep receiving dev's images.
-            type=raw,value=dev-{{date 'YYYYMMDDHHmmss'}}-{{sha}},enable=${{ github.ref == 'refs/heads/dev' }}
+            # The higher priority makes the hashed tag `version`, the image's DBOS version.
+            type=raw,value=dev-${{ steps.stamp.outputs.commit_time }}-{{sha}}-${{ steps.environment.outputs.hash }},priority=300,enable=${{ github.ref == 'refs/heads/dev' }}
+            type=raw,value=dev-${{ steps.stamp.outputs.commit_time }}-{{sha}},priority=200,enable=${{ github.ref == 'refs/heads/dev' }}
+
+      # On dev the commit alias stands for the commit, whatever its packages; on a release,
+      # the version tag. If it exists this run publishes nothing: a published tag is never
+      # pushed again, and a dev commit keeps the image it was first published with. Only a
+      # registry's "not found" means unpublished; any other failure stops the build.
+      - name: Check whether this build is already published
+        id: published
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          tag=$VERSION
+          if [[ "$GITHUB_REF" == refs/heads/dev ]]; then
+            tag=${VERSION%-*}
+          fi
+          if ! [[ "$tag" =~ ^(v[0-9]+\.[0-9]+\.[0-9]+|dev-[0-9]{14}-[0-9a-f]{7,12})$ ]]; then
+            echo "::error::'${tag}' is neither a release tag nor a dev commit alias."
+            exit 1
+          fi
+          repository=$(tr "[:upper:]" "[:lower:]" <<<"$GITHUB_REPOSITORY")
+          ref="ghcr.io/${repository}:${tag}"
+          if output=$(docker buildx imagetools inspect "$ref" 2>&1); then
+            echo "::notice::${ref} is already published; this build publishes nothing."
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$output" == *"${ref}: not found"* ]]; then
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::could not check whether ${ref} is published: ${output}"
+            exit 1
+          fi
 
       - name: Build and push image
+        if: steps.published.outputs.published == 'false'
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -106,9 +193,9 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # On dev the only tag is the dev one, so `version` is that tag: the image's
-          # DBOS application version names its build. A release image gets none and runs
-          # as the bare packaged version the release guard checked.
+          # On dev `version` is the hashed tag, and it is the image's DBOS application
+          # version. A release image gets none and runs as the bare packaged version the
+          # release guard checked.
           build-args: |
             CURATE_D_BUILD_REVISION=${{ github.ref == 'refs/heads/dev' && steps.meta.outputs.version || '' }}
           cache-from: type=gha

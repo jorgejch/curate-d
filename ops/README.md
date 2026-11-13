@@ -48,7 +48,7 @@ docker run --rm \
 
 | Push | Tag produced |
 | --- | --- |
-| branch `dev` | `dev-<UTC timestamp>-<sha>` |
+| branch `dev` | `dev-<UTC commit timestamp>-<sha>-<environment hash>`, `dev-<UTC commit timestamp>-<sha>` |
 | branch `main`, untagged | nothing |
 | tag `v0.2.0` on `main` | `v0.2.0`, `v0.2` |
 
@@ -82,11 +82,30 @@ Three guards enforce it, because any one alone leaves a gap:
 CI detects violations; it cannot prevent the tag existing. A GitHub ruleset restricting
 tag creation is the complement if you want that too.
 
-A dev image is built with its own tag as `CURATE_D_BUILD_REVISION`, so it runs as the
-DBOS application version `<packaged version>+dev.<timestamp>.<sha>`; a release image has
-none and runs as the bare packaged version the tag guard checked. Every build is
-therefore a distinct version, and DBOS's latest version is the newest build. That is
-what decides which workers may apply and delete persisted schedules: an older build
+A dev image is tagged `dev-<UTC timestamp>-<sha>-<environment hash>`, with the commit's
+committer time as the timestamp. The environment hash is the first 12 hex digits of the
+SHA-256 of `/usr/share/curate-d/build-environment`, the image's sorted list of installed
+system packages: apt resolves those when the image is built, so the commit alone does not
+fix them. The image is built with that tag as `CURATE_D_BUILD_REVISION`, so it runs as the
+DBOS application version `dev-<timestamp>-<sha>-<environment hash>`; the build fails, and the
+application refuses to import, if the hash is not the image's own. A release image has no
+build revision and runs as the bare packaged version the tag guard checked.
+
+A published tag is never pushed again. Each dev image is also tagged with its commit alias,
+`dev-<UTC timestamp>-<sha>`; a build whose commit alias, or whose release tag, already exists
+pushes nothing. A rebuild of a dev commit therefore keeps the image the commit was first
+published with, even when apt now resolves other packages, and no two dev tags share a
+timestamp.
+
+System packages are resolved again only when the `system` stage's inputs change: the base
+image digest, the `apt-get` step or `TESSERACT_VERSION`. Any other commit, a `uv.lock`
+change included, reuses the cached layer and keeps the same packages and hash. Dependabot's
+weekly digest update of the base image is the normal refresh: upstream rebuilds the image
+for Debian security fixes. For an urgent fix, merge the pending Dependabot update or edit
+the `apt-get` step. For a release, cut a new patch release.
+
+Every dev commit is therefore a distinct version, and DBOS's latest version is the newest
+build. That is what decides which workers may apply and delete persisted schedules: an older build
 restarting mid-rollout is never the latest, so it cannot remove a schedule a newer one
 added. The cost is DBOS's version pinning applied per dev build: work a previous dev
 build left queued or in flight is not taken up by the new one until the recovery sweep
@@ -206,7 +225,7 @@ the deployment repository's checks have to hold to:
 | Environment names in `CURATE_D_ENVIRONMENT` (`dev`, `prod`), naming the DBOS application `curate-d-<env>` on the API and both workers and labelling each process's telemetry | `curate_d.config.DeploymentEnvironment`, `curate_d.runtime.dbos_app.application_name` |
 | `CURATE_D_ALERTING_TEST_ROUTES_FORCE_ON_IN_PROD` on the API: `local` and `dev` always serve the alerting test routes (`GET /__alerting_test_internal_error__`, always 500; `POST /__alerting_test_worker_error__/{io,cpu}`, a workflow that always fails in that worker); `prod`, or no environment, serves them only when it is `true` | `curate_d.config.Settings.alerting_test_routes_served` |
 | Queues each profile serves | `curate_d.runtime.queues` (tested here; manifests carry only the profile) |
-| Dev image tag `dev-<UTC timestamp>-<sha>` | `.github/workflows/docker-publish.yml` (pinned by `test_release_pipeline.py`) |
+| Dev image tag `dev-<UTC commit timestamp>-<sha>-<environment hash>` and commit alias `dev-<UTC commit timestamp>-<sha>` | `.github/workflows/docker-publish.yml` (pinned by `test_release_pipeline.py`) |
 
 ## Restore drill
 

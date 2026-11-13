@@ -77,7 +77,7 @@ general terms.
 
 | Rule | Status | Evidence, or what is unmet | Authority or tracking |
 | --- | --- | --- | --- |
-| II.1 | Gap | *Deterministic build and run.* `uv sync --locked --no-build` and digest-pinned base images hold, but `TESSERACT_VERSION=5.5.*` floats in `docker/Dockerfile`, and the deployment manifests take a minor-version tag of the rclone image where `compose.yaml` pins the patch. | both |
+| II.1 | Gap | *Deterministic build and run.* `uv sync --locked --no-build` and digest-pinned base images hold, but `TESSERACT_VERSION=5.5.*` floats in `docker/Dockerfile` (a dev tag's environment hash names what it resolved; it does not fix it), and the deployment manifests take a minor-version tag of the rclone image where `compose.yaml` pins the patch. | both |
 | II.2 | Conforms | *No implicit system packages.* `pyproject.toml` and `uv.lock`, installed into `.venv`; the image and a development machine resolve the same set. | - |
 | II.3 | Gap | *No implicit system tools.* A run outside the image needs the `tesseract` binary on `PATH` (`README.md`, "System dependencies"). | application |
 
@@ -108,7 +108,7 @@ general terms.
 | Rule | Status | Evidence, or what is unmet | Authority or tracking |
 | --- | --- | --- | --- |
 | V.1 | Conforms | *Distinct stages.* Build is the image (`.github/workflows/docker-publish.yml`); release is the image tag plus config, applied through GitOps; run is the container command. | - |
-| V.2 | Gap | *Immutable releases.* A change of config or of a secret restarts no process and gets no new release identifier. | deployment |
+| V.2 | Gap | *Immutable releases.* A change of config or of a secret restarts no process and gets no new release identifier. The build side holds: a published image tag is never pushed again, and a dev tag, `dev-<commit timestamp>-<sha>-<environment hash>`, names the commit and the system packages apt resolved (`.github/workflows/docker-publish.yml`, `docker/Dockerfile`). | deployment |
 | V.3 | Gap | *Complexity in the build, minimal run.* Schema migration runs at process start: the deployment manifests run `alembic upgrade head` when the API starts, and the workers leave `run_migrations` at its default for DBOS and for the datasource (`src/curate_d/runtime/dbos_app.py`, `src/curate_d/runtime/datasource.py`). The skill supports the fix (`references/lifecycle-config.md`, "Least-Privilege Deployments"). | both; [#7](https://github.com/jorgejch/curate-d/issues/7) |
 
 ### VI. Processes

@@ -1,5 +1,7 @@
-"""The Dockerfile's pins: base images literal, tagged and digest-pinned, so Dependabot reads
-them, and every `uv sync` locked and wheel-only, so no third-party build script runs."""
+"""The Dockerfile's pins: the frontend and base images literal, tagged and digest-pinned, so
+Dependabot reads them, and every `uv sync` locked and wheel-only, so no third-party build
+script runs. With these, the system packages are the only image input the commit does not
+fix, which is what a dev tag's environment hash covers."""
 
 import re
 from pathlib import Path
@@ -8,7 +10,8 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 DOCKERFILE = REPOSITORY_ROOT / "docker" / "Dockerfile"
 
 _PLATFORM = re.compile(r"--platform=\S+\s+")
-_FROM = re.compile(r"^FROM\s+(?P<ref>\S+)(\s+AS\s+\w+)?$")
+_FROM = re.compile(r"^FROM\s+(?P<ref>\S+)(\s+AS\s+(?P<stage>[\w-]+))?$")
+_SYNTAX = re.compile(r"# syntax=docker/dockerfile:[\w.-]+@sha256:[0-9a-f]{64}")
 _PINNED_REF = re.compile(r"[a-z0-9./-]+:[\w][\w.-]*@sha256:[0-9a-f]{64}")
 _UV_SYNC = re.compile(r"\buv\s+sync\b")
 
@@ -43,18 +46,36 @@ def _image_ref(line: str) -> str | None:
     return match.group("ref") if match else None
 
 
+def _stage(line: str) -> str | None:
+    """Return the stage name a `FROM` line declares, or None."""
+    match = _FROM.match(_PLATFORM.sub("", line, count=1))
+    return match.group("stage") if match else None
+
+
 def test_the_dockerfile_has_from_lines() -> None:
     """The pin check below is not vacuous: the Dockerfile still has base images to check."""
     assert _from_lines()
 
 
 def test_every_from_image_is_a_literal_tag_and_digest() -> None:
-    """Dependabot updates only `name:tag@sha256:<digest>` with no interpolation."""
+    """Dependabot updates only `name:tag@sha256:<digest>` with no interpolation.
+
+    `scratch` and a stage declared above are not images: nothing is pulled for them.
+    """
+    stages: set[str] = set()
     for line in _from_lines():
         ref = _image_ref(line)
         assert ref is not None, line
         assert "$" not in ref, line
-        assert _PINNED_REF.fullmatch(ref), line
+        assert ref == "scratch" or ref in stages or _PINNED_REF.fullmatch(ref), line
+        if stage := _stage(line):
+            stages.add(stage)
+
+
+def test_the_dockerfile_frontend_is_pinned_by_digest() -> None:
+    """The frontend reads the Dockerfile; a floating one is an input the commit does not fix."""
+    first = DOCKERFILE.read_text(encoding="utf-8").splitlines()[0]
+    assert _SYNTAX.fullmatch(first), first
 
 
 def test_no_build_arg_chooses_a_base_image_version() -> None:

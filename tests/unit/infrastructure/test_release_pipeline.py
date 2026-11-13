@@ -4,7 +4,11 @@ CI produces tags here and Flux selects them in the GitOps repository. These test
 tags this repository emits; the policies that select them are checked where they live.
 """
 
+import hashlib
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 from typing import cast
 
@@ -133,8 +137,8 @@ def test_a_release_tag_must_match_the_packaged_version() -> None:
 def test_the_packaged_version_is_what_dbos_reports() -> None:
     """The check above is only meaningful if the code reads the same source.
 
-    A dev image appends a `+dev.<timestamp>.<sha>` label; the release a tag names is the
-    package component, which must match pyproject.
+    A dev image runs as its own tag instead; only a release image runs as the packaged
+    version, which must match pyproject.
     """
     from curate_d.runtime.dbos_app import APPLICATION_VERSION
 
@@ -142,9 +146,9 @@ def test_the_packaged_version_is_what_dbos_reports() -> None:
     declared = next(
         line.split('"')[1] for line in pyproject.splitlines() if line.startswith("version = ")
     )
-    package, _, label = APPLICATION_VERSION.partition("+")
-    assert declared == package
-    assert not label or re.fullmatch(r"dev\.\d{14}\.[0-9a-f]{7,40}", label), label
+    assert declared == APPLICATION_VERSION or re.fullmatch(
+        r"dev-\d{14}-[0-9a-f]{7,12}-[0-9a-f]{12}", APPLICATION_VERSION
+    ), APPLICATION_VERSION
 
 
 def test_the_release_guards_run_before_anything_reaches_the_registry() -> None:
@@ -175,18 +179,323 @@ def test_build_and_push_is_the_only_job_and_waits_on_none() -> None:
     assert "needs" not in cast(Document, jobs["build-and-push"])
 
 
-def test_the_dev_tag_sorts_by_build_time() -> None:
-    """Flux's dev ImagePolicy orders `dev-<UTC timestamp>-<sha>` tags; this is that shape."""
-    dev_tag = next(t for t in _emitted_tags() if t.startswith("type=raw"))
-    assert "dev-{{date 'YYYYMMDDHHmmss'}}-{{sha}}" in dev_tag
+def test_the_dev_tag_sorts_by_commit_time_and_names_the_build_environment() -> None:
+    """Flux's dev ImagePolicy orders `dev-<UTC timestamp>-<sha>-<hash>` tags by timestamp.
+
+    The stamp is the commit's, not the build's: a build-time stamp gives one commit a new
+    tag per build, and a re-run of an older commit's build a tag Flux would deploy. The
+    hash names the system packages, the one image input the commit does not fix.
+    """
+    hashed, alias = (t for t in _emitted_tags() if t.startswith("type=raw"))
+    assert (
+        "dev-${{ steps.stamp.outputs.commit_time }}-{{sha}}-${{ steps.environment.outputs.hash }}"
+        in hashed
+    )
+    assert "priority=300" in hashed, "the hashed tag must be `version`, the DBOS version"
+    assert "value=dev-${{ steps.stamp.outputs.commit_time }}-{{sha}}," in alias
+    assert "priority=200" in alias
+    assert "{{date" not in hashed + alias
+
+
+def test_the_commit_time_is_read_in_utc_and_only_on_dev() -> None:
+    """`--date=format-local` renders in `TZ`, so the stamp is UTC whatever the runner's zone."""
+    stamp = _step("stamp")
+    run = cast(str, stamp["run"])
+    assert "TZ=UTC git log -1 --format=%cd --date=format-local:%Y%m%d%H%M%S" in run
+    assert '"$GITHUB_SHA"' in run
+    assert "^[0-9]{14}$" in run
+    assert stamp["if"] == "github.ref == 'refs/heads/dev'"
+    assert _position(stamp) < _position(_build_step())
+
+
+def _step(step_id: str) -> Document:
+    """Return the build-and-push step with the given `id`."""
+    return next(s for s in _build_steps() if s.get("id") == step_id)
+
+
+def _position(step: Document) -> int:
+    """Return the index of a step in the build-and-push job."""
+    return _build_steps().index(step)
+
+
+def _run_script(script: str, cwd: Path, env: dict[str, str], output: Path) -> tuple[int, str, str]:
+    """Run a step's script with `bash -e`, as Actions does; return exit, output file, stderr."""
+    output.write_text("", encoding="utf-8")
+    result = subprocess.run(
+        ["bash", "-e", "-c", script],
+        cwd=cwd,
+        env={**env, "GITHUB_OUTPUT": str(output)},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    return result.returncode, output.read_text(encoding="utf-8"), result.stdout + result.stderr
+
+
+def _isolated_git_env(home: Path) -> dict[str, str]:
+    """Return an environment where git reads no caller, user or system state.
+
+    Every `GIT_*` variable is dropped: under a git hook, `GIT_DIR` and `GIT_INDEX_FILE`
+    point at the caller's repository, and git would write there. `HOME` and the config
+    variables keep user and system config out, and the ceiling stops git from finding a
+    repository above the copy.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    home.mkdir(exist_ok=True)
+    env.update(
+        {
+            "HOME": str(home),
+            "XDG_CONFIG_HOME": str(home / ".config"),
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CEILING_DIRECTORIES": str(home.parent),
+        }
+    )
+    return env
+
+
+def _run_stamp_step(repository: Path, sha: str, runner_zone: str) -> tuple[int, str]:
+    """Run the stamp step's script in `repository` as Actions would; return its exit and output."""
+    env = {**_isolated_git_env(repository.parent / "home"), "GITHUB_SHA": sha, "TZ": runner_zone}
+    code, output, _ = _run_script(
+        cast(str, _step("stamp")["run"]), repository, env, repository.parent / "github_output"
+    )
+    return code, output
+
+
+@pytest.fixture
+def dated_commit(tmp_path: Path) -> tuple[Path, str]:
+    """Return a throwaway copy of this repository with a commit dated 2026-11-10 23:01:14 -08:00.
+
+    The copy is a clone, so the test never writes to the checkout it runs from, and it
+    reads no user or system git config. The commit is the one the test needs on top of
+    the copied head; the second item is its sha.
+    """
+    git = shutil.which("git")
+    if git is None:
+        pytest.skip("git is not installed")
+    env = _isolated_git_env(tmp_path / "home")
+    repository = tmp_path / "repository"
+    subprocess.run(
+        [git, "clone", "--quiet", "--depth", "1", REPOSITORY_ROOT.as_uri(), str(repository)],
+        env=env,
+        check=True,
+        timeout=120,
+    )
+    when = "2026-11-10T23:01:14-08:00"
+    identity = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid"}
+    identity |= {"GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+    identity |= {"GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when}
+    subprocess.run(
+        [git, "commit", "--quiet", "--allow-empty", "--no-verify", "-m", "dated"],
+        cwd=repository,
+        env={**env, **identity},
+        check=True,
+        timeout=30,
+    )
+    sha = subprocess.run(
+        [git, "rev-parse", "HEAD"],
+        cwd=repository,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    ).stdout.strip()
+    return repository, sha
+
+
+@pytest.mark.parametrize("runner_zone", ["UTC", "America/Los_Angeles", "Asia/Tokyo"])
+def test_the_stamp_step_writes_the_commit_time_in_utc(
+    dated_commit: tuple[Path, str], runner_zone: str
+) -> None:
+    """Run the step itself: the same commit gives the same stamp in any runner zone."""
+    repository, sha = dated_commit
+    code, output = _run_stamp_step(repository, sha, runner_zone)
+    assert code == 0
+    assert output == "commit_time=20261111070114\n"
+
+
+def test_the_stamp_step_fails_without_a_readable_commit(dated_commit: tuple[Path, str]) -> None:
+    """An unreadable commit must fail the build, never publish a tag with an empty stamp."""
+    repository, _ = dated_commit
+    code, output = _run_stamp_step(repository, "0" * 40, "UTC")
+    assert code != 0
+    assert output == ""
+
+
+def test_the_build_environment_is_listed_and_hashed_before_the_tags() -> None:
+    """The hash is part of the tag, so the package list is built before metadata runs."""
+    listing = next(s for s in _build_steps() if s.get("name") == _LISTING_STEP)
+    listing_with = cast(Document, listing["with"])
+    assert listing_with["target"] == "build-environment"
+    assert listing_with["outputs"] == "type=local,dest=${{ runner.temp }}/build-environment"
+    assert "push" not in listing_with
+    hashing = _step("environment")
+    for step in (listing, hashing):
+        assert step["if"] == "github.ref == 'refs/heads/dev'"
+    assert _position(listing) < _position(hashing) < _position(_build_step())
+
+
+_LISTING_STEP = "List the system packages the build resolves"
+
+
+def _run_hash_step(runner_temp: Path) -> tuple[int, str]:
+    """Run the hash step's script against `runner_temp`; return its exit and output."""
+    env = {"PATH": os.environ["PATH"], "RUNNER_TEMP": str(runner_temp)}
+    code, output, _ = _run_script(
+        cast(str, _step("environment")["run"]), runner_temp, env, runner_temp / "github_output"
+    )
+    return code, output
+
+
+def test_the_hash_step_writes_the_package_lists_sha256_prefix(tmp_path: Path) -> None:
+    """The step's hash is what `application_version` and the Dockerfile check compute."""
+    packages = b"libpq5:amd64=17.6-0+deb13u1\ntesseract-ocr:amd64=5.5.0-1+b1\n"
+    (tmp_path / "build-environment").mkdir()
+    (tmp_path / "build-environment" / "build-environment").write_bytes(packages)
+    code, output = _run_hash_step(tmp_path)
+    assert code == 0
+    assert output == f"hash={hashlib.sha256(packages).hexdigest()[:12]}\n"
+
+
+@pytest.mark.parametrize("contents", [None, b""])
+def test_the_hash_step_fails_without_a_package_list(tmp_path: Path, contents: bytes | None) -> None:
+    """A missing or empty list must fail the build, never hash nothing into a tag."""
+    (tmp_path / "build-environment").mkdir()
+    if contents is not None:
+        (tmp_path / "build-environment" / "build-environment").write_bytes(contents)
+    code, output = _run_hash_step(tmp_path)
+    assert code != 0
+    assert output == ""
+
+
+_FAKE_DOCKER = """#!/bin/sh
+echo "$*" >> "$DOCKER_CALLS"
+case "$FAKE_REGISTRY" in
+  published) echo "Name: $4"; exit 0 ;;
+  unpublished) echo "ERROR: $4: not found" >&2; exit 1 ;;
+  *) echo "ERROR: failed to authorize: denied" >&2; exit 1 ;;
+esac
+"""
+
+
+def _run_published_check(
+    tmp_path: Path, ref: str, version: str, registry: str
+) -> tuple[int, str, str]:
+    """Run the publish check against a fake registry; return exit, output and docker calls."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    docker = bin_dir / "docker"
+    docker.write_text(_FAKE_DOCKER, encoding="utf-8")
+    docker.chmod(0o755)
+    calls = tmp_path / "docker_calls"
+    calls.write_text("", encoding="utf-8")
+    env = {
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "GITHUB_REF": ref,
+        "GITHUB_REPOSITORY": "Owner/curate-d",
+        "VERSION": version,
+        "FAKE_REGISTRY": registry,
+        "DOCKER_CALLS": str(calls),
+    }
+    code, output, _ = _run_script(
+        cast(str, _step("published")["run"]), tmp_path, env, tmp_path / "github_output"
+    )
+    return code, output, calls.read_text(encoding="utf-8")
+
+
+_HASHED_TAG = "dev-20261111070114-e69d801-0123456789ab"
+
+
+@pytest.mark.parametrize(
+    ("ref", "version", "checked"),
+    [
+        ("refs/heads/dev", _HASHED_TAG, "ghcr.io/owner/curate-d:dev-20261111070114-e69d801"),
+        ("refs/tags/v0.1.1", "v0.1.1", "ghcr.io/owner/curate-d:v0.1.1"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("registry", "published"), [("published", "true"), ("unpublished", "false")]
+)
+def test_the_publish_check_looks_up_the_commit_alias_or_the_release_tag(
+    tmp_path: Path, ref: str, version: str, checked: str, registry: str, published: str
+) -> None:
+    """On dev the commit's alias decides, whatever the packages; on a release, its tag."""
+    code, output, calls = _run_published_check(tmp_path, ref, version, registry)
+    assert code == 0
+    assert output == f"published={published}\n"
+    assert calls == f"buildx imagetools inspect {checked}\n"
+
+
+def test_the_publish_check_fails_when_the_registry_cannot_answer(tmp_path: Path) -> None:
+    """Only "not found" means unpublished; a denied lookup must not publish over a tag."""
+    code, output, _ = _run_published_check(tmp_path, "refs/heads/dev", _HASHED_TAG, "denied")
+    assert code != 0
+    assert output == ""
+
+
+@pytest.mark.parametrize("version", ["", "0.1.1", "dev-20261111070114"])
+def test_the_publish_check_refuses_a_tag_it_does_not_know(tmp_path: Path, version: str) -> None:
+    """An empty or unexpected tag fails rather than checking the wrong name."""
+    ref = "refs/heads/dev" if version.startswith("dev") else "refs/tags/v0.1.1"
+    code, output, calls = _run_published_check(tmp_path, ref, version, "unpublished")
+    assert code != 0
+    assert output == ""
+    assert calls == ""
+
+
+def test_an_already_published_build_pushes_nothing() -> None:
+    """The image is built and pushed only when the publish check found nothing."""
+    published = _step("published")
+    assert _position(_build_step()) < _position(published) < _position(_push_step())
+    assert _push_step()["if"] == "steps.published.outputs.published == 'false'"
+
+
+def test_two_runs_of_one_commit_wait_for_each_other() -> None:
+    """Without this, two runs could both find a build unpublished and both push it."""
+    concurrency = cast(Document, _workflow()["concurrency"])
+    assert concurrency["group"] == "${{ github.workflow }}-${{ github.ref }}-${{ github.sha }}"
+    assert concurrency["cancel-in-progress"] is False
+
+
+def _push_step() -> Document:
+    """Return the step that builds and pushes the image."""
+    return next(
+        s
+        for s in _build_steps()
+        if "build-push-action" in str(s.get("uses", "")) and s.get("name") != _LISTING_STEP
+    )
+
+
+def _dockerfile() -> str:
+    """Return the Dockerfile's text."""
+    return (REPOSITORY_ROOT / "docker" / "Dockerfile").read_text(encoding="utf-8")
+
+
+def test_the_image_lists_its_system_packages_where_the_application_reads_them() -> None:
+    """The listing stage, the runtime image and `BUILD_ENVIRONMENT_PATH` share one file."""
+    from curate_d.runtime.dbos_app import BUILD_ENVIRONMENT_PATH
+
+    dockerfile = _dockerfile()
+    assert f"&& LC_ALL=C sort /tmp/packages > {BUILD_ENVIRONMENT_PATH} " in dockerfile
+    assert f"COPY --from=system {BUILD_ENVIRONMENT_PATH} /build-environment" in dockerfile
+    assert "FROM system AS runtime" in dockerfile
+
+
+def test_the_image_build_fails_on_a_tag_hashed_from_other_packages() -> None:
+    """A tag naming other packages fails the build, so nothing is pushed under it."""
+    runtime = _dockerfile().split("AS runtime", 1)[1]
+    check = runtime.split('ARG CURATE_D_BUILD_REVISION=""', 1)[1]
+    assert "sha256sum /usr/share/curate-d/build-environment | cut -c1-12" in check
+    assert '[ "${CURATE_D_BUILD_REVISION##*-}" = "${actual}" ]' in check
+    assert "exit 1" in check
 
 
 def test_only_a_dev_image_is_built_with_its_build_revision() -> None:
     """A dev image names its build in its DBOS version; a release image stays the tag."""
-    jobs = cast(Document, _workflow()["jobs"])
-    steps = cast(list[Document], cast(Document, jobs["build-and-push"])["steps"])
-    build = next(s for s in steps if "build-push-action" in str(s.get("uses", "")))
-    build_args = cast(str, cast(Document, build["with"])["build-args"])
+    build_args = cast(str, cast(Document, _push_step()["with"])["build-args"])
     assert (
         "CURATE_D_BUILD_REVISION=${{ github.ref == 'refs/heads/dev' "
         "&& steps.meta.outputs.version || '' }}"
