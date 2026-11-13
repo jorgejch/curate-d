@@ -1,12 +1,13 @@
-"""The standards' order of precedence, the Twelve-Factor adoption record and the skill link.
+"""The standards' precedence, the Twelve-Factor record, the skill link and the DBOS version.
 
 Each check is a function over text or a path that returns what is wrong, so one test runs it
 on the real file and others run it on bad input, without editing a tracked file.
 """
 
 import re
+import tomllib
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import NamedTuple, cast
 
@@ -26,6 +27,19 @@ CONFIG = REPOSITORY_ROOT / CONFIG_NAME
 AGENT_CONVENTIONS_NAME = "CLAUDE.md"
 AGENT_CONVENTIONS = REPOSITORY_ROOT / AGENT_CONVENTIONS_NAME
 PRECEDENCE = ("Safety guarantees", "DBOS", "Twelve-Factor", "Coding standards")
+README_NAME = "README.md"
+README = REPOSITORY_ROOT / README_NAME
+PYPROJECT_NAME = "pyproject.toml"
+PYPROJECT = REPOSITORY_ROOT / PYPROJECT_NAME
+
+DBOS_REQUIREMENT = "dbos[otel]"
+_EXACT_DBOS_PIN = re.compile(r"dbos\[otel\]==(?P<version>(?P<minor>\d+\.\d+)\.\d+)")
+# How each document names the DBOS version in use. A dated record, such as the assessment line
+# of docs/twelve-factor.md, is not a current statement and is not compared.
+CURRENT_DBOS_VERSION = {
+    README_NAME: re.compile(r"\[DBOS\]\(https://docs\.dbos\.dev/\) (?P<minor>\d+\.\d+)\b"),
+    CONFIG_NAME: re.compile(r"\*\*DBOS (?P<minor>\d+\.\d+)(?:\.\d+)?\*\*"),
+}
 
 MANIFESTO_REPOSITORY = "twelve-factor/twelve-factor"
 LICENCE = "CC BY 4.0"
@@ -198,6 +212,65 @@ def skill_link_problems(path: Path) -> list[str]:
     return [f"{path} is missing; {LINK_REPAIR}"]
 
 
+def _exact_dbos_pins(project: dict[str, object]) -> list[re.Match[str]]:
+    """Return the exact `dbos[otel]==X.Y.Z` pins among `project.dependencies`."""
+    table = project.get("project")
+    dependencies = table.get("dependencies") if isinstance(table, dict) else None
+    entries = dependencies if isinstance(dependencies, list) else []
+    return [
+        match
+        for entry in entries
+        if isinstance(entry, str) and (match := _EXACT_DBOS_PIN.fullmatch(entry.replace(" ", "")))
+    ]
+
+
+def documented_dbos_version_problems(pyproject: str, documents: Mapping[str, str]) -> list[str]:
+    """Return the documents that name a DBOS minor version other than the pin, or what it lacks.
+
+    Args:
+        pyproject: The text of `pyproject.toml`.
+        documents: The text of each document, by a name that `CURRENT_DBOS_VERSION` holds.
+    """
+    try:
+        project = tomllib.loads(pyproject)
+    except tomllib.TOMLDecodeError as error:
+        return [
+            f"{PYPROJECT_NAME} cannot be parsed ({error}): no {DBOS_REQUIREMENT} pin to compare"
+        ]
+    pins = _exact_dbos_pins(project)
+    if len(pins) != 1:
+        return [
+            f"{PYPROJECT_NAME} holds {len(pins)} exact {DBOS_REQUIREMENT}==X.Y.Z pins in "
+            "project.dependencies, expected one: no pin to compare"
+        ]
+    pin = pins[0]
+    problems: list[str] = []
+    for name, text in documents.items():
+        found = CURRENT_DBOS_VERSION[name].findall(text)
+        if not found:
+            problems.append(f"{name} names no current DBOS version")
+        problems += [
+            f"{name} names DBOS {minor}, {PYPROJECT_NAME} pins {DBOS_REQUIREMENT}=={pin['version']}"
+            for minor in found
+            if minor != pin["minor"]
+        ]
+    return problems
+
+
+def _pyproject(*dependencies: str) -> str:
+    """Return a `pyproject.toml` whose `project.dependencies` holds `dependencies`."""
+    entries = ", ".join(f'"{dependency}"' for dependency in dependencies)
+    return f'[project]\nname = "x"\ndependencies = [{entries}]\n'
+
+
+def _documents(readme: str = "3.5", config: str = "3.5") -> dict[str, str]:
+    """Return the two documents, each naming DBOS at the given version as they write it."""
+    return {
+        README_NAME: f"Durable execution is [DBOS](https://docs.dbos.dev/) {readme}, chosen as\n",
+        CONFIG_NAME: f"  - **DBOS {config}** - durable execution as a library\n",
+    }
+
+
 def _section_with_order(*names: str) -> str:
     """Return a `## Standards` section that lists `names` as numbered bold entries."""
     entries = "\n".join(f"{rank}. **{name}** text" for rank, name in enumerate(names, 1))
@@ -230,6 +303,82 @@ def _record_rows(*rows: tuple[str, str, str, str]) -> list[_Row]:
 def _all_rules_rows() -> list[_Row]:
     """Return one good row for each rule."""
     return _record_rows(*[(rule, CONFORMS, "Holds.", "-") for rule in RULES])
+
+
+def test_documents_naming_the_pinned_minor_version_are_accepted() -> None:
+    """Documents that name the minor version of the `dbos[otel]` pin have no problem."""
+    pyproject = _pyproject("sqlalchemy~=2.1.1", "dbos[otel]==3.5.0")
+
+    assert documented_dbos_version_problems(pyproject, _documents()) == []
+
+
+def test_a_document_naming_an_older_version_names_the_document_and_the_version() -> None:
+    """A document that names DBOS 3.4 under a 3.5.0 pin names the document and 3.4."""
+    problems = documented_dbos_version_problems(
+        _pyproject("dbos[otel]==3.5.0"), _documents(readme="3.4")
+    )
+
+    assert problems == [f"{README_NAME} names DBOS 3.4, {PYPROJECT_NAME} pins dbos[otel]==3.5.0"]
+
+
+def test_a_document_naming_no_version_names_the_document() -> None:
+    """A document with no current DBOS version fails rather than passing unchecked."""
+    documents = {**_documents(), CONFIG_NAME: "  - **DBOS 3.x** - durable execution\n"}
+
+    problems = documented_dbos_version_problems(_pyproject("dbos[otel]==3.5.0"), documents)
+
+    assert problems == [f"{CONFIG_NAME} names no current DBOS version"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Durable execution is DBOS 3.4, chosen as a library",
+        "Durable execution is [DBOS](https://docs.dbos.dev/) 3.x, chosen as a library",
+        "Assessed 2026-11-04 against DBOS 3.4.0 and `dbos-python` skill 2.2.0.",
+        "dbos[otel]==3.4.0",
+    ],
+    ids=["no-link", "no-minor", "dated-record", "requirement"],
+)
+def test_other_mentions_of_dbos_are_not_the_readme_version(text: str) -> None:
+    """Only the README's linked `DBOS X.Y` counts as the version it names as current."""
+    assert CURRENT_DBOS_VERSION[README_NAME].findall(text) == []
+
+
+@pytest.mark.parametrize(
+    ("dependencies", "count"),
+    [
+        (("sqlalchemy~=2.1.1",), 0),
+        (("dbos[otel]>=3.5.0",), 0),
+        (("dbos[otel]==3.5",), 0),
+        (("dbos==3.5.0",), 0),
+        (("dbos[otel]==3.5.0", "dbos[otel]==3.4.0"), 2),
+    ],
+    ids=["absent", "range", "no-patch", "no-extra", "two-pins"],
+)
+def test_no_single_exact_pin_names_the_file_and_the_pin(
+    dependencies: tuple[str, ...], count: int
+) -> None:
+    """A `pyproject.toml` without one exact `dbos[otel]` pin names the file and the pin."""
+    problems = documented_dbos_version_problems(_pyproject(*dependencies), _documents(readme="3.4"))
+
+    assert len(problems) == 1
+    assert problems[0].startswith(f"{PYPROJECT_NAME} holds {count} exact ")
+    assert f"{DBOS_REQUIREMENT}==X.Y.Z" in problems[0]
+
+
+@pytest.mark.parametrize(
+    "pyproject",
+    ['[project\ndependencies = ["dbos[otel]==3.5.0"]\n', '[project]\ndependencies = "x"\n'],
+    ids=["unparsable", "dependencies-not-a-list"],
+)
+def test_an_unreadable_pin_names_the_file_and_the_pin(pyproject: str) -> None:
+    """A `pyproject.toml` that cannot be parsed, or holds no list, names the file and the pin."""
+    problems = documented_dbos_version_problems(pyproject, _documents())
+
+    assert len(problems) == 1
+    assert problems[0].startswith(PYPROJECT_NAME)
+    assert DBOS_REQUIREMENT in problems[0]
 
 
 def test_the_order_of_precedence_is_accepted() -> None:
@@ -540,3 +689,13 @@ def test_the_agent_conventions_state_the_order_of_precedence() -> None:
     text = AGENT_CONVENTIONS.read_text(encoding="utf-8")
 
     assert precedence_problems(AGENT_CONVENTIONS_NAME, text, "Standards") == []
+
+
+def test_the_documents_name_the_pinned_dbos_version() -> None:
+    """`README.md` and the OpenSpec config name the DBOS minor version of the pin."""
+    documents = {
+        README_NAME: README.read_text(encoding="utf-8"),
+        CONFIG_NAME: CONFIG.read_text(encoding="utf-8"),
+    }
+
+    assert documented_dbos_version_problems(PYPROJECT.read_text(encoding="utf-8"), documents) == []

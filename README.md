@@ -82,7 +82,7 @@ Python application driving [rclone](https://rclone.org/) over its remote-control
 PostgreSQL doing considerably more than usual: ledger, work queue, durable-execution store
 and audit log all in one instance.
 
-Durable execution is [DBOS](https://docs.dbos.dev/) 3.4, chosen as a library rather than a
+Durable execution is [DBOS](https://docs.dbos.dev/) 3.5, chosen as a library rather than a
 service so that ledger writes go through a datasource transaction and are exactly-once
 across crashes and replays. A workflow rewound by hand needs its child workflows rewound
 after it ([guide](docs/rewind.md)).
