@@ -115,7 +115,7 @@ Install these before `make install`; they're not pulled in by `uv`.
 
 ```bash
 make install           # install, including the dev group
-make stack-up          # PostgreSQL, RustFS, rclone, API and workers via Docker Compose
+make stack-up          # PostgreSQL, RustFS, rclone, then migrate, API and workers via Docker Compose
 make stack-down        # stop the local stack, keeping its data
 make stack-reset       # destroy the local stack and its data
 make migrate           # apply the Alembic migrations to the configured database

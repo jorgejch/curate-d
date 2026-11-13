@@ -34,12 +34,18 @@ async def create_ledger_datasource(settings: Settings) -> AsyncSQLAlchemyDatasou
     share that database by design (dbos_app.py), which is what also lets a ledger write and
     a workflow enqueue commit together.
 
+    Creation verifies the tracking table and never migrates it: `migrations/env.py`
+    migrates it, so creation on a database `env.py` has not migrated raises
+    `DBOSInitializationError`.
+
     Call before `DBOS.launch()`: DBOS registers every datasource so a rewind can drop the
     checkpoints it holds, and rejects one created after launch.
     """
     datasource: AsyncSQLAlchemyDatasource = await AsyncSQLAlchemyDatasource.create(
-        str(settings.ledger_database_url),
+        database_url=str(settings.ledger_database_url),
         schema=TRACKING_SCHEMA,
+        # Verify only: `migrations/env.py` is the only migrator of the tracking table.
+        run_migrations=False,
     )
     return datasource
 

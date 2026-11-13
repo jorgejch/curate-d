@@ -61,8 +61,10 @@ def _ledger_url(fields: Mapping[str, object]) -> PostgresDsn:
     )
 
 
-# Keys that set a part of the connection a part setting owns; `password`, `passfile` and
-# `sslpassword` would also put a secret in a plain setting.
+# Connection keys that `ledger_database_options` must not set, because a dedicated
+# `ledger_database_*` setting owns that part of the connection (user, host, port, name).
+# `password`, `passfile` and `sslpassword` are rejected for a second reason: they would
+# put a secret in a plain-text setting.
 _LEDGER_PART_KEYS: Final = frozenset(
     {"user", "password", "passfile", "sslpassword", "host", "hostaddr", "port", "dbname", "service"}
 )
@@ -257,6 +259,14 @@ class Settings(BaseSettings):
         description="Ledger, audit log, application data, and DBOS's own tables (schema "
         "`dbos`): one database, so a ledger write and a workflow enqueue can share one "
         "transaction.",
+    )
+    migration_lock_timeout_seconds: float = Field(
+        default=1800.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="How long an online `alembic upgrade` or `alembic downgrade` waits for "
+        "another migration run to release the migration lock. On timeout the run logs "
+        "`migration.lock_timeout`, exits 3 and changes nothing.",
     )
     credential_encryption_key: SecretStr | None = Field(
         default=None,

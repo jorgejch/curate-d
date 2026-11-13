@@ -132,6 +132,24 @@ services:
       rustfs:
         condition: service_healthy
 
+  # One-shot: brings the ledger and the DBOS system schema to this image's revision before
+  # the API and the workers start. The workers verify the schema at launch and never migrate
+  # it (runtime/dbos_app.py), so without this step a stack on an empty or older database
+  # would restart them until someone ran `make migrate`. Serialized by the migration lock
+  # (migrations/env.py); `make test-stack` migrates from the host instead and names its
+  # services, so it does not start this one.
+  migrate:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: curate-d:dev
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      <<: *app-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   api:
     build:
       context: .
@@ -161,6 +179,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   # I/O profile: scan, LLM classification, transfer and verify, running beside the rclone
   # sidecar that holds live provider credentials. Verify only compares digests the providers
@@ -188,6 +208,8 @@ services:
       postgres:
         condition: service_healthy
       rustfs-init:
+        condition: service_completed_successfully
+      migrate:
         condition: service_completed_successfully
 
   # rclone's remote-control API, sidecar to worker-io only: the CPU profile decodes
@@ -267,6 +289,8 @@ services:
       postgres:
         condition: service_healthy
       rustfs-init:
+        condition: service_completed_successfully
+      migrate:
         condition: service_completed_successfully
 
 volumes:

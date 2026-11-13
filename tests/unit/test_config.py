@@ -232,6 +232,32 @@ def test_a_ledger_option_with_an_empty_value_reaches_the_derived_url(
     assert raw.endswith("?sslmode=disable&application_name=")
 
 
+def test_the_migration_lock_timeout_defaults_to_thirty_minutes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no variable set, a migration run waits 1800 seconds for the migration lock."""
+    monkeypatch.delenv("CURATE_D_MIGRATION_LOCK_TIMEOUT_SECONDS", raising=False)
+    assert Settings(_env_file=None).migration_lock_timeout_seconds == 1800.0
+
+
+def test_the_migration_lock_timeout_is_read_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CURATE_D_MIGRATION_LOCK_TIMEOUT_SECONDS sets the migration lock wait in seconds."""
+    monkeypatch.setenv("CURATE_D_MIGRATION_LOCK_TIMEOUT_SECONDS", "90")
+    assert Settings(_env_file=None).migration_lock_timeout_seconds == 90.0
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "abc", "inf", "nan"])
+def test_an_invalid_migration_lock_timeout_stops_settings_load(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """A non-positive, non-finite or non-numeric migration lock timeout fails on its own field."""
+    monkeypatch.setenv("CURATE_D_MIGRATION_LOCK_TIMEOUT_SECONDS", value)
+    with pytest.raises(ValidationError, match="migration_lock_timeout_seconds"):
+        Settings(_env_file=None)
+
+
 def test_settings_are_frozen() -> None:
     """Assigning to a Settings field raises instead of silently mutating it."""
     settings = Settings()
