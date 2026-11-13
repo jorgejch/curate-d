@@ -13,11 +13,10 @@ Autonomous multi-cloud file and media organizer.
 
 Curate.d ingests files and media from multiple cloud storage and photo providers,
 classifies them by content and context, and files them into a consistent naming and
-folder structure on a target cloud — running in the background without asking for
-approval on every file.
+folder structure rendered from structured, declarative policies.
 
-> **Status: pre-release.** The organizer is implemented and verified end to end against a
-> development deployment. See the [staging guide](docs/staging.md).
+> **Status: pre-release.** The organizer is implemented and verified end to end for pCloud in 
+> a dev deployment. See the [staging guide](docs/staging.md).
 
 ## The guarantee
 
@@ -83,7 +82,7 @@ Python application driving [rclone](https://rclone.org/) over its remote-control
 PostgreSQL doing considerably more than usual: ledger, work queue, durable-execution store
 and audit log all in one instance.
 
-Durable execution is [DBOS](https://docs.dbos.dev/) 3.4, chosen as a library rather than a
+Durable execution is [DBOS](https://docs.dbos.dev/) 3.5, chosen as a library rather than a
 service so that ledger writes go through a datasource transaction and are exactly-once
 across crashes and replays. A workflow rewound by hand needs its child workflows rewound
 after it ([guide](docs/rewind.md)).

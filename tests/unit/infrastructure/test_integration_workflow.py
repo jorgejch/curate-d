@@ -105,7 +105,7 @@ IMPLICIT_FILES = {
 PULL_REQUEST_FILE_LIMIT = 3000
 
 # hatchling reads these for package metadata only; nothing the suite asserts depends on them.
-PACKAGING_FILES = {"README.md", "LICENSE", "NOTICE"}
+PACKAGING_FILES = {"README.md", "LICENSE", "NOTICE", "LICENSES"}
 
 # The job set: the plan, the shard matrix, the application boot and the required gate.
 JOBS = {"plan", "shard", "boot", "integration"}

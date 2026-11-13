@@ -40,6 +40,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-build --no-install-project --no-dev
 
 COPY pyproject.toml uv.lock README.md LICENSE NOTICE ./
+COPY LICENSES ./LICENSES
 COPY src ./src
 COPY migrations ./migrations
 COPY alembic.ini ./
