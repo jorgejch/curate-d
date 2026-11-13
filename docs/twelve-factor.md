@@ -56,8 +56,10 @@ Each rule has one of three statuses:
 ## Status
 
 Assessed 2026-11-04 against DBOS 3.4.0 and `dbos-python` skill 2.2.0. On that date 16 rules
-conformed, 2 were limited by DBOS and 15 were gaps. The deployment manifests are kept outside
-this repository; a row that mentions them states the finding in general terms.
+conformed, 2 were limited by DBOS and 15 were gaps. Rows III.2 and IX.1 were re-read against
+DBOS 3.5.0 and `dbos-python` skill 2.2.0 on 2026-11-12 and keep their status. The deployment
+manifests are kept outside this repository; a row that mentions them states the finding in
+general terms.
 
 ### I. Codebase
 
