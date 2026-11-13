@@ -96,7 +96,7 @@ jobs:
       # The suite's inputs: what it imports, builds, mounts, boots or reads. Each pattern is
       # `dir/**` or an exact file, and test_integration_workflow.py pins the set against
       # compose.yaml's mounts, the Dockerfile's copies and the tests' own reads. README.md,
-      # LICENSE and NOTICE are copied into the image for packaging metadata only.
+      # LICENSE, NOTICE and LICENSES/ are copied into the image for packaging metadata only.
       # .test_durations decides which tests each shard runs. Some exact files need not exist
       # yet, as each is picked up implicitly once added: the ancestor conftest.py files
       # pytest loads when collecting tests/integration, the configuration files pytest
@@ -160,8 +160,8 @@ jobs:
       # the gate. GitHub lists at most 3,000 of a pull request's files, so a pull request that
       # reaches the limit, or reports no count, may hold a declared path the detection never
       # saw: fail it whatever the detection answered, `true` included.
-      # The image copies README.md, LICENSE and NOTICE, which select nothing, so a skip
-      # without them fails as well.
+      # The image copies README.md, LICENSE, NOTICE and LICENSES/, which select nothing, so a
+      # skip without them fails as well.
       - name: Refuse an undecided detection
         env:
           SUITE: ${{ steps.changes.outputs.suite }}
@@ -175,8 +175,8 @@ jobs:
             echo "::error::This pull request changes $CHANGED_FILES files; GitHub lists at most 3,000, so the detection may have missed a declared path. Split the pull request."
             exit 1
           fi
-          for file in README.md LICENSE NOTICE; do
-            if [ "$SUITE" = "false" ] && [ ! -f "$file" ]; then
+          for file in README.md LICENSE NOTICE LICENSES; do
+            if [ "$SUITE" = "false" ] && [ ! -e "$file" ]; then
               echo "::error::$file is missing; docker/Dockerfile copies it, so the image build would fail."
               exit 1
             fi

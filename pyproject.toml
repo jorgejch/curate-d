@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Autonomous multi-cloud file and media organizer with a zero-data-loss guarantee"
 readme = "README.md"
 license = "Apache-2.0"
-license-files = ["LICENSE", "NOTICE"]
+license-files = ["LICENSE", "NOTICE", "LICENSES/*"]
 authors = [
     { name = "Jorge", email = "jorgejch@gmail.com" }
 ]
@@ -34,9 +34,9 @@ dependencies = [
     # The `otel` extra supplies opentelemetry-instrumentation-logging: DBOS attaches its
     # log handler from it at construction when `enable_otlp` is on and Logfire has
     # installed a logger provider, and fails to construct without it.
-    "dbos[otel]==3.4.0",
+    "dbos[otel]==3.5.0",
     "sqlalchemy~=2.1.1",
-    "psycopg[binary]~=3.3.6",
+    "psycopg[binary]~=3.3.9",
     "alembic~=1.20",
     # Control plane API
     "fastapi==0.162.0",
@@ -51,7 +51,7 @@ dependencies = [
     # Structured logging with credential redaction
     "structlog~=26.1",
     # Request tracing for the control plane API, exported to Logfire when a token is present
-    "logfire[fastapi]==5.4.0",
+    "logfire[fastapi]==5.6.0",
     # Media inspection and perceptual fingerprinting
     "pillow>=12.3,<14.0",
     "pillow-heif~=1.8.0",   # HEIC/HEIF, the default format for Apple photo libraries
@@ -62,7 +62,7 @@ dependencies = [
     "pytesseract~=0.3.13", # requires the tesseract binary on PATH
     # Remote classification tier. OpenRouter exposes an OpenAI-compatible API,
     # so the model is selected by configuration rather than by client choice.
-    "openai==3.46.0",
+    "openai==3.50.0",
     # openai 3.x runs on httpx2 rather than httpx; imported directly to inject a transport.
     "httpx2==2.16.0",
     # S3 content staging: RustFS locally, OVH Standard S3 in the cluster. Patch releases
@@ -70,7 +70,6 @@ dependencies = [
     # defaults underneath the wire-behavior evidence, so it needs re-verifying against both
     # backends first. uv.lock fixes the exact release.
     "aioboto3~=15.5.0",
-    "pyrefly==1.4.0"
 ]
 
 # Deferred:
@@ -103,6 +102,7 @@ dev = [
     "hypothesis~=6.168",
     # Validates the served OpenAPI document against the OpenAPI specification itself.
     "openapi-spec-validator~=0.9",
+    "pyrefly==1.4.0", # PyCharm uses it.
 ]
 
 [build-system]
