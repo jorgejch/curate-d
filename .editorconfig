@@ -165,18 +165,6 @@ ij_json_spaces_within_braces = false
 ij_json_spaces_within_brackets = false
 ij_json_wrap_long_lines = false
 
-[{*.hcl,*.nomad}]
-indent_size = 2
-ij_hcl_keep_blank_lines_in_code = 2
-ij_hcl_keep_indents_on_empty_lines = false
-ij_hcl_keep_line_breaks = true
-ij_hcl_space_after_comma = true
-ij_hcl_space_before_comma = false
-ij_hcl_spaces_around_assignment_operators = true
-ij_hcl_spaces_within_braces = false
-ij_hcl_spaces_within_brackets = false
-ij_hcl_wrap_long_lines = false
-
 [{*.htm,*.html,*.sht,*.shtm,*.shtml}]
 ij_html_add_new_line_before_tags = body,div,p,form,h1,h2,h3
 ij_html_align_attributes = true
