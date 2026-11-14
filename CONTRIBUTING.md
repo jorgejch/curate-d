@@ -75,14 +75,17 @@ cleanup of unrelated code.
   change more than version references and end their auto-approval. `gitar auto-apply:off` turns it
   off on one pull request. A fix Gitar commits always waits for a human review, as below.
   [`.gitar/config/approve.md`](.gitar/config/approve.md) bounds which pull requests it may
-  approve, and so auto-merge: documentation prose, comment- and docstring-only changes and added
-  unit tests at low risk, and, at low or medium risk, Dependabot version and security updates
-  limited to `uv` patches, `uv` minors of packages at `1.0` or above, and `docker` image patches,
-  with the required checks as their only compatibility test. Gitar's review shows no commit
-  authors, so it judges those updates from the pull request's author and its diff. Never another
-  pull request a bot opened or committed to, never a
-  `github-actions` or `dbos` update or one `.github/dependabot.yml` ignores, and never one that
-  changes `.gitar/`. Gitar's review doesn't read `dependabot.yml`, so `approve.md` copies its
+  approve, and so auto-merge, all at low or medium risk: documentation prose, comment- and
+  docstring-only changes, added unit tests and `.editorconfig` or `.gitignore` edits, up to 20
+  files and 500 lines; and Dependabot version and security updates limited to `uv` patches, `uv`
+  minors of packages at `1.0` or above, `docker` image patches, and patches and `1.0`-or-above
+  minors of actions pinned to a commit SHA, with the required checks as their only compatibility
+  test. Gitar's review shows no commit authors, so it judges those updates from the pull
+  request's author and its diff. A commit made in GitHub's web editor counts as its human
+  author's. Never another pull request a bot opened or committed to (Gitar's own fixes included),
+  never a `dbos` update or one `.github/dependabot.yml` ignores, and never one that changes
+  `.gitar/`. Dependabot holds action updates for seven days after a release (`cooldown`), since
+  an action runs in CI with the repository's secrets once it merges. Gitar's review doesn't read `dependabot.yml`, so `approve.md` copies its
   `ignore` rules, and the unit suite fails when the two differ: change both together.
 
 ## Tests
