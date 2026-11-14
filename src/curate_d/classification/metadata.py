@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 from PIL import Image, UnidentifiedImageError
 from pydantic import AwareDatetime, Field
 from pypdf import PdfReader
-from pypdf.errors import PdfReadError
+from pypdf.errors import DeprecationError, PdfReadError
 
 from curate_d.content import perceptual  # noqa: F401 - registers the HEIF opener
 from curate_d.domain import DomainModel, GeoPoint
@@ -205,7 +205,7 @@ def pdf_metadata(handle: BinaryIO) -> EmbeddedMetadata:
             sample += page.extract_text() or ""
             if len(sample) >= _TEXT_SAMPLE_CHARS:
                 break
-    except (PdfReadError, OSError, ValueError, KeyError):
+    except (PdfReadError, DeprecationError, OSError, ValueError, KeyError):
         return EmbeddedMetadata()
     finally:
         handle.seek(0)

@@ -6,6 +6,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
+from pypdf.errors import DeprecationError
 
 from curate_d.classification.deterministic import (
     ClassificationInput,
@@ -158,6 +159,20 @@ def test_broken_files_yield_empty_metadata() -> None:
     """A file that claims a type but does not parse contributes nothing."""
     assert image_metadata(io.BytesIO(b"\xff\xd8\xff junk"), local_timezone=None).camera is None
     assert pdf_metadata(io.BytesIO(b"%PDF-1.4 junk")).page_count is None
+
+
+def test_pdf_metadata_treats_deprecation_errors_as_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A PDF using a hard-deprecated feature contributes no metadata."""
+
+    def reject_deprecated_filter(handle: object) -> None:
+        raise DeprecationError("abbreviated filter")
+
+    monkeypatch.setattr("curate_d.classification.metadata.PdfReader", reject_deprecated_filter)
+    handle = io.BytesIO(b"%PDF-1.4")
+    assert pdf_metadata(handle) == EmbeddedMetadata()
+    assert handle.tell() == 0
 
 
 def test_names_carry_dates_in_several_conventions() -> None:

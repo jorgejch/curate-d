@@ -7,7 +7,9 @@ lead to. Real Tesseract runs in the integration suite.
 import io
 from uuid import uuid4
 
+import pytest
 from PIL import Image
+from pypdf.errors import DeprecationError
 
 from curate_d.classification.deterministic import (
     ClassificationInput,
@@ -153,3 +155,25 @@ def test_a_scanned_pdf_is_read_by_ocr_of_its_page_images() -> None:
     extracted = extract_text(io.BytesIO(content), item, ocr=lambda image: "recibo total iban")
     assert extracted.source is TextSource.OCR
     assert "recibo" in extracted.text
+
+
+def test_pdf_ocr_treats_deprecation_errors_as_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A PDF using a hard-deprecated feature contributes no OCR text."""
+
+    def reject_deprecated_filter(handle: object) -> None:
+        raise DeprecationError("abbreviated filter")
+
+    monkeypatch.setattr("curate_d.classification.local.PdfReader", reject_deprecated_filter)
+    handle = io.BytesIO(b"%PDF-1.4")
+    item = ClassificationInput(
+        content_object_id=ContentObjectId(uuid4()),
+        media_type="application/pdf",
+        size_bytes=len(handle.getvalue()),
+        paths=("/scan.pdf",),
+    )
+    extracted = extract_text(handle, item, ocr=lambda image: "unreachable")
+    assert extracted.source is TextSource.NONE
+    assert extracted.text == ""
+    assert handle.tell() == 0

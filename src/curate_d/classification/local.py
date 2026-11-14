@@ -20,7 +20,7 @@ import pytesseract
 from PIL import Image, UnidentifiedImageError
 from pydantic import Field
 from pypdf import PdfReader
-from pypdf.errors import PdfReadError
+from pypdf.errors import DeprecationError, PdfReadError
 
 from curate_d.classification.deterministic import ClassificationInput, TierResult
 from curate_d.domain import AuditValue, ClassificationTier, DomainModel, Facts, MediaKind
@@ -82,7 +82,7 @@ def _ocr_pdf(handle: BinaryIO, ocr: OcrEngine) -> str:
             for embedded in page.images:
                 with Image.open(io.BytesIO(embedded.data)) as image:
                     text.append(ocr(image.convert("L")))
-    except (PdfReadError, UnidentifiedImageError, OSError, ValueError, KeyError):
+    except (PdfReadError, DeprecationError, UnidentifiedImageError, OSError, ValueError, KeyError):
         pass
     finally:
         handle.seek(0)
