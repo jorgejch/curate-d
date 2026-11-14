@@ -39,7 +39,7 @@ dependencies = [
     "psycopg[binary]~=3.3.9",
     "alembic~=1.20",
     # Control plane API
-    "fastapi==0.162.0",
+    "fastapi==0.162.4",
     "uvicorn[standard]~=0.54.0",
     "pydantic==2.14.2",
     "pydantic-settings==2.16.2",
@@ -102,7 +102,7 @@ dev = [
     "hypothesis~=6.168",
     # Validates the served OpenAPI document against the OpenAPI specification itself.
     "openapi-spec-validator~=0.9",
-    "pyrefly==1.4.0", # PyCharm uses it.
+    "pyrefly==1.4.1", # PyCharm uses it.
 ]
 
 [build-system]
