@@ -5,13 +5,13 @@ for both.
 
 ## 1. Auto-approve criteria (`.gitar/config/approve.md`, `CONTRIBUTING.md`)
 
-- [x] 1.1 In `.gitar/config/approve.md`: medium risk and the 20-file, 500-line cap for categories 1 to 3; a new category 5 for `.editorconfig` and `.gitignore` that combines with 1 to 3 (category 4 keeps its number); the `web-flow` committer rule; the lock-edge rule and the `github-actions` rule under the Dependabot category; examples for #164's and #165's shapes. Verify every category reference still names the right category (`grep -n 'ategor' .gitar/config/approve.md`)
+- [x] 1.1 In `.gitar/config/approve.md`: medium risk and the 20-file, 500-line cap for categories 1 to 3; a new category 5 for `.editorconfig` that combines with 1 to 3 (category 4 keeps its number); the `web-flow` committer rule; the lock-edge rule and the `github-actions` rule under the Dependabot category; examples for #164's and #165's shapes and for a grouped action update whose versions come from the description. Verify every category reference still names the right category (`grep -n 'ategor' .gitar/config/approve.md`)
 - [x] 1.2 Update `CONTRIBUTING.md`'s Gitar paragraph to the new scope
 
 ## 2. Dependabot cooldown (`.github/dependabot.yml`, `tests/unit/infrastructure/test_dependabot_config.py`)
 
 - [x] 2.1 Add `cooldown: {default-days: 7}` to the `github-actions` entry, with a comment saying why. Verify the file parses
-- [x] 2.2 Add a unit test that the `github-actions` entry's cooldown is at least seven days and that no other entry sets one. Verify it passes, and fails when the cooldown is removed
+- [x] 2.2 Add a unit test that the `github-actions` entry's cooldown, its default and any per-update-type override, is at least seven days and that no other entry sets one. Verify it passes, and fails when the cooldown is removed
 
 ## 3. Integration (after 1 and 2)
 

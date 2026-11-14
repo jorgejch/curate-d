@@ -76,7 +76,7 @@ cleanup of unrelated code.
   off on one pull request. A fix Gitar commits always waits for a human review, as below.
   [`.gitar/config/approve.md`](.gitar/config/approve.md) bounds which pull requests it may
   approve, and so auto-merge, all at low or medium risk: documentation prose, comment- and
-  docstring-only changes, added unit tests and `.editorconfig` or `.gitignore` edits, up to 20
+  docstring-only changes, added unit tests and `.editorconfig` edits, up to 20
   files and 500 lines; and Dependabot version and security updates limited to `uv` patches, `uv`
   minors of packages at `1.0` or above, `docker` image patches, and patches and `1.0`-or-above
   minors of actions pinned to a commit SHA, with the required checks as their only compatibility

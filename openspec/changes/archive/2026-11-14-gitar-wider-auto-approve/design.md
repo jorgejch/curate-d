@@ -45,8 +45,10 @@ See `proposal.md`. Evidence, read from GitHub on 2026-11-14:
 - **Actions only by commit SHA, update type from the version text.** A SHA can't be moved under
   the pull request after review, and a tag pin changes only across a major, which refuses anyway.
   The update type comes from the trailing `# vX.Y.Z` comments when both carry three numeric parts,
-  otherwise from Dependabot's title (`from 1.0.268 to 1.0.271`); the pull request's author is
-  `dependabot[bot]`, so the title is Dependabot's, and a diff that contradicts it still refuses.
+  otherwise from Dependabot's title (`from 1.0.268 to 1.0.271`), or, when a grouped title names
+  only the group, from the action's `Updates ... from ... to ...` line in the description; the pull
+  request's author is `dependabot[bot]`, so both are Dependabot's, and a diff that contradicts them
+  still refuses.
   Gitar can't check that a SHA belongs to the named release; the cooldown and the required checks
   are what bound that.
 - **Explicit seven-day cooldown on `github-actions`.** The default three days covers fast
@@ -59,9 +61,11 @@ See `proposal.md`. Evidence, read from GitHub on 2026-11-14:
   measures uncertainty Gitar can't resolve, and a blocking finding still refuses. High stays out.
 - **Size 20 files / 500 lines.** A docs restructure or a test file of several cases passes 200
   lines without being any harder to judge by category. #161 (364 lines) fits.
-- **Hygiene files as a category of their own**, not as "documentation": `.editorconfig` and
-  `.gitignore` change what an editor or Git does locally. `.dockerignore` changes the image build
-  context and `.gitattributes` can name filters, so both stay human.
+- **Editor settings as a category of their own**, not as "documentation": `.editorconfig` changes
+  what an editor does locally. `.gitignore` stays human, though it looks as local: Ruff's
+  `check .` and SonarQube's scan both skip what Git ignores, so an ignore pattern can drop source
+  or tests from the required checks (Codex's review of #167). `.dockerignore` changes the image
+  build context and `.gitattributes` can name filters, so both stay human.
 - **`web-flow` with a human author is the human.** GitHub commits web-editor edits as `web-flow`
   (`GitHub <noreply@github.com>`) and signs them; the author is the human who made the edit.
 

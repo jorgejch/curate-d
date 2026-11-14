@@ -851,7 +851,7 @@ allowed. A server whose secret is unset MUST be unavailable for that run without
 ### Requirement: A repository auto-approve policy admits only bounded changes
 `.gitar/config/approve.md` on `dev` MUST let Gitar approve only a pull request into `dev` whose
 every changed file is documentation prose, a comment- or docstring-only code change, an added unit
-test, or an edit to `.editorconfig` or `.gitignore`, at low or medium risk, or that is an eligible
+test, or an edit to `.editorconfig`, at low or medium risk, or that is an eligible
 Dependabot update, at low or medium risk. Any other change, an unavailable or high risk assessment,
 or a criterion Gitar can't establish MUST leave the pull request unapproved.
 
@@ -879,9 +879,14 @@ or a criterion Gitar can't establish MUST leave the pull request unapproved.
 - **THEN** it is not approved, and Gitar names the risk
 
 #### Scenario: Editor configuration
-- **WHEN** a human's pull request adds or edits `.editorconfig` or `.gitignore` and nothing outside
-  the eligible categories, with no blocking finding and a low or medium risk assessment
+- **WHEN** a human's pull request adds or edits `.editorconfig` and nothing outside the eligible
+  categories, with no blocking finding and a low or medium risk assessment
 - **THEN** the policy allows approval, provided the organization criteria allow it too
+
+#### Scenario: Git ignore rules
+- **WHEN** a human's pull request edits `.gitignore`
+- **THEN** it is not approved, because Ruff and SonarQube skip what Git ignores, so a pattern can
+  drop files from the required checks
 
 #### Scenario: Docker build context
 - **WHEN** a human's pull request edits `.dockerignore`
@@ -954,6 +959,13 @@ Gitar can't compare MUST leave it unapproved, with the condition named.
   a low or medium risk assessment
 - **THEN** the policy allows approval, provided the organization criteria allow it too, with the
   update type taken from Dependabot's title
+
+#### Scenario: Grouped GitHub Actions update
+- **WHEN** Dependabot's `actions-patches-and-minors` pull request is titled with the group alone,
+  moves `anthropics/claude-code-action`, whose comment stays `# v1`, and its description reads
+  `Updates anthropics/claude-code-action from 1.0.264 to 1.0.268`
+- **THEN** the action's update type is taken from that line, a patch, and the update can be
+  eligible
 
 #### Scenario: GitHub Actions update of a tag-pinned action
 - **WHEN** Dependabot moves `actions/checkout@v7` to `actions/checkout@v8`
@@ -1144,12 +1156,14 @@ pull request stays without the label until someone adds it by hand.
 The `github-actions` entry of `.github/dependabot.yml` MUST set a `cooldown` of at least seven
 days, so a new action release is proposed, and can be auto-approved, only after it has been public
 for a week. No other entry sets a `cooldown` beyond Dependabot's default. The unit suite MUST fail
-when the `github-actions` cooldown is missing or shorter.
+when the `github-actions` cooldown is missing, or when its default or any per-update-type override
+is shorter.
 
 #### Scenario: New action release
 - **WHEN** an action used in a workflow publishes a patch
 - **THEN** Dependabot's version update for it opens no sooner than seven days after the release
 
 #### Scenario: Cooldown removed
-- **WHEN** the `github-actions` entry's `cooldown` is removed or set below seven days
+- **WHEN** the `github-actions` entry's `cooldown` is removed, or its `default-days` or any
+  `semver-major-days`, `semver-minor-days` or `semver-patch-days` is set below seven days
 - **THEN** the unit suite fails

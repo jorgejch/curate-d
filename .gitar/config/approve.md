@@ -89,8 +89,11 @@ pull request is category 4. Category 4 never combines with the others.
        major of `1` or more, of an action pinned to a full 40-character commit SHA before and after
        (`uses: owner/repo@<sha> # v1.2.3`). Take its versions from the `# v...` comments on the
        `uses:` line when both carry three numeric parts; otherwise, as when the comment stays
-       `# v1`, from Dependabot's title (`bump anthropics/claude-code-action from 1.0.268 to
-       1.0.271`). The pull request's author is `dependabot[bot]`, so the title is Dependabot's own.
+       `# v1`, from Dependabot's own text: the title of a single update (`bump
+       anthropics/claude-code-action from 1.0.268 to 1.0.271`), or, when a grouped title names
+       only the group, the action's `Updates` line in the description (`Updates
+       anthropics/claude-code-action from 1.0.264 to 1.0.268`). The pull request's author is
+       `dependabot[bot]`, so the title and description are Dependabot's own.
 
      The ecosystem is the one in the branch name (`dependabot/uv/...`, `dependabot/docker/...`,
      `dependabot/github_actions/...`). An action pinned to a tag or a branch (`@v7`, `@main`),
@@ -135,17 +138,18 @@ pull request is category 4. Category 4 never combines with the others.
 
    No other file may change. For a `uv` or `github-actions` minor, the required checks are the
    only test of compatibility: say so in the approval.
-5. **Editor and Git hygiene**: `.editorconfig` and `.gitignore` at the repository root. Neither
-   reaches the image, CI or the running system. Not `.dockerignore`, which decides what the image
-   build sees, and not `.gitattributes`, which can name filters and merge drivers.
+5. **Editor settings**: `.editorconfig` at the repository root. It reaches no check, the image
+   or the running system. Not `.gitignore`: Ruff and SonarQube skip what Git ignores, so an added
+   pattern can drop source or tests from the required checks. Not `.dockerignore`, which decides
+   what the image build sees, and not `.gitattributes`, which can name filters and merge drivers.
 
 Everything else needs a human, including, at least:
 
 - Executable code anywhere: `src/`, `migrations/`, `tests/local/`, scripts.
 - CI, build and infrastructure: `.github/`, `docker/`, `ops/`, `compose.yaml`,
   `compose.lifecycle.yaml`, `Makefile`, `alembic.ini`, `sonar-project.properties`,
-  `.dockerignore`, `.gitattributes`. An action's pinned commit in `.github/workflows/` is eligible
-  only in category 4.
+  `.gitignore`, `.dockerignore`, `.gitattributes`. An action's pinned commit in
+  `.github/workflows/` is eligible only in category 4.
 - Dependencies: `pyproject.toml` and `uv.lock` outside category 4, `.agents/skills/dbos-python`
   and `skills-lock.json`. The `docker/Dockerfile` `FROM` lines are eligible only in category 4.
 - Instructions to agents and reviewers: `CLAUDE.md` (and `AGENTS.md`, which links to it),
@@ -169,10 +173,10 @@ what would establish it. A pull request that is close to eligible is not eligibl
   under, state the risk rating, and state that the author and every commit's author and committer
   are human accounts, naming any commit whose committer is `web-flow`.
 - On approval under category 4, list each dependency with its old and new version, where each
-  version was read (the diff or Dependabot's title), and the update type those versions give,
-  state the risk rating, and state that no package was added to or removed from `uv.lock`. List
-  any dependency edge that changed in `uv.lock`. For a `uv` or `github-actions` minor, state that
-  no compatibility check other than the required checks applies.
+  version was read (the diff, or Dependabot's title or description), and the update type those
+  versions give, state the risk rating, and state that no package was added to or removed from
+  `uv.lock`. List any dependency edge that changed in `uv.lock`. For a `uv` or `github-actions`
+  minor, state that no compatibility check other than the required checks applies.
 - On refusal, name the first condition that refused it.
 - Never claim a test, lint or check ran or passed; Gitar runs none. The ruleset decides merge
   readiness.
@@ -218,6 +222,10 @@ Approve:
 - `dependabot[bot]` bumps `astral-sh/setup-uv` from `v10.3.3` to `v10.4.0`: the SHA and the
   `# v10.3.3` comment change on every `uses:` line of that action. A minor of a `1.0`-or-above
   action.
+- `dependabot[bot]` opens "bump the actions-patches-and-minors group with 2 updates":
+  `SonarSource/sonarqube-scan-action` from `8.4.0` to `8.4.1` by its comments, and
+  `anthropics/claude-code-action`, whose comment stays `# v1`, from `1.0.264` to `1.0.268` by its
+  `Updates` line in the description. Two patches.
 
 Refuse:
 
@@ -237,6 +245,8 @@ Refuse:
 - A maintainer's docs pull request that Gitar rates high: risk above medium.
 - A maintainer's docs pull request carries a fix commit from Gitar: carries a bot's commit.
 - A maintainer edits `.dockerignore`: it decides what the image build sees.
+- A maintainer adds `build/` to `.gitignore`: an ignore pattern can drop files from the required
+  checks.
 - A Dependabot pull request's description says `pypdf` moves to `6.21.1`, and the diff moves it to
   `6.22.0`: the description contradicts the diff.
 - `dependabot[bot]` bumps the `uv` image from `0.13.5` to `0.14.0`: a `docker` minor.
