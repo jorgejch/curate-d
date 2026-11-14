@@ -15,8 +15,8 @@ for both.
 
 ## 3. Integration (after 1 and 2)
 
-- [ ] 3.1 Run `make check` and `openspec validate --all --strict`
-- [ ] 3.2 Sync the delta into `openspec/specs/release-pipeline/spec.md` and archive in the same pull request
+- [x] 3.1 Run `make check` and `openspec validate --all --strict`
+- [x] 3.2 Sync the delta into `openspec/specs/release-pipeline/spec.md` and archive in the same pull request
 
 Apply streams 1 and 2 in parallel where more than one agent is available.
 

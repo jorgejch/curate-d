@@ -54,12 +54,10 @@ or a criterion Gitar can't establish MUST leave the pull request unapproved.
 
 ### Requirement: Bot-written pull requests are auto-approved only as eligible Dependabot updates
 The auto-approve policy MUST refuse a pull request opened by a bot or app account, or carrying a
-commit authored or committed by one, so a bot's change merges only after a human reads it. The one
-exception is an eligible Dependabot update. A commit a human authored in GitHub's web editor, which
-GitHub commits as its `web-flow` account, is the human's commit and MUST NOT refuse the pull
-request on that account. When the pull request author's identity can't be established, or,
-outside an eligible Dependabot update, a commit author's or committer's, the pull request MUST NOT
-be approved.
+commit authored or committed by one, except an eligible Dependabot update. A human's commit made in
+GitHub's web editor, committed as `web-flow`, is the human's. When the pull request author's
+identity can't be established, or, outside an eligible Dependabot update, a commit author's or
+committer's, the pull request MUST NOT be approved.
 
 #### Scenario: Pull request opened by @claude
 - **WHEN** `claude[bot]` opens a documentation-only pull request into `dev`
@@ -84,13 +82,10 @@ be approved.
 
 ### Requirement: Only bounded Dependabot updates are auto-approved
 The auto-approve policy MUST admit a Dependabot version or security update only when Dependabot
-opened it, no commit shown to Gitar is another account's, and each dependency whose version the
-diff changes is a `uv` patch, a `uv` minor whose old and new major are not `0`, a `docker` patch,
-or a `github-actions` patch, or minor whose old and new major are not `0`, of an action pinned to a
-full commit SHA before and after, judged from the diff's versions and, for an action whose diff
-shows no three-part version, from Dependabot's title. Any other update, any `dbos` update, an
-action pinned to a tag, or a version Gitar can't compare MUST leave it unapproved, with the
-condition named.
+opened it, no commit shown to Gitar is another account's, and each dependency the diff changes is a
+`uv` patch, a `docker` patch, a patch of an action pinned to a commit SHA, or a `uv` or pinned
+action minor whose old and new major are not `0`. Any other update, any `dbos` update, or a version
+Gitar can't compare MUST leave it unapproved, with the condition named.
 
 #### Scenario: Grouped Python patches
 - **WHEN** `dependabot[bot]` opens the `python-patches` group pull request into `dev`, whose diff
@@ -180,12 +175,10 @@ condition named.
 
 ### Requirement: An auto-approved Dependabot update changes only version references
 An eligible Dependabot pull request MUST change only the version references of the dependencies it
-updates: `uv.lock` and those dependencies' specifiers in `pyproject.toml`, the tag and digest of
-`FROM` lines in `docker/Dockerfile`, or an action's `uses:` commit SHA and trailing version comment
-in `.github/workflows/`. In `uv.lock`, an updated package's own `dependencies`,
-`optional-dependencies` and `dev-dependencies` lists MAY change when every name they list is a
-package locked both before and after. Any other change, or a lock file that adds or removes a
-package, MUST leave it unapproved, with the change named.
+updates: in `uv.lock` and `pyproject.toml`, in `docker/Dockerfile` `FROM` lines, or in an action's
+`uses:` ref and version comment. An updated package's dependency lists in `uv.lock` MAY change when
+every name they list is locked before and after. Any other change, or a lock file that adds or
+removes a package, MUST leave it unapproved, with the change named.
 
 #### Scenario: Lock file adds a package
 - **WHEN** a `uv` pull request's `uv.lock` diff adds a package that was not locked before
