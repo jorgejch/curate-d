@@ -15,8 +15,8 @@ from zoneinfo import ZoneInfo
 from PIL import Image, UnidentifiedImageError
 from pydantic import AwareDatetime, Field
 from pypdf import PdfReader
-from pypdf.errors import PdfReadError
 
+from curate_d.classification.pdf_errors import PDF_READ_ERRORS, log_unreadable
 from curate_d.content import perceptual  # noqa: F401 - registers the HEIF opener
 from curate_d.domain import DomainModel, GeoPoint
 
@@ -194,19 +194,21 @@ _TEXT_SAMPLE_CHARS: Final = 4000
 
 
 def pdf_metadata(handle: BinaryIO) -> EmbeddedMetadata:
-    """The information dictionary and leading text of a PDF. A broken PDF yields nothing."""
+    """The information dictionary and leading text of a PDF; a failure keeps what was read."""
     handle.seek(0)
+    info: Mapping[str, object] = {}
+    pages: int | None = None
+    sample = ""
     try:
         reader = PdfReader(handle)
-        info: Mapping[str, object] = reader.metadata or {}
+        info = reader.metadata or {}
         pages = len(reader.pages)
-        sample = ""
         for page in reader.pages[:3]:
             sample += page.extract_text() or ""
             if len(sample) >= _TEXT_SAMPLE_CHARS:
                 break
-    except (PdfReadError, OSError, ValueError, KeyError):
-        return EmbeddedMetadata()
+    except PDF_READ_ERRORS as error:
+        log_unreadable("metadata", error)
     finally:
         handle.seek(0)
     return EmbeddedMetadata(

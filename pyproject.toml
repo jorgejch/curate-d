@@ -58,7 +58,7 @@ dependencies = [
     "imagehash~=4.3",
     "numpy~=2.5",
     # Document text extraction for the local classification tier
-    "pypdf==6.21.4",
+    "pypdf==7.0.1",
     "pytesseract~=0.3.13", # requires the tesseract binary on PATH
     # Remote classification tier. OpenRouter exposes an OpenAI-compatible API,
     # so the model is selected by configuration rather than by client choice.
