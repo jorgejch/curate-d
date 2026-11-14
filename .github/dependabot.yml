@@ -37,6 +37,11 @@ updates:
       day: friday
       time: "16:00"
       timezone: America/Los_Angeles
+    # Gitar may auto-approve an action patch or minor pinned to a commit SHA, and a merged action
+    # runs in CI with the repository's secrets, so a release waits a week first. Security updates
+    # are not delayed by cooldown.
+    cooldown:
+      default-days: 7
     groups:
       actions-patches-and-minors:
         applies-to: version-updates
