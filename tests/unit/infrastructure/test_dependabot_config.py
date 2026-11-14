@@ -149,3 +149,12 @@ def _config_ignores() -> set[tuple[str, str, str]]:
 def test_approve_criteria_list_exactly_the_ignored_updates() -> None:
     """Gitar's review can't read dependabot.yml, so approve.md copies its ignore rules."""
     assert _approve_criteria_ignores() == _config_ignores()
+
+
+def test_action_updates_wait_a_week_and_nothing_else_sets_a_cooldown() -> None:
+    """A new action release waits a week before Dependabot proposes it; no other entry delays."""
+    cooldown = cast(Document, _entry("github-actions").get("cooldown", {}))
+    assert cast(int, cooldown.get("default-days", 0)) >= 7, cooldown
+    for entry in _entries():
+        if entry["package-ecosystem"] != "github-actions":
+            assert "cooldown" not in entry, entry["package-ecosystem"]
