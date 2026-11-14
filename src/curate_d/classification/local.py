@@ -20,9 +20,9 @@ import pytesseract
 from PIL import Image, UnidentifiedImageError
 from pydantic import Field
 from pypdf import PdfReader
-from pypdf.errors import DeprecationError, PdfReadError
 
 from curate_d.classification.deterministic import ClassificationInput, TierResult
+from curate_d.classification.pdf_errors import PDF_READ_ERRORS, log_unreadable
 from curate_d.domain import AuditValue, ClassificationTier, DomainModel, Facts, MediaKind
 
 type OcrEngine = Callable[[Image.Image], str]
@@ -82,8 +82,9 @@ def _ocr_pdf(handle: BinaryIO, ocr: OcrEngine) -> str:
             for embedded in page.images:
                 with Image.open(io.BytesIO(embedded.data)) as image:
                     text.append(ocr(image.convert("L")))
-    except (PdfReadError, DeprecationError, UnidentifiedImageError, OSError, ValueError, KeyError):
-        pass
+    except (*PDF_READ_ERRORS, UnidentifiedImageError) as error:
+        # Pages OCR'd before the failure still count; no text at all escalates to the remote tier.
+        log_unreadable("ocr", error)
     finally:
         handle.seek(0)
     return "\n".join(text)

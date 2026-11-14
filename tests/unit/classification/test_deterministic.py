@@ -6,7 +6,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
-from pypdf.errors import DeprecationError
+from pypdf.errors import DeprecationError, LimitReachedError
 
 from curate_d.classification.deterministic import (
     ClassificationInput,
@@ -173,6 +173,47 @@ def test_pdf_metadata_treats_deprecation_errors_as_unreadable(
     handle = io.BytesIO(b"%PDF-1.4")
     assert pdf_metadata(handle) == EmbeddedMetadata()
     assert handle.tell() == 0
+
+
+class _Page:
+    """A fake PDF page whose text extraction yields text or raises."""
+
+    def __init__(self, text: str | Exception) -> None:
+        self._text = text
+
+    def extract_text(self) -> str:
+        """Return the page's text, or raise the configured error."""
+        if isinstance(self._text, Exception):
+            raise self._text
+        return self._text
+
+
+def _fake_reader(pages: list[_Page]) -> object:
+    """Return a PdfReader stand-in over `pages` with a title in its information dictionary."""
+
+    class Reader:
+        metadata = {"/Title": "Kept"}  # noqa: RUF012 - read-only test double
+
+        def __init__(self, handle: object) -> None:
+            self.pages = pages
+
+    return Reader
+
+
+@pytest.mark.parametrize(
+    "error",
+    [DeprecationError("abbreviated filter"), LimitReachedError("image buffer")],
+)
+def test_pdf_metadata_keeps_what_was_read_before_a_page_fails(
+    monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    """A failure on a later page keeps the dictionary, page count and earlier text."""
+    reader = _fake_reader([_Page("first page text"), _Page(error)])
+    monkeypatch.setattr("curate_d.classification.metadata.PdfReader", reader)
+    result = pdf_metadata(io.BytesIO(b"%PDF-1.4"))
+    assert result.title == "Kept"
+    assert result.page_count == 2
+    assert result.text_sample == "first page text"
 
 
 def test_names_carry_dates_in_several_conventions() -> None:
