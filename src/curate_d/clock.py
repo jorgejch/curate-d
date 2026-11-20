@@ -10,5 +10,5 @@ def utc_now() -> datetime:
 
 def age_in_days(since: datetime) -> int:
     """Return how many whole days have passed since an instant."""
-    now = datetime.now()
+    now = datetime.now(UTC)
     return (now - since).days + 1
