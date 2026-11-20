@@ -5,10 +5,11 @@ import os
 import re
 import subprocess
 import sys
+from collections.abc import Callable
 from importlib.metadata import version
 
 import pytest
-from dbos import DBOS
+from dbos import DBOS, AsyncSQLAlchemyDatasource
 from sqlalchemy.engine import make_url
 
 from curate_d.config import DeploymentEnvironment, Settings
@@ -280,9 +281,28 @@ def test_a_build_revision_that_is_not_a_dev_tag_is_refused(revision: str) -> Non
         application_version("0.1.1", revision)
 
 
-def test_the_system_schema_migration_binding_still_exists() -> None:
-    """Pins the DBOS helper `migrations/env.py` calls; an upgrade that moves it fails here."""
-    from dbos import run_dbos_database_migrations
+def _assert_migrate_signature(migrate: Callable[[str], object], url_parameter: str) -> None:
+    """Assert that `migrate` takes the URL first and `schema` by keyword only."""
+    parameters = list(inspect.signature(migrate).parameters.values())
+    assert parameters[0].name == url_parameter
+    assert parameters[0].kind in {
+        inspect.Parameter.POSITIONAL_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+    }
+    schema = inspect.signature(migrate).parameters["schema"]
+    assert schema.kind is inspect.Parameter.KEYWORD_ONLY
 
-    parameters = inspect.signature(run_dbos_database_migrations).parameters
-    assert {"system_database_url", "schema"} <= parameters.keys()
+
+def test_the_system_schema_migration_binding_still_exists() -> None:
+    """Pins `DBOS.migrate` as `migrations/env.py` calls it; an upgrade that moves it fails here."""
+    _assert_migrate_signature(DBOS.migrate, "system_database_url")
+
+
+def test_the_tracking_table_migration_binding_still_exists() -> None:
+    """Pins the tracking-table migrate `migrations/env.py` calls; an upgrade that moves it fails."""
+    _assert_migrate_signature(AsyncSQLAlchemyDatasource.migrate, "database_url")
+
+
+def test_launch_only_verifies_the_system_schema() -> None:
+    """DBOS never migrates at launch: `migrations/env.py` is the only migrator."""
+    assert build_dbos_config(Settings(), executor_id="worker-1")["run_migrations"] is False

@@ -95,12 +95,11 @@ machine: no sibling-path lookups, no environment variable pointing at another ch
 Checks on deployment manifests or infrastructure code live in those repositories.
 `tests/unit/test_isolation.py` fails the build on a reference to one.
 
-That rule binds the code, not the agent. An agent that works on curate.d may read the two
-related repositories, `jorgejch/flux-ovh` (deployment manifests under `apps/curate-d/`,
-cluster operators under `clusters/ovh/`) and `jorgejch/ovh-infra-terraform` (cluster, node
-pools, buckets and IAM), and may open pull requests against their `main` branches when a
-curate.d change needs a matching infrastructure change. Changes there land through a pull
-request, never a direct push.
+That rule binds the code, not the agent. An agent that works on curate.d may read the
+related deployment and infrastructure repositories that the maintainer names (deployment
+manifests, cluster operators, and cluster, node pool, bucket and IAM definitions). It may
+open pull requests against their default branches when a curate.d change needs a matching
+infrastructure change. Changes there land through a pull request, never a direct push.
 
 ## DBOS
 
@@ -125,6 +124,12 @@ how it is made idempotent, whether it belongs in a workflow — against the `dbo
   `dbos_app.configure`: DBOS attaches its log handler at construction, so DBOS constructed
   first still runs but exports no DBOS log lines. The `dbos[otel]` extra supplies that
   handler. This is a setting the skill lists, not a departure.
+- `build_dbos_config` and `create_ledger_datasource` set `run_migrations=False`, so
+  `DBOS.launch()` and the datasource only verify their schemas. `migrations/env.py` is the
+  only migrator of the DBOS system schema and the datasource tracking table, under the
+  migration lock (`runtime/lease.py`, `migration_lock_key`). A `dbos` package bump therefore
+  needs `make migrate` before its workers start, or launch fails with
+  `DBOSInitializationError`. This is a setting the skill lists, not a departure.
 - Workflow IDs are deterministic (`runtime/workflow_ids.py`) so duplicate enqueues
   collapse. Don't substitute random IDs.
 - The DBOS system tables live in the ledger database (schema `dbos`), and separating them
@@ -148,7 +153,8 @@ how it is made idempotent, whether it belongs in a workflow — against the `dbo
   DBOS's documented tables by raw SQL. That is a schema dependency, not a private API:
   re-check it on every DBOS upgrade (`tests/integration/test_workflow_views.py`,
   `test_migrations.py`). Those migrations need the DBOS system schema, so
-  `migrations/env.py` brings it up to date before Alembic's own migrations run. The
+  `migrations/env.py` brings it up to date under the migration lock, before Alembic's own
+  migrations run. The
   workflow-history prune itself goes through the public `list_workflows` and
   `delete_workflows`; it re-reads each batch's status before deleting it, and since a
   delete has no read-back, the re-read→delete window is a documented gap

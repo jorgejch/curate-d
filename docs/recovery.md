@@ -98,8 +98,26 @@ Alert on these events:
   running, and on an I/O worker idle cleanup has stopped. Nothing restarts the worker: delete
   the pod that logged it (`kubectl -n <namespace> delete pod <pod>`), which restarts it
   through staging readiness, then find the cause in its logs.
+- `migration.lock_timeout`: an `alembic upgrade` or `alembic downgrade` waited
+  `CURATE_D_MIGRATION_LOCK_TIMEOUT_SECONDS` seconds for the migration lock and gave up. It
+  exits `3` and changes nothing. Find the holder the event names (its pid, application name,
+  address and backend start) and let it finish or end its session, then run the migration
+  again. If the holder is a long migration, raise the setting instead.
+- `migration.lock_lost`: the session holding the migration lock ended before the run finished.
+  The run turns the server's idle-session timeouts off on that session, so the cause is a
+  pooler that swapped the backend, an operator, a reset or a network failure. The
+  DBOS system-schema and tracking-table steps run on connections of their own, so the one in
+  flight finished without the lock, and another run may have taken the lock meanwhile; the
+  event names the step. The run exits `4` and applied no ledger revision. Run the migration
+  again: both DBOS steps are idempotent. Then find why the session ended; a pooler cause
+  shows under [Connection pooling](#connection-pooling).
 
-Logged at ERROR or above, not alerted on, because the restart that follows repairs them:
+Logged, not alerted on, because they need no action or the restart that follows repairs
+them:
+
+- `migration.schema_ahead` (WARNING): an `alembic upgrade` found the database at a revision
+  its build does not know, so a newer build migrated it. It changed nothing and exited `0`.
+  This is the expected path of a rollback onto a newer, backward-compatible schema.
 
 - `executor_lease.lost` and `worker.lease_lost_exiting` (CRITICAL): a worker's lease monitor,
   which polls every 5 s, found its lease session no longer holding every lock, or broken. The
@@ -117,14 +135,19 @@ The recovery machinery holds session-level advisory locks on connections the app
 itself through `runtime/lease.py`: the executor lease (every worker), the version lease and
 promotion fence (`runtime/version_lease.py`, workers and the sweep), and the schedule
 authority (`runtime/schedule_authority.py`, each I/O worker at startup and then every
-`schedule_reconciliation_interval_seconds`, default 600 s, from `worker/schedules.py`).
+`schedule_reconciliation_interval_seconds`, default 600 s, from `worker/schedules.py`). The
+migration lock (`migration_lock_key` in `runtime/lease.py`) is one more session lock: every
+online `alembic upgrade` or `alembic downgrade` holds it on Alembic's own connection while it
+migrates.
 
 A session lock lives only on one pinned server connection. A transaction-mode pooler, as
 PgBouncer defaults to, swaps the server connection between statements. The lock is taken on
 one backend and the next statement runs on another, so probes report the lock lost, the
 unlock misses it, and the orphaned lock blocks that key until the pooler recycles the
 backend. You would see `recovery_sweep.version_lock_lost`,
-`worker.schedule_reconciliation_unverified` and executor-lease loss at startup.
+`worker.schedule_reconciliation_unverified`, executor-lease loss at startup,
+`migration.lock_lost` from a migration whose lock probe ran on another backend, and
+`migration.lock_timeout` from a migration that waits on an orphaned migration lock.
 
 The ledger database URL must therefore reach PostgreSQL directly or through a session-mode
 pooler. That pooler must also:
@@ -205,6 +228,25 @@ the container's `env` in the `jq` filter.
   `PUT` is checked against the taxonomy in force, so it is refused while that taxonomy does not
   read.
 
+**Schema migration before the workers.** Workers verify the DBOS system schema and the
+datasource tracking table, and never migrate them: `build_dbos_config` and
+`create_ledger_datasource` set `run_migrations=False`. `alembic upgrade head`
+(`migrations/env.py`) is the one migrator of the DBOS system schema, the tracking table and
+the ledger revisions. It must therefore run before a build's workers start. The deployment
+decides what runs it: an init container on every pod, a release job or a hand step. Each of
+these is safe, alone or together, because concurrent runs wait for the migration lock.
+Locally, `make stack-up` runs it as the compose `migrate` service before the API and the workers
+start; by hand and in a breaking deploy it is `make migrate`.
+
+- A `dbos` package bump is a migration in this sense. Without the migration, the new workers
+  fail launch with `DBOSInitializationError` and restart until it has run.
+- A worker also needs the ledger revisions before launch: it registers its version in
+  `lease_versions` first.
+- A rollback onto a newer schema works only while that schema stays backward compatible with
+  the older build. The older build's `alembic upgrade head` then logs
+  `migration.schema_ahead`, changes nothing and exits `0`, and its workers accept the newer
+  DBOS schema. A breaking migration follows Breaking deploys and its own rollback boundary.
+
 **Pickled rows across a deploy.** DBOS pickles workflow inputs and step outputs, so a row
 written by the build being replaced reaches the new one whenever the recovery sweep forks it
 across versions, and a fork copies every completed step's output. A deploy is blue-green with
@@ -268,7 +310,8 @@ use the client of the Kill switch (Triage).
       in flight.
    4. Stop the old workers and the API. Run `alembic upgrade head` from the new image
       against the target database (`make migrate` from a checkout of the new build; the
-      image has no `make`).
+      image has no `make`). Several instances may run it at once: one migrates, the rest
+      wait for the migration lock, then find the schema current and exit 0.
    5. Roll out the new build, then resume both schedules (`dbos.resume_schedule(...)`). The
       migration empties `destination_checks`; the first `check-destinations` cycle refills it.
 

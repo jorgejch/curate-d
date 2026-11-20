@@ -95,7 +95,10 @@ Each pod in `<namespace>` across the phases of `reset-environment.sh dev --execu
   off. Phase 6 scales them back to the recorded counts and removes the annotations.
 - **Wipe and migrate.** The reset pod is built from the I/O worker's pod template. It refuses
   while a worker still holds its executor lease, ends every other database session the
-  application role holds (any connection pooler's included), then wipes and migrates.
+  application role holds (any connection pooler's included), then wipes and migrates. The
+  migration takes the migration lock, as every `alembic upgrade` does. Ending the other
+  sessions also ends a migration that runs at that moment: it rolls back, exits non-zero and
+  must be run again.
 - **Restart infrastructure.** The pooler restarts so it drops server connections and prepared
   statements that point at dropped objects, then the egress proxy, if one is configured. The
   database is never restarted: the wipe is plain SQL and does not need it.

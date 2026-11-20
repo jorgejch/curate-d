@@ -100,6 +100,9 @@ def system_database_url(settings: Settings) -> str:
 def build_dbos_config(settings: Settings, *, executor_id: str | None = None) -> DBOSConfig:
     """Return the configuration a worker launches DBOS with.
 
+    Launch verifies the system schema and never migrates it: `migrations/env.py` is the
+    only migrator, so a schema behind this DBOS version fails launch.
+
     Args:
         settings: Application settings.
         executor_id: Recovery identity; resolved from the environment when omitted.
@@ -121,6 +124,10 @@ def build_dbos_config(settings: Settings, *, executor_id: str | None = None) -> 
         # `dbos.*` attribute names (dbos.operation.workflow_id, dbos.executor.id, ...)
         # rather than the legacy camelCase ones.
         otel_attribute_format="semconv",
+        # Verify only: `migrations/env.py` migrates the system schema, under its lock, as
+        # the only migrator. A schema behind this build fails launch with
+        # DBOSInitializationError; one ahead of it is accepted.
+        run_migrations=False,
     )
 
 
