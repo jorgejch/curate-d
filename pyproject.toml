@@ -34,7 +34,7 @@ dependencies = [
     # The `otel` extra supplies opentelemetry-instrumentation-logging: DBOS attaches its
     # log handler from it at construction when `enable_otlp` is on and Logfire has
     # installed a logger provider, and fails to construct without it.
-    "dbos[otel]==3.5.0",
+    "dbos[otel]==3.6.0",
     "sqlalchemy~=2.1.1",
     "psycopg[binary]~=3.3.9",
     "alembic~=1.20",
